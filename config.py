@@ -3,21 +3,37 @@ VcaniTrade AI - Configuration
 Safety-first trading configuration with strict defaults
 """
 
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
-DRY_RUN = True  # Paper trading only - NEVER changes to False without explicit user action
-MAX_DAILY_LOSS = 100.00  # Maximum loss per day in account currency
-MAX_OPEN_POSITIONS = 3  # Maximum concurrent trades
-COOLDOWN_AFTER_STOP = 300  # Seconds to wait after hitting stop loss (5 min)
+DRY_RUN = (
+    os.getenv("DRY_RUN", "True").lower() == "true"
+)  # Paper trading only - NEVER changes to False without explicit user action
+MAX_DAILY_LOSS = float(
+    os.getenv("MAX_DAILY_LOSS", "100.00")
+)  # Maximum loss per day in account currency
+MAX_OPEN_POSITIONS = int(
+    os.getenv("MAX_OPEN_POSITIONS", "3")
+)  # Maximum concurrent trades
+COOLDOWN_AFTER_STOP = int(
+    os.getenv("COOLDOWN_AFTER_STOP", "300")
+)  # Seconds to wait after hitting stop loss (5 min)
 KILL_SWITCH = False  # Emergency stop - halts all trading immediately
 
 # ===== TRADING MODE =====
 # TEACHER_MODE: Show signals overlay but don't execute (manual trading)
 # AUTO_MODE: AI executes trades automatically (requires DRY_RUN=False)
-TEACHER_MODE = True  # Default to teacher mode for safety
+TEACHER_MODE = (
+    os.getenv("TEACHER_MODE", "True").lower() == "true"
+)  # Default to teacher mode for safety
 
 # ===== LLM CONFIGURATION =====
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "llama3"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 LLM_TIMEOUT = 10  # Seconds before LLM request times out
 JSON_OUTPUT = True  # Force strict JSON output from LLM
 
@@ -32,10 +48,16 @@ HOTKEY_SELL = "<ctrl>+s"  # Sell order hotkey
 HOTKEY_CLOSE = "<ctrl>+x"  # Close position hotkey
 
 # ===== UI CONFIGURATION =====
-OVERLAY_ALPHA = 0.15  # Transparency level for HUD overlay (0.0-1.0)
-OVERLAY_UPDATE_MS = 2000  # Overlay refresh rate in milliseconds
-SHOW_REASONING = True  # Display AI reasoning in overlay
+OVERLAY_ALPHA = float(
+    os.getenv("OVERLAY_ALPHA", "0.15")
+)  # Transparency level for HUD overlay (0.0-1.0)
+OVERLAY_UPDATE_MS = int(
+    os.getenv("OVERLAY_UPDATE_MS", "2000")
+)  # Overlay refresh rate in milliseconds
+SHOW_REASONING = (
+    os.getenv("SHOW_REASONING", "True").lower() == "true"
+)  # Display AI reasoning in overlay
 
 # ===== LOGGING =====
-LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # DEBUG, INFO, WARNING, ERROR
 LOG_FILE = "vcani_trade.log"

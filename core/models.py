@@ -25,18 +25,26 @@ class ConfidenceLevel(str, Enum):
 
 class LLMAnalysisOutput(BaseModel):
     """Strict JSON schema for LLM analysis output"""
-    action: SignalAction = Field(..., description="Trading action: BUY, SELL, HOLD, or CLOSE")
+
+    action: SignalAction = Field(
+        ..., description="Trading action: BUY, SELL, HOLD, or CLOSE"
+    )
     asset: str = Field(..., description="Asset symbol being analyzed")
-    confidence: ConfidenceLevel = Field(..., description="Confidence level of the signal")
+    confidence: ConfidenceLevel = Field(
+        ..., description="Confidence level of the signal"
+    )
     entry_price: Optional[float] = Field(None, description="Recommended entry price")
     stop_loss: Optional[float] = Field(None, description="Stop loss price")
     take_profit: Optional[float] = Field(None, description="Take profit price")
-    reason: str = Field(..., max_length=200, description="Brief explanation of the signal")
+    reason: str = Field(
+        ..., max_length=200, description="Brief explanation of the signal"
+    )
     timestamp: Optional[str] = Field(None, description="ISO timestamp of analysis")
 
 
 class TradeRecord(BaseModel):
     """Trade ledger record for performance tracking"""
+
     id: str = Field(default_factory=lambda: f"trade_{datetime.utcnow().timestamp()}")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     asset: str
@@ -55,6 +63,7 @@ class TradeRecord(BaseModel):
 
 class SafetyState(BaseModel):
     """Current safety control state"""
+
     kill_switch_active: bool = False
     daily_pnl: float = 0.0
     daily_loss_limit_hit: bool = False
@@ -65,7 +74,7 @@ class SafetyState(BaseModel):
     def update_trade_ability(self):
         """Update whether trading is allowed based on safety rules"""
         import config
-        
+
         self.can_trade = (
             not self.kill_switch_active
             and not self.daily_loss_limit_hit
@@ -78,6 +87,7 @@ class SafetyState(BaseModel):
 
 class MarketDataPoint(BaseModel):
     """Market data for analysis"""
+
     asset: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     price: float
@@ -91,6 +101,7 @@ class MarketDataPoint(BaseModel):
 
 class OverlaySignal(BaseModel):
     """Data to display on transparent overlay"""
+
     asset: str
     action: SignalAction
     confidence: ConfidenceLevel
@@ -99,7 +110,7 @@ class OverlaySignal(BaseModel):
     take_profit: Optional[float] = None
     reason: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
-    
+
     def get_color_code(self) -> str:
         """Get color based on action"""
         if self.action == SignalAction.BUY:
@@ -108,3 +119,41 @@ class OverlaySignal(BaseModel):
             return "#FF0000"  # Red
         else:
             return "#FFA500"  # Orange for HOLD/CLOSE
+
+
+class SwarmAgentBrief(BaseModel):
+    """Brief output from a single swarm agent"""
+
+    agent: str  # "Technical Sniper" | "Macro Analyst" | "Risk Manager"
+    action: Optional[str] = Field(
+        None,
+        description="BUY/SELL/HOLD for Sniper, BULLISH/BEARISH/NEUTRAL for Macro",
+    )
+    conviction: str = Field(..., description="LOW|MEDIUM|HIGH|VERY_HIGH")
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    brief: str = Field(
+        ..., max_length=300, description="Agent's analysis in under 80 words"
+    )
+    risk_events: list[str] = Field(
+        default_factory=list, description="Upcoming risk events (Macro Analyst only)"
+    )
+    verdict: Optional[str] = Field(
+        None, description="APPROVE|ABORT (Risk Manager only)"
+    )
+    max_risk_pct: Optional[float] = Field(
+        None, description="Max position risk % (Risk Manager only)"
+    )
+
+
+class DebateTranscript(BaseModel):
+    """Full debate transcript for UI display"""
+
+    asset: str
+    technical_sniper: SwarmAgentBrief
+    macro_analyst: SwarmAgentBrief
+    risk_manager: SwarmAgentBrief
+    ceo_verdict: str = Field(..., description="CEO's final one-line verdict")
+    ceo_full_statement: str = Field(..., description="CEO's full reasoning")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
