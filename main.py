@@ -35,7 +35,12 @@ from core.trade_engine import TradeEngine
 from core.grader import Grader
 from core.watchtower import WatchtowerScanner
 from core.vision_engine import VisionCapture
-from ui.dashboard import CommandCenter, TradingOverlay
+from ui.dashboard import (
+    CommandCenter,
+    TradingOverlay,
+    CalibrationWizardDialog,
+    VisionTestDialog,
+)
 
 # Setup logging
 logging.basicConfig(
@@ -190,6 +195,9 @@ class VcaniTradeApp:
         # Command Center
         self.cmd.mode_changed.connect(self._on_mode_changed)
         self.cmd.kill_switch_triggered.connect(self._on_kill_switch)
+        self.cmd.calibration_requested.connect(self._on_calibrate)
+        self.cmd.vision_test_requested.connect(self._on_test_vision)
+        self.cmd.calibration_reset_requested.connect(self._on_reset_calibration)
 
         # Market scanner → Analysis worker
         self.market_scanner.data_ready.connect(self._on_market_data)
@@ -200,6 +208,9 @@ class VcaniTradeApp:
 
         # Analysis worker → Trade engine + UI
         self.analysis_worker.analysis_complete.connect(self._on_analysis_complete)
+
+        # Update calibration status on startup
+        self._refresh_calibration_status()
 
     def _on_market_data(self, market_data: MarketDataPoint):
         """Queue market data for Swarm analysis."""
@@ -274,6 +285,48 @@ class VcaniTradeApp:
         self.market_scanner.stop()
         self.watchtower.stop()
         logger.critical("Kill switch activated — all systems halted")
+
+    def _on_calibrate(self):
+        """Open the RPA Coordinate Mapper wizard."""
+        dialog = CalibrationWizardDialog(self.cmd)
+        dialog.calibration_complete.connect(self._refresh_calibration_status)
+        dialog.exec()
+
+    def _on_test_vision(self):
+        """Capture a screenshot and display it for sanity check."""
+        if not self.analysis_worker.vision:
+            self.cmd.log("Vision Engine not available — cannot test")
+            return
+
+        screenshot = self.analysis_worker.vision.capture_chart(asset="TEST")
+        if screenshot:
+            self.cmd.log(
+                f"Vision test: captured {screenshot.dimensions[0]}x{screenshot.dimensions[1]} "
+                f"({screenshot.file_size_estimate_kb:.0f}KB)"
+            )
+            preview = VisionTestDialog(screenshot._resize_for_vlm(), self.cmd)
+            preview.show()
+        else:
+            self.cmd.log("Vision test failed — screenshot capture error")
+
+    def _on_reset_calibration(self):
+        """Reset all RPA calibration data."""
+        from core.calibration import CalibrationManager
+
+        cal = CalibrationManager()
+        cal.reset()
+        self._refresh_calibration_status()
+        self.cmd.log("Calibration reset — all coordinates cleared")
+
+    def _refresh_calibration_status(self):
+        """Update the calibration status label in the UI."""
+        from core.calibration import CalibrationManager
+
+        cal = CalibrationManager()
+        status = cal.get_calibration_status()
+        done = sum(1 for v in status.values() if v)
+        total = len(status)
+        self.cmd.update_calibration_status(cal.is_calibrated(), done, total)
 
     def run(self):
         """Start the application."""

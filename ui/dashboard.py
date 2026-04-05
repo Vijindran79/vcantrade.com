@@ -179,6 +179,9 @@ class CommandCenter(QWidget):
     mode_changed = pyqtSignal(str)  # "TEACHER" or "AUTONOMOUS"
     paper_toggled = pyqtSignal(bool)  # True = paper, False = live
     kill_switch_triggered = pyqtSignal()
+    calibration_requested = pyqtSignal()
+    vision_test_requested = pyqtSignal()
+    calibration_reset_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -225,6 +228,9 @@ class CommandCenter(QWidget):
 
         # ── System Status Bar ──────────────────────────────────────
         root.addWidget(self._build_status_bar())
+
+        # ── Calibration & Debug Tools ──────────────────────────────
+        root.addWidget(self._build_tools_panel())
 
         # ── Swarm Terminal ─────────────────────────────────────────
         self.terminal = SwarmTerminal()
@@ -339,6 +345,93 @@ class CommandCenter(QWidget):
         layout.addWidget(self.status_rpa)
 
         return container
+
+    def _build_tools_panel(self) -> QWidget:
+        """Calibration, Vision Test, and debug tools."""
+        container = QFrame()
+        container.setStyleSheet(
+            f"background-color: {BG_PANEL}; border: 1px solid {BORDER}; "
+            f"border-radius: 8px; padding: 8px 10px;"
+        )
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(8)
+
+        label = QLabel("TOOLS:")
+        label.setStyleSheet(
+            f"color: {GRAY}; font-size: 11px; font-weight: bold; font-family: 'Consolas', monospace;"
+        )
+        layout.addWidget(label)
+
+        self.btn_calibrate = QPushButton("Calibrate RPA")
+        self.btn_calibrate.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BG_INPUT}; color: {CYAN};
+                font-size: 11px; border: 1px solid {BORDER};
+                border-radius: 4px; padding: 4px 10px;
+                font-family: 'Consolas', monospace;
+            }}
+            QPushButton:hover {{ background-color: {BORDER}; }}
+        """)
+        self.btn_calibrate.clicked.connect(self._on_calibrate)
+        layout.addWidget(self.btn_calibrate)
+
+        self.btn_vision_test = QPushButton("Test Vision")
+        self.btn_vision_test.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BG_INPUT}; color: {ORANGE};
+                font-size: 11px; border: 1px solid {BORDER};
+                border-radius: 4px; padding: 4px 10px;
+                font-family: 'Consolas', monospace;
+            }}
+            QPushButton:hover {{ background-color: {BORDER}; }}
+        """)
+        self.btn_vision_test.clicked.connect(self._on_test_vision)
+        layout.addWidget(self.btn_vision_test)
+
+        self.btn_reset_cal = QPushButton("Reset Cal.")
+        self.btn_reset_cal.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BG_INPUT}; color: {GRAY};
+                font-size: 11px; border: 1px solid {BORDER};
+                border-radius: 4px; padding: 4px 10px;
+                font-family: 'Consolas', monospace;
+            }}
+            QPushButton:hover {{ background-color: {BORDER}; }}
+        """)
+        self.btn_reset_cal.clicked.connect(self._on_reset_calibration)
+        layout.addWidget(self.btn_reset_cal)
+
+        layout.addStretch()
+
+        self.cal_status = QLabel("RPA: Not calibrated")
+        self.cal_status.setStyleSheet(
+            f"color: {ORANGE}; font-size: 10px; font-family: 'Consolas', monospace;"
+        )
+        layout.addWidget(self.cal_status)
+
+        return container
+
+    def _on_calibrate(self):
+        self.calibration_requested.emit()
+
+    def _on_test_vision(self):
+        self.vision_test_requested.emit()
+
+    def _on_reset_calibration(self):
+        self.calibration_reset_requested.emit()
+
+    def update_calibration_status(self, calibrated: bool, points_done: int, total: int):
+        if calibrated:
+            self.cal_status.setText(f"RPA: Calibrated ({points_done}/{total})")
+            self.cal_status.setStyleSheet(
+                f"color: {GREEN}; font-size: 10px; font-family: 'Consolas', monospace;"
+            )
+        else:
+            self.cal_status.setText(f"RPA: {points_done}/{total} calibrated")
+            self.cal_status.setStyleSheet(
+                f"color: {ORANGE}; font-size: 10px; font-family: 'Consolas', monospace;"
+            )
 
     def _build_ceo_banner(self) -> QFrame:
         """Prominent CEO verdict display."""
@@ -476,6 +569,33 @@ class CommandCenter(QWidget):
     def _set_auto_mode(self):
         if self._killed:
             return
+
+        # Safe Boot warning — one-time confirmation before arming RPA
+        from PyQt6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.warning(
+            self,
+            "WARNING: RPA Armed",
+            "RPA Armed. VcanTrade will take control of your mouse.\n\n"
+            "Press [ESC] at any time to trigger the Emergency Kill Switch.\n\n"
+            "Do you wish to proceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            self.terminal.log("Autonomous mode cancelled by user")
+            # Revert UI back to Teacher
+            self.btn_teacher.setChecked(True)
+            self.btn_auto.setChecked(False)
+            self.btn_teacher.setStyleSheet(self._btn_teacher_style(True))
+            self.btn_auto.setStyleSheet(self._btn_auto_style(False))
+            self.mode_badge.setText("TEACHER")
+            self.mode_badge.setStyleSheet(
+                f"color: {CYAN}; font-size: 11px; font-weight: bold; font-family: 'Consolas', monospace;"
+            )
+            return
+
         self._mode = "AUTONOMOUS"
         self.btn_auto.setChecked(True)
         self.btn_teacher.setChecked(False)
@@ -625,8 +745,268 @@ class CommandCenter(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# TradingOverlay — transparent, click-through HUD above trading charts
+# CalibrationWizardDialog — step-by-step RPA coordinate mapper
 # ---------------------------------------------------------------------------
+
+
+class CalibrationWizardDialog(QWidget):
+    """
+    Interactive calibration dialog.
+    Guides user through clicking each broker UI element to record coordinates.
+    """
+
+    calibration_complete = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from core.calibration import CalibrationManager, CalibrationWizard
+
+        self.manager = CalibrationManager()
+        self.wizard = CalibrationWizard(self.manager)
+        self.current_point = None
+
+        self._setup_window()
+        self._build_ui()
+        self._load_next_step()
+
+    def _setup_window(self):
+        self.setWindowTitle("RPA Coordinate Mapper — Calibration")
+        self.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.resize(480, 320)
+        self.setStyleSheet(f"background-color: {BG_DARK};")
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel("RPA Coordinate Mapper")
+        title.setStyleSheet(
+            f"color: {CYAN}; font-size: 18px; font-weight: bold; "
+            f"font-family: 'Segoe UI', sans-serif;"
+        )
+        layout.addWidget(title)
+
+        self.instruction = QLabel("")
+        self.instruction.setStyleSheet(
+            f"color: {WHITE}; font-size: 14px; font-family: 'Segoe UI', sans-serif; "
+            f"padding: 12px; background-color: {BG_PANEL}; border-radius: 6px;"
+        )
+        self.instruction.setWordWrap(True)
+        layout.addWidget(self.instruction)
+
+        self.coords_display = QLabel("")
+        self.coords_display.setStyleSheet(
+            f"color: {GREEN}; font-size: 12px; font-family: 'Consolas', monospace; "
+            f"padding: 8px;"
+        )
+        layout.addWidget(self.coords_display)
+
+        # Progress bar
+        self.progress = QLabel("")
+        self.progress.setStyleSheet(
+            f"color: {GRAY}; font-size: 11px; font-family: 'Consolas', monospace;"
+        )
+        layout.addWidget(self.progress)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+
+        self.btn_capture = QPushButton("Capture Position (Space)")
+        self.btn_capture.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {CYAN}; color: #000; font-weight: bold;
+                font-size: 13px; border-radius: 4px; padding: 8px 20px;
+                font-family: 'Consolas', monospace;
+            }}
+            QPushButton:hover {{ background-color: #00B8D4; }}
+        """)
+        self.btn_capture.clicked.connect(self._capture_position)
+        btn_layout.addWidget(self.btn_capture)
+
+        self.btn_skip = QPushButton("Skip")
+        self.btn_skip.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BG_INPUT}; color: {GRAY};
+                font-size: 12px; border: 1px solid {BORDER};
+                border-radius: 4px; padding: 8px 16px;
+                font-family: 'Consolas', monospace;
+            }}
+        """)
+        self.btn_skip.clicked.connect(self._skip_point)
+        btn_layout.addWidget(self.btn_skip)
+
+        btn_layout.addStretch()
+
+        self.btn_done = QPushButton("Done")
+        self.btn_done.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {GREEN}; color: #000; font-weight: bold;
+                font-size: 13px; border-radius: 4px; padding: 8px 20px;
+                font-family: 'Consolas', monospace;
+            }}
+        """)
+        self.btn_done.clicked.connect(self._finish)
+        self.btn_done.hide()
+        btn_layout.addWidget(self.btn_done)
+
+        layout.addLayout(btn_layout)
+
+    def _load_next_step(self):
+        """Load the next uncalibrated point."""
+        next_point = self.wizard.get_next_uncalibrated()
+        if next_point is None:
+            self._show_complete()
+            return
+
+        self.current_point = next_point
+        label = self.wizard.POINT_LABELS.get(next_point, next_point)
+        done = sum(
+            1 for p in self.wizard.manager.get_calibration_status().values() if p
+        )
+        total = len(self.wizard.manager.get_calibration_status())
+
+        self.instruction.setText(
+            f"Step {done + 1}/{total}\n\n"
+            f"Move your mouse over the element below, then click Capture.\n\n"
+            f"→ {label}"
+        )
+        self.progress.setText(f"Calibrated: {done}/{total} points")
+
+    def _capture_position(self):
+        """Capture current mouse position for the current point."""
+        if not self.current_point:
+            return
+
+        x, y = self.wizard.capture_current_position(self.current_point)
+        self.coords_display.setText(f"Captured: {self.current_point} = ({x}, {y})")
+        self.wizard.manager.save()
+
+        # Brief visual feedback
+        self.btn_capture.setText("Captured!")
+        self.btn_capture.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {GREEN}; color: #000; font-weight: bold;
+                font-size: 13px; border-radius: 4px; padding: 8px 20px;
+                font-family: 'Consolas', monospace;
+            }}
+        """)
+
+        # Auto-advance after short delay
+        QTimer.singleShot(800, self._advance)
+
+    def _skip_point(self):
+        """Skip the current point (leave at 0,0)."""
+        self.coords_display.setText(f"Skipped: {self.current_point}")
+        QTimer.singleShot(500, self._advance)
+
+    def _advance(self):
+        """Reset button style and load next step."""
+        self.btn_capture.setText("Capture Position (Space)")
+        self.btn_capture.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {CYAN}; color: #000; font-weight: bold;
+                font-size: 13px; border-radius: 4px; padding: 8px 20px;
+                font-family: 'Consolas', monospace;
+            }}
+            QPushButton:hover {{ background-color: #00B8D4; }}
+        """)
+        self.coords_display.setText("")
+        self._load_next_step()
+
+    def _show_complete(self):
+        """Show calibration complete message."""
+        self.current_point = None
+        calibrated = self.wizard.manager.is_calibrated()
+
+        self.instruction.setText(
+            "Calibration Complete!\n\n"
+            f"All coordinates saved to calibration.json\n"
+            f"RPA Executor will use these positions for mouse-based execution."
+            if calibrated
+            else "Calibration finished with some skipped points.\n"
+            f"You can re-run calibration later to fill in gaps."
+        )
+        self.progress.setText("")
+        self.coords_display.setText("")
+        self.btn_capture.hide()
+        self.btn_skip.hide()
+        self.btn_done.show()
+
+    def _finish(self):
+        self.calibration_complete.emit()
+        self.close()
+
+    def keyPressEvent(self, event):
+        """Space bar = capture position."""
+        if event.key() == Qt.Key.Key_Space:
+            self._capture_position()
+        elif event.key() == Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# VisionTestDialog — displays captured screenshot for sanity check
+# ---------------------------------------------------------------------------
+
+
+class VisionTestDialog(QWidget):
+    """
+    Shows the exact 640x480 screenshot that would be sent to the VLM.
+    Lets the user verify the chart isn't cut off or obscured.
+    """
+
+    def __init__(self, image, parent=None):
+        super().__init__(parent)
+        self._setup_window(image)
+
+    def _setup_window(self, image):
+        self.setWindowTitle("Vision Engine — Screenshot Preview")
+        self.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+
+        from PyQt6.QtGui import QPixmap
+        from PyQt6.QtCore import QByteArray
+        import io
+
+        # Convert PIL Image to QPixmap
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        pixmap = QPixmap()
+        pixmap.loadFromData(QByteArray(buffer.getvalue()))
+
+        # Label to display image
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        img_label = QLabel()
+        img_label.setPixmap(pixmap)
+        img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(img_label)
+
+        info = QLabel(
+            f"Size: {image.size[0]}x{image.size[1]}  |  "
+            f"This is exactly what moondream will see."
+        )
+        info.setStyleSheet(
+            f"color: {GRAY}; font-size: 11px; font-family: 'Consolas', monospace; "
+            f"padding: 6px; text-align: center;"
+        )
+        info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(info)
+
+        self.resize(image.size[0] + 16, image.size[1] + 60)
 
 
 class TradingOverlay(QWidget):
