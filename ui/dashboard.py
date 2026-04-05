@@ -182,6 +182,7 @@ class CommandCenter(QWidget):
     calibration_requested = pyqtSignal()
     vision_test_requested = pyqtSignal()
     calibration_reset_requested = pyqtSignal()
+    eod_report_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -402,6 +403,19 @@ class CommandCenter(QWidget):
         self.btn_reset_cal.clicked.connect(self._on_reset_calibration)
         layout.addWidget(self.btn_reset_cal)
 
+        self.btn_eod = QPushButton("EOD Report")
+        self.btn_eod.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {BG_INPUT}; color: {GREEN};
+                font-size: 11px; border: 1px solid {BORDER};
+                border-radius: 4px; padding: 4px 10px;
+                font-family: 'Consolas', monospace;
+            }}
+            QPushButton:hover {{ background-color: {BORDER}; }}
+        """)
+        self.btn_eod.clicked.connect(self._on_eod_report)
+        layout.addWidget(self.btn_eod)
+
         layout.addStretch()
 
         self.cal_status = QLabel("RPA: Not calibrated")
@@ -420,6 +434,9 @@ class CommandCenter(QWidget):
 
     def _on_reset_calibration(self):
         self.calibration_reset_requested.emit()
+
+    def _on_eod_report(self):
+        self.eod_report_requested.emit()
 
     def update_calibration_status(self, calibrated: bool, points_done: int, total: int):
         if calibrated:

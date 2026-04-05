@@ -198,6 +198,7 @@ class VcaniTradeApp:
         self.cmd.calibration_requested.connect(self._on_calibrate)
         self.cmd.vision_test_requested.connect(self._on_test_vision)
         self.cmd.calibration_reset_requested.connect(self._on_reset_calibration)
+        self.cmd.eod_report_requested.connect(self._on_eod_report)
 
         # Market scanner → Analysis worker
         self.market_scanner.data_ready.connect(self._on_market_data)
@@ -317,6 +318,25 @@ class VcaniTradeApp:
         cal.reset()
         self._refresh_calibration_status()
         self.cmd.log("Calibration reset — all coordinates cleared")
+
+    def _on_eod_report(self):
+        """Generate and display End-of-Day report."""
+        from core.analytics_reporter import AnalyticsReporter
+
+        reporter = AnalyticsReporter()
+        report_text = reporter.generate_eod_report()
+        filepath = reporter.save_report()
+
+        # Display in terminal
+        self.cmd.log("━" * 40)
+        for line in report_text.split("\n"):
+            self.cmd.log(line)
+        self.cmd.log("━" * 40)
+        self.cmd.log(f"Report saved: {filepath}")
+
+        # Also generate HTML
+        html_path = reporter.save_html_report()
+        self.cmd.log(f"HTML report: {html_path}")
 
     def _refresh_calibration_status(self):
         """Update the calibration status label in the UI."""
