@@ -35,7 +35,7 @@ from core.trade_engine import TradeEngine
 from core.grader import Grader
 from core.watchtower import WatchtowerScanner
 from core.vision_engine import VisionCapture
-from ui.dashboard import CommandCenter
+from ui.dashboard import CommandCenter, TradingOverlay
 
 # Setup logging
 logging.basicConfig(
@@ -165,8 +165,9 @@ class VcaniTradeApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
 
-        # UI
+        # UI — Command Center (control) + TradingOverlay (HUD above charts)
         self.cmd = CommandCenter()
+        self.overlay = TradingOverlay()
 
         # Core
         self.trade_engine = TradeEngine()
@@ -213,20 +214,23 @@ class VcaniTradeApp:
 
     def _on_analysis_complete(self, analysis, transcript: DebateTranscript = None):
         """Handle Swarm Consensus result — all UI updates on main thread."""
-        # Display signal in terminal
-        if transcript:
-            overlay_signal = OverlaySignal(
-                asset=analysis.asset,
-                action=analysis.action,
-                confidence=analysis.confidence,
-                entry_price=analysis.entry_price,
-                stop_loss=analysis.stop_loss,
-                take_profit=analysis.take_profit,
-                reason=analysis.reason,
-            )
-            self.cmd.display_signal(overlay_signal)
+        # Build overlay signal
+        overlay_signal = OverlaySignal(
+            asset=analysis.asset,
+            action=analysis.action,
+            confidence=analysis.confidence,
+            entry_price=analysis.entry_price,
+            stop_loss=analysis.stop_loss,
+            take_profit=analysis.take_profit,
+            reason=analysis.reason,
+        )
 
-            # Log debate to terminal
+        # Update both UI surfaces
+        self.overlay.update_signal_handler(overlay_signal)
+        self.cmd.display_signal(overlay_signal)
+
+        # Log debate to terminal
+        if transcript:
             self.cmd.log(
                 f'<span style="color:#8B949E">Sniper: [{transcript.technical_sniper.action}] '
                 f"{transcript.technical_sniper.conviction}</span>"
@@ -242,6 +246,7 @@ class VcaniTradeApp:
 
             # Display CEO verdict prominently
             self.cmd.display_ceo_verdict(transcript)
+            self.overlay.update_debate_transcript(transcript)
         else:
             self.cmd.log(
                 f"{analysis.action.value} {analysis.asset} — {analysis.confidence.value}"
@@ -274,8 +279,9 @@ class VcaniTradeApp:
         """Start the application."""
         logger.info("Starting VcaniTrade AI...")
 
-        # Show Command Center
+        # Show both UI surfaces
         self.cmd.show()
+        self.overlay.show()
 
         # Start background threads
         self.market_scanner.start()
