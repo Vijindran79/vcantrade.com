@@ -1,15 +1,22 @@
 """
-VcaniTrade AI - Main Application
-Trading assistant with transparent overlay HUD and teacher/auto modes
+VcanTrade AI - Main Application
+
+Trading assistant with Swarm Consensus multi-agent analysis,
+Vision Engine chart reading, Watchtower scanning, and RPA execution.
+
+Architecture:
+- All heavy work runs in QThreads (never blocks the GUI)
+- Backend threads emit signals → CommandCenter updates on main thread
+- Vision Engine captures screenshots in AnalysisWorker thread
+- Watchtower runs independently, feeds anomalies to Swarm
 """
 
+import signal
 import sys
-import logging
 import time
 import random
-import signal
+import logging
 from datetime import datetime
-from threading import Thread
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal
@@ -28,7 +35,7 @@ from core.trade_engine import TradeEngine
 from core.grader import Grader
 from core.watchtower import WatchtowerScanner
 from core.vision_engine import VisionCapture
-from ui.dashboard import TradingOverlay, ControlWindow
+from ui.dashboard import CommandCenter
 
 # Setup logging
 logging.basicConfig(
@@ -41,8 +48,8 @@ logger = logging.getLogger(__name__)
 
 class MarketScanner(QThread):
     """
-    Background thread that scans market data
-    Emits MarketDataPoint for each asset
+    Background thread that generates mock market data.
+    Replaced by real WebSocket feeds in Phase 2.
     """
 
     data_ready = pyqtSignal(MarketDataPoint)
@@ -52,10 +59,7 @@ class MarketScanner(QThread):
         self.running = True
 
     def run(self):
-        """Simulate market data feed (replace with real WebSocket later)"""
         logger.info("Market scanner started")
-
-        # Mock prices for demo
         base_prices = {
             "EURUSD": 1.08750,
             "GBPUSD": 1.26500,
@@ -66,7 +70,6 @@ class MarketScanner(QThread):
 
         while self.running:
             for asset in config.ASSETS:
-                # Simulate price movement
                 base = base_prices.get(asset, 100.0)
                 change = random.uniform(-2.0, 2.0)
                 price = base * (1 + change / 100)
@@ -93,16 +96,14 @@ class MarketScanner(QThread):
 
 class AnalysisWorker(QThread):
     """
-    Analyzes market data using Swarm Consensus multi-agent debate
-    Runs in separate thread to keep UI responsive
+    Analyzes market data using Swarm Consensus multi-agent debate.
+    Runs in separate thread to keep GUI responsive.
 
     Dual-Vision: When config.USE_VISION is True, captures a chart
     screenshot and passes it to the Technical Sniper for visual analysis.
     """
 
-    analysis_complete = pyqtSignal(
-        object, object
-    )  # Emits (LLMAnalysisOutput, DebateTranscript)
+    analysis_complete = pyqtSignal(object, object)
 
     def __init__(self):
         super().__init__()
@@ -123,11 +124,9 @@ class AnalysisWorker(QThread):
         )
 
     def add_to_queue(self, market_data: MarketDataPoint):
-        """Add market data to analysis queue"""
         self.market_data_queue.append(market_data)
 
     def run(self):
-        """Process queue continuously"""
         logger.info("Analysis worker started (Swarm Consensus mode)")
 
         while True:
@@ -145,7 +144,7 @@ class AnalysisWorker(QThread):
                         )
                     else:
                         logger.warning(
-                            f"Screenshot failed for {market_data.asset} — using text-only analysis"
+                            f"Screenshot failed for {market_data.asset} — text-only"
                         )
 
                 # Run swarm debate (with or without vision)
@@ -159,23 +158,26 @@ class AnalysisWorker(QThread):
 
 class VcaniTradeApp:
     """
-    Main application controller
-    Connects all modules together
+    Main application controller.
+    Connects all modules via Qt signals — zero blocking on the GUI thread.
     """
 
     def __init__(self):
         self.app = QApplication(sys.argv)
 
-        # Initialize components
-        self.control_window = ControlWindow()
-        self.overlay = TradingOverlay()
+        # UI
+        self.cmd = CommandCenter()
+
+        # Core
         self.trade_engine = TradeEngine()
         self.grader = Grader()
+
+        # Threads
         self.market_scanner = MarketScanner()
         self.watchtower = WatchtowerScanner()
         self.analysis_worker = AnalysisWorker()
 
-        # Current state
+        # State
         self.current_mode = "TEACHER"
         self.latest_signals = {}
 
@@ -183,141 +185,123 @@ class VcaniTradeApp:
         logger.info("VcaniTrade AI initialized")
 
     def _connect_signals(self):
-        """Connect all Qt signals"""
-        # Control window
-        self.control_window.mode_changed.connect(self._on_mode_changed)
-        self.control_window.kill_switch_triggered.connect(self._on_kill_switch)
+        """Wire all backend threads to the CommandCenter UI."""
+        # Command Center
+        self.cmd.mode_changed.connect(self._on_mode_changed)
+        self.cmd.kill_switch_triggered.connect(self._on_kill_switch)
 
-        # Market scanner -> Analysis worker
+        # Market scanner → Analysis worker
         self.market_scanner.data_ready.connect(self._on_market_data)
 
-        # Watchtower -> UI alerts + Swarm handoff
+        # Watchtower → UI alerts + Swarm handoff
         self.watchtower.alert_detected.connect(self._on_watchtower_alert)
         self.watchtower.market_data_ready.connect(self._on_market_data)
-        self.watchtower.scan_status.connect(self._on_watchtower_status)
 
-        # Analysis worker -> Trade engine & Overlay
+        # Analysis worker → Trade engine + UI
         self.analysis_worker.analysis_complete.connect(self._on_analysis_complete)
 
     def _on_market_data(self, market_data: MarketDataPoint):
-        """Handle new market data — queue for Swarm analysis"""
+        """Queue market data for Swarm analysis."""
         self.analysis_worker.add_to_queue(market_data)
 
     def _on_watchtower_alert(self, alert: WatchlistAlert):
-        """Handle Watchtower anomaly alert"""
-        self.control_window.add_log(
-            f"🚨 WATCHTOWER: [{alert.severity}] {alert.alert_type} on "
-            f"{alert.asset} — {alert.reason}"
+        """Handle Watchtower anomaly alert."""
+        self.cmd.log(
+            f'<span style="color:#F85149;font-weight:bold">WATCHTOWER</span>: '
+            f"[{alert.severity}] {alert.alert_type} on {alert.asset} — {alert.reason}"
         )
-        # The Watchtower already emitted market_data_ready,
-        # so Swarm will analyze it automatically.
 
     def _on_analysis_complete(self, analysis, transcript: DebateTranscript = None):
-        """Handle Swarm Consensus analysis result"""
-        # Log CEO verdict
-        self.control_window.add_log(
-            f"{analysis.action.value} {analysis.asset} - {analysis.confidence.value}"
-        )
-
-        # Log debate transcript if available
+        """Handle Swarm Consensus result — all UI updates on main thread."""
+        # Display signal in terminal
         if transcript:
-            self.control_window.add_log(
-                f"  [Sniper] {transcript.technical_sniper.brief[:80]}"
+            overlay_signal = OverlaySignal(
+                asset=analysis.asset,
+                action=analysis.action,
+                confidence=analysis.confidence,
+                entry_price=analysis.entry_price,
+                stop_loss=analysis.stop_loss,
+                take_profit=analysis.take_profit,
+                reason=analysis.reason,
             )
-            self.control_window.add_log(
-                f"  [Macro]  {transcript.macro_analyst.brief[:80]}"
+            self.cmd.display_signal(overlay_signal)
+
+            # Log debate to terminal
+            self.cmd.log(
+                f'<span style="color:#8B949E">Sniper: [{transcript.technical_sniper.action}] '
+                f"{transcript.technical_sniper.conviction}</span>"
             )
-            self.control_window.add_log(
-                f"  [Risk]   {transcript.risk_manager.brief[:80]}"
+            self.cmd.log(
+                f'<span style="color:#8B949E">Macro:  [{transcript.macro_analyst.action}] '
+                f"{transcript.macro_analyst.conviction}</span>"
             )
-            self.control_window.add_log(f"  [CEO]    {transcript.ceo_verdict[:100]}")
+            self.cmd.log(
+                f'<span style="color:#8B949E">Risk:   [{transcript.risk_manager.verdict}] '
+                f"{transcript.risk_manager.conviction}</span>"
+            )
+
+            # Display CEO verdict prominently
+            self.cmd.display_ceo_verdict(transcript)
+        else:
+            self.cmd.log(
+                f"{analysis.action.value} {analysis.asset} — {analysis.confidence.value}"
+            )
 
         # Process through trade engine
         trade = self.trade_engine.process_signal(analysis, self.current_mode)
 
-        # Update overlay
-        if trade:
-            overlay_signal = OverlaySignal(
-                asset=trade.asset,
-                action=trade.action,
-                confidence=trade.confidence,
-                entry_price=trade.entry_price if trade.entry_price > 0 else None,
-                stop_loss=trade.stop_loss,
-                take_profit=trade.take_profit,
-                reason=trade.ai_reason,
+        # Run post-trade autopsy if trade was closed
+        if trade and trade.status == "CLOSED":
+            autopsy = self.grader.autopsy_trade(trade)
+            self.cmd.log(
+                f'<span style="color:#D29922">AUTOPSY</span>: '
+                f"{trade.asset} Grade: {autopsy.grade} — {autopsy.explanation[:100]}"
             )
-            self.overlay.update_signal_handler(overlay_signal)
-            self.latest_signals[trade.asset] = overlay_signal
 
-            # Pass transcript to overlay for display
-            if transcript:
-                self.overlay.update_debate_transcript(transcript)
+        self.latest_signals[analysis.asset] = analysis
 
     def _on_mode_changed(self, mode: str):
-        """Handle mode change from control window"""
         self.current_mode = mode
         logger.info(f"Mode changed to {mode}")
 
-    def _on_watchtower_status(self, status: str):
-        """Handle Watchtower scan status update"""
-        if not hasattr(self, "_wt_status_count"):
-            self._wt_status_count = 0
-        self._wt_status_count += 1
-        if self._wt_status_count % 5 == 0:
-            self.control_window.add_log(status)
-
     def _on_kill_switch(self):
-        """Handle kill switch activation"""
         self.trade_engine.activate_kill_switch()
         self.market_scanner.stop()
         self.watchtower.stop()
-        logger.critical("Kill switch activated - all systems halted")
+        logger.critical("Kill switch activated — all systems halted")
 
     def run(self):
-        """Start the application"""
+        """Start the application."""
         logger.info("Starting VcaniTrade AI...")
 
-        # Show windows
-        self.control_window.show()
-        self.overlay.show()
+        # Show Command Center
+        self.cmd.show()
 
         # Start background threads
         self.market_scanner.start()
         self.watchtower.start()
         self.analysis_worker.start()
 
-        # Start UI update timer
-        self.ui_timer = QTimer()
-        self.ui_timer.timeout.connect(self._update_ui_periodically)
-        self.ui_timer.start(config.OVERLAY_UPDATE_MS)
-
-        self.control_window.add_log("✅ VcaniTrade AI started - Paper mode active")
-        self.control_window.add_log("📊 Scanning markets...")
-        self.control_window.add_log("🗼 Watchtower: Monitoring watchlist...")
+        # Status updates
+        self.cmd.set_watchtower_status(True, "Scanning")
         if config.USE_VISION:
-            self.control_window.add_log(f"👁️ Vision: Enabled ({config.VLM_MODEL})")
+            self.cmd.set_vision_status(True, f"{config.VLM_MODEL}")
         else:
-            self.control_window.add_log("👁️ Vision: Disabled (text-only analysis)")
-        self.control_window.add_log("🎯 Switch to AUTO mode when ready")
+            self.cmd.set_vision_status(False, "Disabled")
+        self.cmd.set_rpa_status(False, "Disarmed")
+
+        # Startup messages
+        self.cmd.log("VcaniTrade AI started — Paper mode active")
+        self.cmd.log("Market scanner running")
+        self.cmd.log("Watchtower monitoring watchlist")
+        if config.USE_VISION:
+            self.cmd.log(f"Vision Engine: {config.VLM_MODEL}")
+        self.cmd.log("Mode: TEACHER — RPA disarmed")
 
         logger.info("Application running")
-
-        # Run Qt event loop
         sys.exit(self.app.exec())
 
-    def _update_ui_periodically(self):
-        """Periodic UI updates"""
-        # Update grader report if available
-        if len(self.trade_engine.trade_history) > 0:
-            report = self.grader.generate_report_card(days=1)
-            if report.get("overall_grade"):
-                self.control_window.add_log(
-                    f"📊 Performance Grade: {report['overall_grade']} "
-                    f"(Win Rate: {report.get('win_rate', 'N/A')})"
-                )
-
     def cleanup(self):
-        """Clean shutdown"""
         self.market_scanner.stop()
         self.watchtower.stop()
         self.trade_engine.cleanup()
@@ -325,22 +309,22 @@ class VcaniTradeApp:
 
 
 def main():
-    """Entry point"""
+    """Entry point."""
     print("=" * 60)
-    print("🎯 VcaniTrade AI - Trading Assistant")
+    print("VcaniTrade AI — Trading Assistant")
     print("=" * 60)
-    print("Starting application...")
-    print(f"Mode: TEACHER (safe)")
-    print(f"Trading: PAPER (dry run)")
-    print(f"Kill Switch: OFF")
+    print(f"Mode:      TEACHER (safe)")
+    print(f"Trading:   PAPER (dry run)")
+    print(
+        f"Vision:    {config.VLM_MODEL}" if config.USE_VISION else "Vision:    Disabled"
+    )
+    print(f"Kill:      OFF")
     print("=" * 60)
-    print()
 
     app = VcaniTradeApp()
 
-    # Register signal handlers for graceful shutdown
     def signal_handler(sig, frame):
-        print("\n\nReceived shutdown signal...")
+        print("\nShutdown signal received...")
         app.cleanup()
         sys.exit(0)
 
@@ -350,7 +334,7 @@ def main():
     try:
         app.run()
     except KeyboardInterrupt:
-        print("\n\nShutting down...")
+        print("\nShutting down...")
         app.cleanup()
     except Exception as e:
         logger.error(f"Application error: {e}")
