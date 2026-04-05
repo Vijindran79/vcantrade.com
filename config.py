@@ -38,10 +38,11 @@ LLM_TIMEOUT = 10  # Seconds before LLM request times out
 JSON_OUTPUT = True  # Force strict JSON output from LLM
 
 # ===== VISION / VLM CONFIGURATION =====
-VLM_MODEL = os.getenv(
-    "VLM_MODEL", "llama3.2-vision"
-)  # Multimodal model for chart analysis
-VLM_TIMEOUT = 45  # VLM analysis takes longer than text-only
+# Optimized for RTX 4050 Laptop GPU (6GB VRAM)
+# Primary: moondream (~1.5GB VRAM, fastest)
+# Fallback: llava:7b-v1.5-q4_K_M (~4GB VRAM)
+VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
+VLM_TIMEOUT = 15  # Max seconds before graceful degradation to text-only
 USE_VISION = (
     os.getenv("USE_VISION", "True").lower() == "true"
 )  # Enable chart screenshot analysis

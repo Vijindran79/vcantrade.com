@@ -27,7 +27,7 @@ from core.llm_analyzer import LLMAnalyzer
 from core.trade_engine import TradeEngine
 from core.grader import Grader
 from core.watchtower import WatchtowerScanner
-from core.vision_capture import VisionCapture
+from core.vision_engine import VisionCapture
 from ui.dashboard import TradingOverlay, ControlWindow
 
 # Setup logging

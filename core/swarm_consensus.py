@@ -77,6 +77,10 @@ PROMPT_TECHNICAL_SNIPER_VISION = """\
 You are the TECHNICAL SNIPER — an expert chart reader. Analyze the attached
 trading chart image and provide your assessment in STRICT JSON format.
 
+Attached is a real-time screenshot of the trading chart. Visually analyze
+the candlesticks, support/resistance levels, and current trend, then combine
+this with the Watchtower data below.
+
 Look for:
 - Candlestick patterns (engulfing, doji, hammer, shooting star)
 - Support and resistance levels
