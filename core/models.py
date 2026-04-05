@@ -157,3 +157,42 @@ class DebateTranscript(BaseModel):
     ceo_verdict: str = Field(..., description="CEO's final one-line verdict")
     ceo_full_statement: str = Field(..., description="CEO's full reasoning")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class WatchlistAlert(BaseModel):
+    """Alert from the Watchtower scanner when anomaly detected"""
+
+    asset: str
+    alert_type: str = Field(
+        ..., description="VOLUME_SPIKE | VOLATILITY_BREAKOUT | TREND_REVERSAL"
+    )
+    severity: str = Field(..., description="LOW|MEDIUM|HIGH|CRITICAL")
+    current_price: float
+    volume_ratio: float = Field(
+        ..., description="Current volume vs baseline (e.g. 3.5 = 350%)"
+    )
+    price_change_pct: float
+    reason: str = Field(..., max_length=200)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    triggered_swarm: bool = False  # Whether this alert was sent to Swarm for analysis
+
+
+class TradeAutopsy(BaseModel):
+    """Post-trade analysis result with letter grade and explanation"""
+
+    trade_id: str
+    asset: str
+    action: str  # BUY or SELL
+    entry_price: float
+    exit_price: float
+    pnl: float
+    grade: str = Field(..., description="A|B|C|D|F")
+    technical_grade: str = Field(..., description="Sniper's grade of the entry")
+    risk_grade: str = Field(..., description="Risk Manager's grade of the decision")
+    explanation: str = Field(
+        ...,
+        max_length=500,
+        description="Plain English explanation of why trade won/lost",
+    )
+    lessons: list[str] = Field(default_factory=list, description="Actionable takeaways")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)

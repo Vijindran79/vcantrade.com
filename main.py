@@ -21,10 +21,12 @@ from core.models import (
     SignalAction,
     ConfidenceLevel,
     DebateTranscript,
+    WatchlistAlert,
 )
 from core.llm_analyzer import LLMAnalyzer
 from core.trade_engine import TradeEngine
 from core.grader import Grader
+from core.watchtower import WatchtowerScanner
 from ui.dashboard import TradingOverlay, ControlWindow
 
 # Setup logging
@@ -137,6 +139,7 @@ class VcaniTradeApp:
         self.trade_engine = TradeEngine()
         self.grader = Grader()
         self.market_scanner = MarketScanner()
+        self.watchtower = WatchtowerScanner()
         self.analysis_worker = AnalysisWorker()
 
         # Current state
@@ -155,12 +158,26 @@ class VcaniTradeApp:
         # Market scanner -> Analysis worker
         self.market_scanner.data_ready.connect(self._on_market_data)
 
+        # Watchtower -> UI alerts + Swarm handoff
+        self.watchtower.alert_detected.connect(self._on_watchtower_alert)
+        self.watchtower.market_data_ready.connect(self._on_market_data)
+        self.watchtower.scan_status.connect(self._on_watchtower_status)
+
         # Analysis worker -> Trade engine & Overlay
         self.analysis_worker.analysis_complete.connect(self._on_analysis_complete)
 
     def _on_market_data(self, market_data: MarketDataPoint):
-        """Handle new market data"""
+        """Handle new market data — queue for Swarm analysis"""
         self.analysis_worker.add_to_queue(market_data)
+
+    def _on_watchtower_alert(self, alert: WatchlistAlert):
+        """Handle Watchtower anomaly alert"""
+        self.control_window.add_log(
+            f"🚨 WATCHTOWER: [{alert.severity}] {alert.alert_type} on "
+            f"{alert.asset} — {alert.reason}"
+        )
+        # The Watchtower already emitted market_data_ready,
+        # so Swarm will analyze it automatically.
 
     def _on_analysis_complete(self, analysis, transcript: DebateTranscript = None):
         """Handle Swarm Consensus analysis result"""
@@ -208,10 +225,19 @@ class VcaniTradeApp:
         self.current_mode = mode
         logger.info(f"Mode changed to {mode}")
 
+    def _on_watchtower_status(self, status: str):
+        """Handle Watchtower scan status update"""
+        if not hasattr(self, "_wt_status_count"):
+            self._wt_status_count = 0
+        self._wt_status_count += 1
+        if self._wt_status_count % 5 == 0:
+            self.control_window.add_log(status)
+
     def _on_kill_switch(self):
         """Handle kill switch activation"""
         self.trade_engine.activate_kill_switch()
         self.market_scanner.stop()
+        self.watchtower.stop()
         logger.critical("Kill switch activated - all systems halted")
 
     def run(self):
@@ -224,6 +250,7 @@ class VcaniTradeApp:
 
         # Start background threads
         self.market_scanner.start()
+        self.watchtower.start()
         self.analysis_worker.start()
 
         # Start UI update timer
@@ -233,6 +260,7 @@ class VcaniTradeApp:
 
         self.control_window.add_log("✅ VcaniTrade AI started - Paper mode active")
         self.control_window.add_log("📊 Scanning markets...")
+        self.control_window.add_log("🗼 Watchtower: Monitoring watchlist...")
         self.control_window.add_log("🎯 Switch to AUTO mode when ready")
 
         logger.info("Application running")
@@ -254,6 +282,7 @@ class VcaniTradeApp:
     def cleanup(self):
         """Clean shutdown"""
         self.market_scanner.stop()
+        self.watchtower.stop()
         self.trade_engine.cleanup()
         logger.info("Application shutdown complete")
 
