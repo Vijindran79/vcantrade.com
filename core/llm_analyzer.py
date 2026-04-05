@@ -1,11 +1,13 @@
 """
 VcaniTrade AI - LLM Analyzer
 Orchestrates the Swarm Consensus multi-agent debate for trade analysis.
-Falls back to single-agent mock analysis when Ollama is unavailable.
+
+Dual-Vision Support:
+    Accepts optional chart screenshot (base64) that gets passed to the
+    Technical Sniper for visual analysis via a local VLM.
 """
 
 import logging
-from datetime import datetime
 from typing import Optional, Tuple
 
 import config
@@ -29,13 +31,24 @@ class LLMAnalyzer:
         self.swarm = SwarmConsensus(self.base_url, self.model, self.timeout)
 
     def analyze_market(
-        self, market_data: MarketDataPoint, news_context: str = ""
+        self,
+        market_data: MarketDataPoint,
+        news_context: str = "",
+        chart_image_base64: Optional[str] = None,
     ) -> Tuple[LLMAnalysisOutput, Optional[DebateTranscript]]:
         """
         Run the full swarm debate and return the CEO's decision plus transcript.
+
+        Args:
+            market_data: Numeric market data (price, volume, indicators)
+            news_context: Optional news/sentiment context for Macro Analyst
+            chart_image_base64: Optional base64-encoded chart screenshot for
+                                VLM-enhanced Technical Sniper analysis
         """
         try:
-            output, transcript = self.swarm.run(market_data, news_context)
+            output, transcript = self.swarm.run(
+                market_data, news_context, chart_image_base64
+            )
             logger.info(
                 f"Swarm decision: {output.action.value} {market_data.asset} "
                 f"({output.confidence.value})"

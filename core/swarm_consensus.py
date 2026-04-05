@@ -6,15 +6,22 @@ Three specialized agents (Technical Sniper, Macro Analyst, Risk Manager)
 produce independent analyses. A CEO Agent synthesizes their outputs into
 a single high-conviction trade decision.
 
+Dual-Vision Support:
+    The Technical Sniper can receive a chart screenshot and analyze it
+    visually via a local Vision-Language Model (VLM) like llava or
+    llama3.2-vision, in addition to numeric market data.
+
 Architecture:
     Market Data ──► Agent A (Technical Sniper) ──┐
+    Chart Image ─► (VLM Vision Analysis) ────────┤
     News Context ─► Agent B (Macro Analyst)  ────┼──► CEO Agent ──► LLMAnalysisOutput
     Market Data ──► Agent C (Risk Manager)   ────┘
 """
 
+import base64
+import io
 import json
 import logging
-import time
 from typing import Optional, Tuple
 
 import requests
@@ -35,7 +42,7 @@ logger = logging.getLogger(__name__)
 # Prompt Templates
 # ---------------------------------------------------------------------------
 
-PROMPT_TECHNICAL_SNIPER = """\
+PROMPT_TECHNICAL_SNIPER_TEXT = """\
 You are the TECHNICAL SNIPER on a trading board of directors. You ONLY look at
 price action, volume, momentum, and chart-pattern geometry. You do NOT care
 about news, macroeconomics, or sentiment.
@@ -63,6 +70,43 @@ Respond in STRICT JSON:
   "stop_loss": <float>,
   "take_profit": <float>,
   "brief": "<80 words max>"
+}}
+"""
+
+PROMPT_TECHNICAL_SNIPER_VISION = """\
+You are the TECHNICAL SNIPER — an expert chart reader. Analyze the attached
+trading chart image and provide your assessment in STRICT JSON format.
+
+Look for:
+- Candlestick patterns (engulfing, doji, hammer, shooting star)
+- Support and resistance levels
+- Trend direction and strength
+- Volume profile (if visible)
+- Chart patterns (flags, triangles, head & shoulders, etc.)
+- Moving average crossovers (if visible)
+
+Your job:
+- Identify the highest-probability entry price based on what you see.
+- Calculate precise stop-loss and take-profit coordinates.
+- State your conviction as BUY, SELL, or HOLD.
+- Keep your brief under 80 words.
+
+Additional Market Data (for context):
+- Asset: {asset}
+- Current Price: {price}
+- 1h Change: {change_1h}%
+- 24h Change: {change_24h}%
+
+Respond in STRICT JSON:
+{{
+  "agent": "Technical Sniper",
+  "action": "BUY|SELL|HOLD",
+  "conviction": "LOW|MEDIUM|HIGH|VERY_HIGH",
+  "entry_price": <float>,
+  "stop_loss": <float>,
+  "take_profit": <float>,
+  "brief": "<80 words max>",
+  "chart_patterns": ["pattern1", "pattern2"]
 }}
 """
 
@@ -124,7 +168,7 @@ Respond in STRICT JSON:
 
 PROMPT_CEO = """\
 You are the CHIEF EXECUTION OFFICER — a brave, fearless, and deeply
-knowledgeful trading commander. You have just heard the debate from your
+knowledgeable trading commander. You have just heard the debate from your
 three specialists:
 
 Technical Sniper: {sniper_brief}
@@ -208,6 +252,9 @@ class SwarmConsensus:
     """
     Orchestrates a multi-agent debate and produces a single
     LLMAnalysisOutput via the CEO Agent.
+
+    Supports dual-vision: the Technical Sniper can analyze a chart
+    screenshot via a local VLM (llava, llama3.2-vision, qwen2.5-vl).
     """
 
     def __init__(self, base_url: str, model: str, timeout: int):
@@ -218,11 +265,14 @@ class SwarmConsensus:
     # -- public API ----------------------------------------------------------
 
     def run(
-        self, market_data: MarketDataPoint, news_context: str = ""
+        self,
+        market_data: MarketDataPoint,
+        news_context: str = "",
+        chart_image_base64: Optional[str] = None,
     ) -> Tuple[LLMAnalysisOutput, DebateTranscript]:
         """
         Execute the full swarm pipeline:
-            1. Technical Sniper
+            1. Technical Sniper (text-only or vision-enhanced)
             2. Macro Analyst
             3. Risk Manager
             4. CEO synthesis
@@ -236,18 +286,22 @@ class SwarmConsensus:
 
         logger.info("Swarm Consensus: Starting multi-agent debate")
 
-        # Round 1 — Technical Sniper
-        sniper = self._call_agent(
-            PROMPT_TECHNICAL_SNIPER.format(
-                asset=market_data.asset,
-                price=market_data.price,
-                change_1h=market_data.price_change_1h,
-                change_24h=market_data.price_change_24h,
-                volume=market_data.volume,
-                indicators=json.dumps(market_data.indicators, default=str),
-            ),
-            agent_name="Technical Sniper",
-        )
+        # Round 1 — Technical Sniper (vision if chart provided, else text)
+        if chart_image_base64:
+            sniper = self._call_sniper_vision(market_data, chart_image_base64)
+            logger.info("[Technical Sniper] VISION analysis complete")
+        else:
+            sniper = self._call_agent(
+                PROMPT_TECHNICAL_SNIPER_TEXT.format(
+                    asset=market_data.asset,
+                    price=market_data.price,
+                    change_1h=market_data.price_change_1h,
+                    change_24h=market_data.price_change_24h,
+                    volume=market_data.volume,
+                    indicators=json.dumps(market_data.indicators, default=str),
+                ),
+                agent_name="Technical Sniper",
+            )
 
         # Round 2 — Macro Analyst
         macro = self._call_agent(
@@ -291,6 +345,42 @@ class SwarmConsensus:
         return ceo_output, transcript
 
     # -- internal helpers ----------------------------------------------------
+
+    def _call_sniper_vision(
+        self, market_data: MarketDataPoint, image_base64: str
+    ) -> SwarmAgentBrief:
+        """
+        Send chart screenshot to VLM for Technical Sniper analysis.
+        Falls back to text-only analysis if VLM fails.
+        """
+        prompt = PROMPT_TECHNICAL_SNIPER_VISION.format(
+            asset=market_data.asset,
+            price=market_data.price,
+            change_1h=market_data.price_change_1h,
+            change_24h=market_data.price_change_24h,
+        )
+
+        try:
+            raw = self._ollama_generate_vision(prompt, image_base64)
+            parsed = json.loads(raw)
+            brief = SwarmAgentBrief(**parsed)
+            logger.info(f"[Technical Sniper VISION] {brief.brief}")
+            return brief
+        except Exception as e:
+            logger.error(f"[Technical Sniper VISION] Failed: {e}")
+            # Fallback to text-only analysis
+            logger.warning("Falling back to text-only Sniper analysis")
+            return self._call_agent(
+                PROMPT_TECHNICAL_SNIPER_TEXT.format(
+                    asset=market_data.asset,
+                    price=market_data.price,
+                    change_1h=market_data.price_change_1h,
+                    change_24h=market_data.price_change_24h,
+                    volume=market_data.volume,
+                    indicators=json.dumps(market_data.indicators, default=str),
+                ),
+                agent_name="Technical Sniper",
+            )
 
     def _call_agent(self, prompt: str, agent_name: str) -> SwarmAgentBrief:
         """Send prompt to Ollama and parse response into SwarmAgentBrief."""
@@ -369,6 +459,29 @@ class SwarmConsensus:
         resp.raise_for_status()
         return resp.json().get("response", "{}")
 
+    def _ollama_generate_vision(self, prompt: str, image_base64: str) -> str:
+        """
+        Ollama /api/generate with image input for VLM models.
+        Supports llava, llama3.2-vision, qwen2.5-vl, etc.
+        """
+        # Strip data URI prefix if present
+        if image_base64.startswith("data:"):
+            image_base64 = image_base64.split(",", 1)[1]
+
+        resp = requests.post(
+            f"{self.base_url}/api/generate",
+            json={
+                "model": self.model,
+                "prompt": prompt,
+                "images": [image_base64],
+                "stream": False,
+                "format": "json",
+            },
+            timeout=self.timeout * 3,  # VLM takes longer
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "{}")
+
     def _is_ollama_available(self) -> bool:
         try:
             resp = requests.get(f"{self.base_url}/api/tags", timeout=2)
@@ -378,10 +491,10 @@ class SwarmConsensus:
 
     # -- mock swarm (offline fallback) ---------------------------------------
 
-    def _mock_swarm(self, market_data: MarketDataPoint) -> LLMAnalysisOutput:
+    def _mock_swarm(
+        self, market_data: MarketDataPoint
+    ) -> Tuple[LLMAnalysisOutput, DebateTranscript]:
         """Generate a realistic mock swarm debate without Ollama."""
-        import random
-
         price = market_data.price
         trend = market_data.price_change_1h
 

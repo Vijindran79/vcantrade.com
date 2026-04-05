@@ -37,6 +37,20 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 LLM_TIMEOUT = 10  # Seconds before LLM request times out
 JSON_OUTPUT = True  # Force strict JSON output from LLM
 
+# ===== VISION / VLM CONFIGURATION =====
+VLM_MODEL = os.getenv(
+    "VLM_MODEL", "llama3.2-vision"
+)  # Multimodal model for chart analysis
+VLM_TIMEOUT = 45  # VLM analysis takes longer than text-only
+USE_VISION = (
+    os.getenv("USE_VISION", "True").lower() == "true"
+)  # Enable chart screenshot analysis
+CHART_REGION_X = int(os.getenv("CHART_REGION_X", "100"))
+CHART_REGION_Y = int(os.getenv("CHART_REGION_Y", "100"))
+CHART_REGION_W = int(os.getenv("CHART_REGION_W", "1280"))
+CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
+SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "False").lower() == "true"
+
 # ===== MARKET DATA =====
 SCAN_INTERVAL = 2  # Seconds between market scans
 ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "BTCUSD", "ETHUSD"]  # Assets to monitor

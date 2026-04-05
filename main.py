@@ -27,6 +27,7 @@ from core.llm_analyzer import LLMAnalyzer
 from core.trade_engine import TradeEngine
 from core.grader import Grader
 from core.watchtower import WatchtowerScanner
+from core.vision_capture import VisionCapture
 from ui.dashboard import TradingOverlay, ControlWindow
 
 # Setup logging
@@ -94,6 +95,9 @@ class AnalysisWorker(QThread):
     """
     Analyzes market data using Swarm Consensus multi-agent debate
     Runs in separate thread to keep UI responsive
+
+    Dual-Vision: When config.USE_VISION is True, captures a chart
+    screenshot and passes it to the Technical Sniper for visual analysis.
     """
 
     analysis_complete = pyqtSignal(
@@ -104,6 +108,19 @@ class AnalysisWorker(QThread):
         super().__init__()
         self.analyzer = LLMAnalyzer()
         self.market_data_queue = []
+        self.vision = (
+            VisionCapture(
+                chart_region=(
+                    config.CHART_REGION_X,
+                    config.CHART_REGION_Y,
+                    config.CHART_REGION_W,
+                    config.CHART_REGION_H,
+                ),
+                save_debug=config.SAVE_DEBUG_SCREENSHOTS,
+            )
+            if config.USE_VISION
+            else None
+        )
 
     def add_to_queue(self, market_data: MarketDataPoint):
         """Add market data to analysis queue"""
@@ -117,8 +134,24 @@ class AnalysisWorker(QThread):
             if self.market_data_queue:
                 market_data = self.market_data_queue.pop(0)
 
-                # Run swarm debate
-                output, transcript = self.analyzer.analyze_market(market_data)
+                # Capture chart screenshot if vision is enabled
+                chart_base64 = None
+                if self.vision:
+                    screenshot = self.vision.capture_chart(asset=market_data.asset)
+                    if screenshot:
+                        chart_base64 = screenshot.to_base64()
+                        logger.info(
+                            f"Chart screenshot captured for {market_data.asset}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Screenshot failed for {market_data.asset} — using text-only analysis"
+                        )
+
+                # Run swarm debate (with or without vision)
+                output, transcript = self.analyzer.analyze_market(
+                    market_data, chart_image_base64=chart_base64
+                )
                 self.analysis_complete.emit(output, transcript)
             else:
                 time.sleep(0.1)
@@ -261,6 +294,10 @@ class VcaniTradeApp:
         self.control_window.add_log("✅ VcaniTrade AI started - Paper mode active")
         self.control_window.add_log("📊 Scanning markets...")
         self.control_window.add_log("🗼 Watchtower: Monitoring watchlist...")
+        if config.USE_VISION:
+            self.control_window.add_log(f"👁️ Vision: Enabled ({config.VLM_MODEL})")
+        else:
+            self.control_window.add_log("👁️ Vision: Disabled (text-only analysis)")
         self.control_window.add_log("🎯 Switch to AUTO mode when ready")
 
         logger.info("Application running")
