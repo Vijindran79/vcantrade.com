@@ -351,6 +351,77 @@ class SwarmConsensus:
 
         return ceo_output, transcript
 
+    async def _call_agent_async(self, prompt: str, agent_name: str) -> SwarmAgentBrief:
+        """Async version of _call_agent using aiohttp for non-blocking HTTP."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "format": "json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.timeout * 3),
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    raw = data.get("response", "{}")
+                    parsed = json.loads(raw)
+                    brief = SwarmAgentBrief(**parsed)
+                    logger.info(f"[{agent_name}] {brief.brief}")
+                    return brief
+        except Exception as e:
+            logger.error(f"[{agent_name}] Async LLM call failed: {e}")
+            # Return a safe HOLD/NEUTRAL brief
+            if agent_name == "Risk Manager":
+                return SwarmAgentBrief(
+                    agent=agent_name,
+                    conviction="LOW",
+                    verdict="ABORT",
+                    brief=f"{agent_name} analysis failed — defaulting to cautious stance.",
+                )
+            return SwarmAgentBrief(
+                agent=agent_name,
+                action="HOLD",
+                conviction="LOW",
+                brief=f"{agent_name} analysis failed — defaulting to cautious stance.",
+            )
+
+    async def _call_agent_vision_async(
+        self, prompt: str, image_base64: str, agent_name: str
+    ) -> SwarmAgentBrief:
+        """Async version of vision analysis using aiohttp."""
+        try:
+            # Strip data URI prefix if present
+            if image_base64.startswith("data:"):
+                image_base64 = image_base64.split(",", 1)[1]
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "images": [image_base64],
+                        "stream": False,
+                        "format": "json",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.timeout * 5),
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    raw = data.get("response", "{}")
+                    parsed = json.loads(raw)
+                    brief = SwarmAgentBrief(**parsed)
+                    logger.info(f"[{agent_name} VISION] {brief.brief}")
+                    return brief
+        except Exception as e:
+            logger.error(f"[{agent_name} VISION] Async call failed: {e}")
+            # Fallback to text-only (will be handled by caller)
+            raise
+
     async def _run_agents_parallel(
         self,
         market_data: MarketDataPoint,
@@ -508,7 +579,7 @@ class SwarmConsensus:
                 "stream": False,
                 "format": "json",
             },
-            timeout=self.timeout,
+            timeout=90,  # Hardcoded 90s timeout for text agents
         )
         resp.raise_for_status()
         return resp.json().get("response", "{}")
@@ -531,7 +602,7 @@ class SwarmConsensus:
                 "stream": False,
                 "format": "json",
             },
-            timeout=self.timeout * 3,  # VLM takes longer
+            timeout=120,  # Hardcoded 120s timeout for vision VLM
         )
         resp.raise_for_status()
         return resp.json().get("response", "{}")
