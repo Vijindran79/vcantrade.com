@@ -173,6 +173,7 @@ class CommandCenter(QWidget):
     - Master Operating Switch (Teacher <-> Autonomous)
     - Swarm Terminal (live agent reasoning)
     - System Status Bar (Watchtower, Vision, RPA indicators)
+    - Prop Firm Selection Board (asset selection checklist)
     - Emergency Kill Switch
     """
 
@@ -183,12 +184,14 @@ class CommandCenter(QWidget):
     vision_test_requested = pyqtSignal()
     calibration_reset_requested = pyqtSignal()
     eod_report_requested = pyqtSignal()
+    selection_changed = pyqtSignal(list)  # List of selected assets
 
     def __init__(self):
         super().__init__()
         self._mode = "TEACHER"
         self._paper = True
         self._killed = False
+        self._selected_assets = config.SELECTED_ASSETS.copy()
 
         self._setup_window()
         self._build_ui()
@@ -232,6 +235,10 @@ class CommandCenter(QWidget):
 
         # ── Calibration & Debug Tools ──────────────────────────────
         root.addWidget(self._build_tools_panel())
+
+        # ── Prop Firm Selection Board (NEW) ────────────────────────
+        self.selection_board = self._build_selection_board()
+        root.addWidget(self.selection_board)
 
         # ── Swarm Terminal ─────────────────────────────────────────
         self.terminal = SwarmTerminal()
@@ -437,6 +444,160 @@ class CommandCenter(QWidget):
 
     def _on_eod_report(self):
         self.eod_report_requested.emit()
+
+    def _build_selection_board(self) -> QWidget:
+        """Prop Firm Selection Board - checklist for asset selection."""
+        container = QFrame()
+        container.setStyleSheet(
+            f"background-color: {BG_PANEL}; border: 1px solid {BORDER}; "
+            f"border-radius: 8px; padding: 10px;"
+        )
+        
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        title = QLabel("PROP FIRM SELECTION BOARD")
+        title.setStyleSheet(
+            f"color: {CYAN}; font-size: 12px; font-weight: bold; "
+            f"font-family: 'Consolas', monospace;"
+        )
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        
+        count_label = QLabel(f"Selected: {len(self._selected_assets)}")
+        count_label.setObjectName("selection_count")
+        count_label.setStyleSheet(
+            f"color: {GREEN}; font-size: 10px; font-family: 'Consolas', monospace;"
+        )
+        header_layout.addWidget(count_label)
+        
+        layout.addLayout(header_layout)
+        
+        # Scrollable area for checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(180)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{
+                background-color: {BG_INPUT};
+                border: 1px solid {BORDER};
+                border-radius: 4px;
+            }}
+            QScrollBar:vertical {{
+                background-color: {BG_DARK};
+                width: 10px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {DIM};
+                border-radius: 5px;
+                min-height: 20px;
+            }}
+        """)
+        
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(8, 8, 8, 8)
+        scroll_layout.setSpacing(6)
+        
+        # Store checkbox references
+        self.asset_checkboxes = {}
+        
+        # Build category sections
+        for category, assets in config.ASSETS_BY_CATEGORY.items():
+            # Category label
+            cat_label = QLabel(f"▼ {category.upper()}")
+            cat_label.setStyleSheet(
+                f"color: {ORANGE}; font-size: 11px; font-weight: bold; "
+                f"font-family: 'Consolas', monospace; padding: 4px 0;"
+            )
+            scroll_layout.addWidget(cat_label)
+            
+            # Checkboxes for assets in this category
+            cat_layout = QHBoxLayout()
+            cat_layout.setSpacing(12)
+            
+            for asset in assets:
+                cb = QPushButton(asset)
+                cb.setCheckable(True)
+                cb.setChecked(asset in self._selected_assets)
+                cb.setStyleSheet(self._asset_button_style(cb.isChecked()))
+                cb.clicked.connect(lambda checked, a=asset: self._on_asset_toggled(a, checked))
+                cb.setMinimumHeight(28)
+                cb.setMinimumWidth(70)
+                cat_layout.addWidget(cb)
+                self.asset_checkboxes[asset] = cb
+            
+            cat_layout.addStretch()
+            scroll_layout.addLayout(cat_layout)
+            
+            # Separator line between categories
+            separator = QFrame()
+            separator.setFrameShape(QFrame.Shape.HLine)
+            separator.setStyleSheet(f"background-color: {BORDER}; max-height: 1px;")
+            separator.setMaximumHeight(1)
+            scroll_layout.addWidget(separator)
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll)
+        
+        # Info footer
+        info = QLabel("Select 3-5 assets for the bot to analyze. Unchecked assets will be ignored.")
+        info.setStyleSheet(
+            f"color: {DIM}; font-size: 9px; font-family: 'Consolas', monospace;"
+        )
+        layout.addWidget(info)
+        
+        return container
+    
+    def _asset_button_style(self, active: bool) -> str:
+        if active:
+            return f"""
+                QPushButton {{
+                    background-color: {GREEN}; color: #000; font-weight: bold;
+                    font-size: 10px; border-radius: 4px; padding: 4px 8px;
+                    font-family: 'Consolas', monospace;
+                }}
+                QPushButton:hover {{ background-color: #2EA043; }}
+            """
+        return f"""
+            QPushButton {{
+                background-color: {BG_INPUT}; color: {GRAY};
+                font-size: 10px; border: 1px solid {BORDER};
+                border-radius: 4px; padding: 4px 8px;
+                font-family: 'Consolas', monospace;
+            }}
+            QPushButton:hover {{ background-color: {BORDER}; color: {WHITE}; }}
+        """
+    
+    def _on_asset_toggled(self, asset: str, checked: bool):
+        """Handle asset checkbox toggle."""
+        if checked:
+            if asset not in self._selected_assets:
+                self._selected_assets.append(asset)
+        else:
+            if asset in self._selected_assets:
+                self._selected_assets.remove(asset)
+        
+        # Update the count label - find it by traversing children
+        count_label = None
+        for child in self.selection_board.children():
+            if isinstance(child, QLabel) and child.objectName() == "selection_count":
+                count_label = child
+                break
+        
+        if count_label:
+            count_label.setText(f"Selected: {len(self._selected_assets)}")
+        
+        # Emit signal to update backend
+        self.selection_changed.emit(self._selected_assets.copy())
+        
+        status = "added" if checked else "removed"
+        self.terminal.log(f"Asset {status}: {asset} (now monitoring {len(self._selected_assets)} assets)")
 
     def update_calibration_status(self, calibrated: bool, points_done: int, total: int):
         if calibrated:

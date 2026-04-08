@@ -55,6 +55,8 @@ class MarketScanner(QThread):
     """
     Background thread that generates mock market data.
     Replaced by real WebSocket feeds in Phase 2.
+    
+    Only scans assets that are selected in the Prop Firm Selection Board.
     """
 
     data_ready = pyqtSignal(MarketDataPoint)
@@ -62,19 +64,44 @@ class MarketScanner(QThread):
     def __init__(self):
         super().__init__()
         self.running = True
+        self.selected_assets = config.SELECTED_ASSETS.copy()
+
+    def set_selected_assets(self, assets: list):
+        """Update the list of assets to scan."""
+        self.selected_assets = assets.copy()
+        logger.info(f"Market scanner updated to monitor: {self.selected_assets}")
 
     def run(self):
-        logger.info("Market scanner started")
+        logger.info(f"Market scanner started with assets: {self.selected_assets}")
         base_prices = {
             "EURUSD": 1.08750,
             "GBPUSD": 1.26500,
             "USDJPY": 151.250,
             "BTCUSD": 68500.00,
             "ETHUSD": 3450.00,
+            "XAUUSD": 2035.00,
+            "XAGUSD": 23.50,
+            "WTI": 78.50,
+            "BRENT": 82.30,
+            "SPX500": 5200.00,
+            "NAS100": 18000.00,
+            "US30": 39000.00,
+            "GER40": 17500.00,
+            "UK100": 7800.00,
+            "AUDUSD": 0.65500,
+            "USDCAD": 1.35500,
+            "NZDUSD": 0.61000,
+            "USDCHF": 0.88500,
+            "SOLUSD": 145.00,
+            "NATGAS": 2.15,
         }
 
         while self.running:
-            for asset in config.ASSETS:
+            # Only iterate over SELECTED assets, not all assets
+            for asset in self.selected_assets:
+                if not self.running:
+                    break
+                    
                 base = base_prices.get(asset, 100.0)
                 change = random.uniform(-2.0, 2.0)
                 price = base * (1 + change / 100)
@@ -93,7 +120,10 @@ class MarketScanner(QThread):
                 )
 
                 self.data_ready.emit(market_data)
-                time.sleep(config.SCAN_INTERVAL / len(config.ASSETS))
+                
+                # Sleep divided by number of selected assets for consistent update rate
+                num_assets = max(len(self.selected_assets), 1)
+                time.sleep(config.SCAN_INTERVAL / num_assets)
 
     def stop(self):
         self.running = False
@@ -199,6 +229,9 @@ class VcaniTradeApp:
         self.cmd.vision_test_requested.connect(self._on_test_vision)
         self.cmd.calibration_reset_requested.connect(self._on_reset_calibration)
         self.cmd.eod_report_requested.connect(self._on_eod_report)
+        
+        # Prop Firm Selection Board → Market Scanner
+        self.cmd.selection_changed.connect(self._on_selection_changed)
 
         # Market scanner → Analysis worker
         self.market_scanner.data_ready.connect(self._on_market_data)
@@ -212,6 +245,14 @@ class VcaniTradeApp:
 
         # Update calibration status on startup
         self._refresh_calibration_status()
+
+    def _on_selection_changed(self, selected_assets: list):
+        """Update market scanner with new asset selection from UI."""
+        self.market_scanner.set_selected_assets(selected_assets)
+        self.cmd.log(
+            f'<span style="color:#00D4FF">SELECTION BOARD</span>: '
+            f"Now monitoring {len(selected_assets)} assets: {', '.join(selected_assets)}"
+        )
 
     def _on_market_data(self, market_data: MarketDataPoint):
         """Queue market data for Swarm analysis."""

@@ -66,7 +66,22 @@ SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "False").lower() ==
 
 # ===== MARKET DATA =====
 SCAN_INTERVAL = 2  # Seconds between market scans
-ASSETS = ["EURUSD", "GBPUSD", "USDJPY", "BTCUSD", "ETHUSD"]  # Assets to monitor
+
+# Available assets organized by category for the Prop Firm Selection Board
+ASSETS_BY_CATEGORY = {
+    "Indices": ["SPX500", "NAS100", "US30", "GER40", "UK100"],
+    "Commodities": ["XAUUSD", "XAGUSD", "WTI", "BRENT", "NATGAS"],
+    "Forex": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "USDCHF"],
+    "Crypto": ["BTCUSD", "ETHUSD", "SOLUSD"],
+}
+
+# Default selected assets (user can change via UI)
+SELECTED_ASSETS = ["EURUSD", "GBPUSD", "XAUUSD"]
+
+# All flat list of assets (legacy support)
+ASSETS = []
+for category_assets in ASSETS_BY_CATEGORY.values():
+    ASSETS.extend(category_assets)
 
 # ===== RPA EXECUTION =====
 USE_HOTKEYS = True  # Prefer keyboard hotkeys over mouse clicks
