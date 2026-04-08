@@ -1,9 +1,11 @@
 """
 VcanTrade AI - RPA Executor
 
-Humanized trade execution via keyboard hotkeys and mouse clicks.
+Humanized trade execution via keyboard hotkeys and physical mouse clicks.
 Uses Bezier curve mouse trajectories and randomized jitter delays
 to appear indistinguishable from a human trader.
+
+PHASE 2 UPDATE: Physical mouse clicks using calibrated coordinates.
 """
 
 import logging
@@ -117,12 +119,17 @@ def _human_move(pyautogui, x: int, y: int):
         time.sleep(step_delay)
 
 
-def _human_click(pyautogui, x: int, y: int):
+def _human_click(pyautogui, x: int, y: int, click_type: str = "left"):
     """Move to target with Bezier curve, then click."""
     _human_move(pyautogui, x, y)
     # Tiny pause before click (human reaction time)
     time.sleep(random.uniform(0.05, 0.15))
-    pyautogui.click()
+    if click_type == "left":
+        pyautogui.click()
+    elif click_type == "right":
+        pyautogui.rightClick()
+    elif click_type == "double":
+        pyautogui.doubleClick()
 
 
 def _human_type(pyautogui, text: str):
@@ -145,7 +152,13 @@ def _jitter():
 class RPAExecutor:
     """
     Robotic Process Automation executor for trade execution.
-    Uses keyboard hotkeys as primary method, humanized mouse clicks as fallback.
+    Uses PHYSICAL MOUSE CLICKS with calibrated coordinates.
+    
+    Execution Flow for BUY signal:
+    1. Move mouse to 'Buy Button' location (using calibrated coords)
+    2. Click once
+    3. If confirmation popup appears, move to 'Confirm' button and click again
+    4. Fill SL/TP inputs if calibrated
     """
 
     def __init__(self):
@@ -154,21 +167,21 @@ class RPAExecutor:
         self.hotkey_sell = config.HOTKEY_SELL
         self.hotkey_close = config.HOTKEY_CLOSE
 
-        # Load calibrated coordinates
+        # Load calibrated coordinates manager
         self.calibration_manager = CalibrationManager()
 
-        # Only import pyautogui if needed
+        # Initialize pyautogui for physical mouse clicks
         self.pyautogui = None
-        if not self.use_hotkeys:
-            try:
-                import pyautogui
+        try:
+            import pyautogui
 
-                self.pyautogui = pyautogui
-                pyautogui.FAILSAFE = True
-                pyautogui.PAUSE = 0  # Disable built-in delay — we handle it
-                logger.info("PyAutoGUI initialized — humanized mouse execution enabled")
-            except ImportError:
-                logger.warning("PyAutoGUI not installed — mouse execution disabled")
+            self.pyautogui = pyautogui
+            pyautogui.FAILSAFE = True  # Move mouse to corner to abort
+            pyautogui.PAUSE = 0  # Disable built-in delay — we handle it manually
+            logger.info("PyAutoGUI initialized — physical mouse clicks enabled")
+        except ImportError:
+            logger.warning("PyAutoGUI not installed — falling back to hotkeys")
+            self.use_hotkeys = True
 
     def execute_trade(self, trade: TradeRecord) -> bool:
         """Execute a trade via RPA. Returns True if successful."""
@@ -191,26 +204,79 @@ class RPAExecutor:
             return False
 
     def _execute_buy(self, trade: TradeRecord) -> bool:
-        logger.info(f"Executing BUY for {trade.asset}")
+        """Execute BUY order using physical mouse clicks."""
+        logger.info(f"Executing BUY for {trade.asset} via physical clicks")
+        
         if self.use_hotkeys:
             return self._send_hotkey(self.hotkey_buy)
-        return self._mouse_click_with_input(
-            "buy_button", trade, fill_sl=True, fill_tp=True
-        )
+        
+        # Step 1: Click Buy button at calibrated location
+        if not self._physical_click("buy_button"):
+            logger.error("Failed to click Buy button")
+            return False
+        
+        # Small delay for order dialog to appear
+        time.sleep(random.uniform(0.3, 0.6))
+        
+        # Step 2: Fill Stop Loss if calibrated
+        self._fill_input_field("sl_input", str(trade.stop_loss)) if trade.stop_loss else None
+        
+        # Step 3: Fill Take Profit if calibrated
+        self._fill_input_field("tp_input", str(trade.take_profit)) if trade.take_profit else None
+        
+        # Step 4: Fill Lot Size if calibrated
+        self._fill_input_field("lot_size_input", "0.01")
+        
+        # Step 5: Click Confirm button (handles popup if present)
+        time.sleep(random.uniform(0.2, 0.4))
+        self._physical_click("confirm_button")
+        
+        logger.info(f"BUY trade executed: {trade.asset}")
+        return True
 
     def _execute_sell(self, trade: TradeRecord) -> bool:
-        logger.info(f"Executing SELL for {trade.asset}")
+        """Execute SELL order using physical mouse clicks."""
+        logger.info(f"Executing SELL for {trade.asset} via physical clicks")
+        
         if self.use_hotkeys:
             return self._send_hotkey(self.hotkey_sell)
-        return self._mouse_click_with_input(
-            "sell_button", trade, fill_sl=True, fill_tp=True
-        )
+        
+        # Step 1: Click Sell button at calibrated location
+        if not self._physical_click("sell_button"):
+            logger.error("Failed to click Sell button")
+            return False
+        
+        # Small delay for order dialog to appear
+        time.sleep(random.uniform(0.3, 0.6))
+        
+        # Step 2: Fill Stop Loss if calibrated
+        self._fill_input_field("sl_input", str(trade.stop_loss)) if trade.stop_loss else None
+        
+        # Step 3: Fill Take Profit if calibrated
+        self._fill_input_field("tp_input", str(trade.take_profit)) if trade.take_profit else None
+        
+        # Step 4: Fill Lot Size if calibrated
+        self._fill_input_field("lot_size_input", "0.01")
+        
+        # Step 5: Click Confirm button
+        time.sleep(random.uniform(0.2, 0.4))
+        self._physical_click("confirm_button")
+        
+        logger.info(f"SELL trade executed: {trade.asset}")
+        return True
 
     def _execute_close(self, trade: TradeRecord) -> bool:
+        """Close position using physical mouse clicks."""
         logger.info(f"Executing CLOSE for {trade.asset}")
+        
         if self.use_hotkeys:
             return self._send_hotkey(self.hotkey_close)
-        return self._mouse_click("close_button")
+        
+        # Click close button at calibrated location
+        result = self._physical_click("close_button")
+        if result:
+            logger.info(f"CLOSE trade executed: {trade.asset}")
+        return result
 
     def _send_hotkey(self, hotkey: str) -> bool:
         """Send keyboard hotkey combination. Format: '<ctrl>+b'."""
@@ -234,82 +300,55 @@ class RPAExecutor:
             logger.error(f"Failed to send hotkey {hotkey}: {e}")
             return False
 
-    def _mouse_click(self, point_name: str) -> bool:
-        """Humanized click at a calibrated screen position."""
+    def _physical_click(self, point_name: str) -> bool:
+        """
+        Execute a physical mouse click at a calibrated screen position.
+        Uses Bezier curve mouse movement for human-like behavior.
+        """
         if not self.pyautogui:
-            logger.error("Mouse execution not available")
+            logger.error("PyAutoGUI not available for physical clicks")
             return False
 
-        x, y = self.calibration.get_coordinate(point_name)
+        # Get calibrated coordinates
+        x, y = self.calibration_manager.get_coordinate(point_name)
         if (x, y) == (0, 0):
-            logger.error(f"No calibration for '{point_name}' — cannot click")
+            logger.error(f"No calibration data for '{point_name}' — cannot click")
             return False
 
+        # Perform humanized click
         _human_click(self.pyautogui, x, y)
-        logger.info(f"Clicked {point_name} at ({x}, {y})")
+        logger.info(f"Physical click at {point_name}: ({x}, {y})")
+        
+        # Post-click jitter (human pause)
         _jitter()
+        
         return True
 
-    def _mouse_click_with_input(
-        self,
-        button_point: str,
-        trade: TradeRecord,
-        fill_sl: bool = True,
-        fill_tp: bool = True,
-    ) -> bool:
+    def _fill_input_field(self, field_name: str, value: str) -> bool:
         """
-        Humanized click + input sequence.
-        Bezier mouse movements, randomized delays, natural typing.
+        Click an input field and type a value using humanized movements.
         """
         if not self.pyautogui:
-            logger.error("Mouse execution not available")
             return False
 
-        # Step 1: Click the buy/sell button with Bezier curve
-        if not self._mouse_click(button_point):
+        x, y = self.calibration_manager.get_coordinate(field_name)
+        if (x, y) == (0, 0):
+            logger.debug(f"No calibration for input field '{field_name}' — skipping")
             return False
 
-        # Human pause — waiting for order dialog to open
-        time.sleep(random.uniform(0.4, 0.9))
-
-        # Step 2: Fill Stop Loss
-        if fill_sl and trade.stop_loss:
-            sl_x, sl_y = self.calibration_manager.get_coordinate("sl_input")
-            if (sl_x, sl_y) != (0, 0):
-                _human_click(self.pyautogui, sl_x, sl_y)
-                time.sleep(random.uniform(0.15, 0.35))
-                # Select all existing text
-                self.pyautogui.hotkey("ctrl", "a")
-                time.sleep(random.uniform(0.05, 0.15))
-                # Type with humanized delays
-                _human_type(self.pyautogui, str(trade.stop_loss))
-                logger.info(f"Filled Stop Loss: {trade.stop_loss}")
-                _jitter()
-
-        # Step 3: Fill Take Profit
-        if fill_tp and trade.take_profit:
-            tp_x, tp_y = self.calibration_manager.get_coordinate("tp_input")
-            if (tp_x, tp_y) != (0, 0):
-                _human_click(self.pyautogui, tp_x, tp_y)
-                time.sleep(random.uniform(0.15, 0.35))
-                self.pyautogui.hotkey("ctrl", "a")
-                time.sleep(random.uniform(0.05, 0.15))
-                _human_type(self.pyautogui, str(trade.take_profit))
-                logger.info(f"Filled Take Profit: {trade.take_profit}")
-                _jitter()
-
-        # Step 4: Fill Lot Size if calibrated
-        lot_x, lot_y = self.calibration_manager.get_coordinate("lot_size_input")
-        if (lot_x, lot_y) != (0, 0):
-            _human_click(self.pyautogui, lot_x, lot_y)
-            time.sleep(random.uniform(0.15, 0.35))
-            self.pyautogui.hotkey("ctrl", "a")
-            time.sleep(random.uniform(0.05, 0.15))
-            _human_type(self.pyautogui, "0.01")
-            logger.info("Filled Lot Size: 0.01")
-            _jitter()
-
-        # Step 5: Click Confirm
-        self._mouse_click("confirm_button")
-        logger.info(f"Trade executed: {trade.action.value} {trade.asset}")
+        # Click the input field
+        _human_click(self.pyautogui, x, y)
+        time.sleep(random.uniform(0.1, 0.25))
+        
+        # Select all existing text (Ctrl+A)
+        self.pyautogui.hotkey("ctrl", "a")
+        time.sleep(random.uniform(0.05, 0.12))
+        
+        # Type the new value with humanized delays
+        _human_type(self.pyautogui, value)
+        logger.info(f"Filled {field_name}: {value}")
+        
+        # Post-input jitter
+        _jitter()
+        
         return True

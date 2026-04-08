@@ -180,6 +180,7 @@ class CommandCenter(QWidget):
     mode_changed = pyqtSignal(str)  # "TEACHER" or "AUTONOMOUS"
     paper_toggled = pyqtSignal(bool)  # True = paper, False = live
     kill_switch_triggered = pyqtSignal()
+    restart_system_requested = pyqtSignal()  # Signal to restart system after kill switch
     calibration_requested = pyqtSignal()
     vision_test_requested = pyqtSignal()
     calibration_reset_requested = pyqtSignal()
@@ -193,6 +194,7 @@ class CommandCenter(QWidget):
         self._killed = False
         self._selected_assets = config.SELECTED_ASSETS.copy()
         self._kill_click_count = 0  # For double-click confirmation
+        self._restart_requested = False  # For system restart feature
 
         self._setup_window()
         self._build_ui()
@@ -853,14 +855,49 @@ class CommandCenter(QWidget):
             self._kill_click_count = 0
 
     def _activate_kill_switch(self):
+        """Disarm the bot and show restart option instead of crashing."""
         self._killed = True
-        self.kill_btn.setText("SYSTEM HALTED")
+        self.kill_btn.setText("SYSTEM DISARMED")
         self.kill_btn.setEnabled(False)
         self.kill_switch_triggered.emit()
-        self.terminal.log("KILL SWITCH ACTIVATED — all systems halted")
+        self.terminal.log("KILL SWITCH ACTIVATED — Bot disarmed, all trading halted")
         self.status_watchtower.set_active(False, "Stopped")
         self.status_vision.set_active(False, "Stopped")
-        self.status_rpa.set_active(False, "Stopped")
+        self.status_rpa.set_active(False, "Disarmed")
+        
+        # Show System Restart button
+        self._show_restart_button()
+
+    def _show_restart_button(self):
+        """Display a System Restart button to wake up the bot."""
+        from PyQt6.QtWidgets import QMessageBox
+        
+        # Show restart dialog
+        reply = QMessageBox.question(
+            self,
+            "System Disarmed",
+            "The Emergency Kill Switch has been activated.\n\n"
+            "All trading activity has been halted and the bot is now disarmed.\n\n"
+            "Do you want to restart the system?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self._restart_requested = True
+            self._reset_from_kill_switch()
+
+    def _reset_from_kill_switch(self):
+        """Reset the system from kill switch state."""
+        self._killed = False
+        self._kill_click_count = 0
+        self.kill_btn.setText("EMERGENCY KILL SWITCH")
+        self.kill_btn.setEnabled(True)
+        self.terminal.log("System restarted — Ready for operation")
+        self.status_watchtower.set_active(True, "Scanning")
+        self.status_vision.set_active(True, config.VLM_MODEL if config.USE_VISION else "Disabled")
+        self.status_rpa.set_active(False, "Disarmed")
+        self.restart_system_requested.emit()
 
     # -- public API for backend threads --------------------------------------
 
