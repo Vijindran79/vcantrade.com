@@ -31,7 +31,19 @@ TEACHER_MODE = (
     os.getenv("TEACHER_MODE", "True").lower() == "true"
 )  # Default to teacher mode for safety
 
-# ===== LLM CONFIGURATION =====
+# ===== LLM CONFIGURATION (GROQ) =====
+GROQ_API_KEY = os.getenv(
+    "GROQ_API_KEY", "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"
+)
+LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+
+# Swarm Settings
+SWARM_TIMEOUT_SECONDS = int(os.getenv("SWARM_TIMEOUT_SECONDS", "30"))
+MAX_CONCURRENT_AGENTS = int(os.getenv("MAX_CONCURRENT_AGENTS", "10"))
+
+# Legacy Ollama config (kept for reference, not used)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
 LLM_TIMEOUT = 90  # Seconds before LLM request times out

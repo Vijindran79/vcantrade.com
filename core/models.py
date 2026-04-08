@@ -134,7 +134,7 @@ class SwarmAgentBrief(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     brief: str = Field(
-        ..., max_length=1000, description="Agent's analysis in under 80 words"
+        ..., max_length=1500, description="Agent's analysis in under 120 words"
     )
     risk_events: list[str] = Field(
         default_factory=list, description="Upcoming risk events (Macro Analyst only)"
