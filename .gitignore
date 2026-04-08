@@ -1,10 +1,1 @@
-```gitignore
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Logs
-*.log
-```
+Nothing should be ignored in this case, as the modified files (`main.py` and `ui/dashboard.py`) are source code files without any build artifacts, dependencies, or temporary files in the changes.

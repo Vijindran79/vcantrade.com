@@ -121,9 +121,8 @@ class MarketScanner(QThread):
 
                 self.data_ready.emit(market_data)
                 
-                # Sleep divided by number of selected assets for consistent update rate
-                num_assets = max(len(self.selected_assets), 1)
-                time.sleep(config.SCAN_INTERVAL / num_assets)
+                # Rate limit: sleep 2 seconds between each asset scan to avoid 429 errors
+                time.sleep(2)
 
     def stop(self):
         self.running = False
@@ -332,7 +331,7 @@ class VcaniTradeApp:
         """Open the RPA Coordinate Mapper wizard."""
         dialog = CalibrationWizardDialog(self.cmd)
         dialog.calibration_complete.connect(self._refresh_calibration_status)
-        dialog.exec()
+        dialog.exec_()
 
     def _on_test_vision(self):
         """Capture a screenshot and display it for sanity check."""
