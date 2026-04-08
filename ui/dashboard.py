@@ -192,6 +192,7 @@ class CommandCenter(QWidget):
         self._paper = True
         self._killed = False
         self._selected_assets = config.SELECTED_ASSETS.copy()
+        self._kill_click_count = 0  # For double-click confirmation
 
         self._setup_window()
         self._build_ui()
@@ -648,7 +649,7 @@ class CommandCenter(QWidget):
         return banner
 
     def _build_kill_switch(self) -> QWidget:
-        """Massive red Emergency Kill Switch button."""
+        """Massive red Emergency Kill Switch button with double-click confirmation."""
         container = QFrame()
         container.setStyleSheet(
             f"background-color: {BG_PANEL}; border: 1px solid {RED}; "
@@ -681,7 +682,7 @@ class CommandCenter(QWidget):
             }}
         """)
         self.kill_btn.setMinimumHeight(44)
-        self.kill_btn.clicked.connect(self._activate_kill_switch)
+        self.kill_btn.clicked.connect(self._on_kill_click)
         layout.addWidget(self.kill_btn)
 
         return container
@@ -823,7 +824,33 @@ class CommandCenter(QWidget):
             )
             self.terminal.log("WARNING: Switched to LIVE mode — real money at risk!")
 
-    # -- kill switch ---------------------------------------------------------
+    # -- kill switch handlers ------------------------------------------------
+
+    def _on_kill_click(self):
+        """Handle kill switch click with double-click confirmation."""
+        from PyQt6.QtWidgets import QMessageBox
+        
+        self._kill_click_count += 1
+        
+        if self._kill_click_count == 1:
+            # First click - show confirmation dialog
+            reply = QMessageBox.warning(
+                self,
+                "CONFIRM KILL SWITCH",
+                "WARNING: This will IMMEDIATELY halt all trading activity!\n\n"
+                "Click the Kill Switch button AGAIN to confirm,\n"
+                "or click Cancel to abort.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                self._kill_click_count = 0
+                return
+            # User clicked OK, keep click count at 1 for second click
+        else:
+            # Second click (or more) - activate kill switch
+            self._activate_kill_switch()
+            self._kill_click_count = 0
 
     def _activate_kill_switch(self):
         self._killed = True
