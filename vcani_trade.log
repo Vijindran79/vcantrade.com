@@ -6839,3 +6839,4 @@
 2026-04-07 02:30:06,447 [INFO] core.llm_analyzer: Swarm decision: BUY EURUSD (MEDIUM)
 2026-04-07 02:30:06,548 [WARNING] core.trade_engine: KILL SWITCH ACTIVE - Trading halted
 2026-04-07 02:30:06,550 [WARNING] core.trade_engine: Trade blocked by safety controls: EURUSD
+2026-04-08 01:54:53,095 [INFO] main: Market scanner updated to monitor: ['SPX500', 'XAUUSD', 'EURUSD']
