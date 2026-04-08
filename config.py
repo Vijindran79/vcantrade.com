@@ -33,8 +33,8 @@ TEACHER_MODE = (
 
 # ===== LLM CONFIGURATION =====
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-LLM_TIMEOUT = 10  # Seconds before LLM request times out
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
+LLM_TIMEOUT = 90  # Seconds before LLM request times out
 JSON_OUTPUT = True  # Force strict JSON output from LLM
 
 # ===== VISION / VLM CONFIGURATION =====
@@ -42,7 +42,7 @@ JSON_OUTPUT = True  # Force strict JSON output from LLM
 # Primary: moondream (~1.5GB VRAM, fastest)
 # Fallback: llava:7b-v1.5-q4_K_M (~4GB VRAM)
 VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
-VLM_TIMEOUT = 15  # Max seconds before graceful degradation to text-only
+VISION_TIMEOUT = 120  # Max seconds before graceful degradation to text-only
 USE_VISION = (
     os.getenv("USE_VISION", "True").lower() == "true"
 )  # Enable chart screenshot analysis

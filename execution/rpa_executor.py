@@ -155,7 +155,7 @@ class RPAExecutor:
         self.hotkey_close = config.HOTKEY_CLOSE
 
         # Load calibrated coordinates
-        self.calibration = CalibrationManager()
+        self.calibration_manager = CalibrationManager()
 
         # Only import pyautogui if needed
         self.pyautogui = None
@@ -274,7 +274,7 @@ class RPAExecutor:
 
         # Step 2: Fill Stop Loss
         if fill_sl and trade.stop_loss:
-            sl_x, sl_y = self.calibration.get_coordinate("sl_input")
+            sl_x, sl_y = self.calibration_manager.get_coordinate("sl_input")
             if (sl_x, sl_y) != (0, 0):
                 _human_click(self.pyautogui, sl_x, sl_y)
                 time.sleep(random.uniform(0.15, 0.35))
@@ -288,7 +288,7 @@ class RPAExecutor:
 
         # Step 3: Fill Take Profit
         if fill_tp and trade.take_profit:
-            tp_x, tp_y = self.calibration.get_coordinate("tp_input")
+            tp_x, tp_y = self.calibration_manager.get_coordinate("tp_input")
             if (tp_x, tp_y) != (0, 0):
                 _human_click(self.pyautogui, tp_x, tp_y)
                 time.sleep(random.uniform(0.15, 0.35))
@@ -299,7 +299,7 @@ class RPAExecutor:
                 _jitter()
 
         # Step 4: Fill Lot Size if calibrated
-        lot_x, lot_y = self.calibration.get_coordinate("lot_size_input")
+        lot_x, lot_y = self.calibration_manager.get_coordinate("lot_size_input")
         if (lot_x, lot_y) != (0, 0):
             _human_click(self.pyautogui, lot_x, lot_y)
             time.sleep(random.uniform(0.15, 0.35))
