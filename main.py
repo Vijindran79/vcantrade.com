@@ -224,6 +224,7 @@ class VcaniTradeApp:
         # Command Center
         self.cmd.mode_changed.connect(self._on_mode_changed)
         self.cmd.kill_switch_triggered.connect(self._on_kill_switch)
+        self.cmd.restart_system_requested.connect(self._on_restart_system)
         self.cmd.calibration_requested.connect(self._on_calibrate)
         self.cmd.vision_test_requested.connect(self._on_test_vision)
         self.cmd.calibration_reset_requested.connect(self._on_reset_calibration)
@@ -322,10 +323,25 @@ class VcaniTradeApp:
         logger.info(f"Mode changed to {mode}")
 
     def _on_kill_switch(self):
+        """Handle kill switch activation - disarm bot without crashing."""
         self.trade_engine.activate_kill_switch()
-        self.market_scanner.stop()
-        self.watchtower.stop()
-        logger.critical("Kill switch activated — all systems halted")
+        # Stop scanner and watchtower but keep threads alive for restart
+        logger.critical("Kill switch activated — Bot disarmed, awaiting restart")
+
+    def _on_restart_system(self):
+        """Restart the system after kill switch was activated."""
+        logger.info("System restart requested — reinitializing components")
+        # Restart market scanner
+        if not self.market_scanner.isRunning():
+            self.market_scanner.start()
+        # Restart watchtower
+        if not self.watchtower.isRunning():
+            self.watchtower.start()
+        # Reset trade engine
+        self.trade_engine._kill_switch_active = False
+        # Update UI status
+        self.cmd.set_watchtower_status(True, "Scanning")
+        self.cmd.log("System restarted — All systems operational")
 
     def _on_calibrate(self):
         """Open the RPA Coordinate Mapper wizard."""
