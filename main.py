@@ -784,14 +784,19 @@ class VcaniTradeApp:
         confidence = signal_data.get("confidence", 0.0)
         entry_price = signal_data.get("entry_price", 0.0)
         
+        # DEBUG: Log current mode and signal details
         self.cmd.log(
             f'<span style="color:#3FB950;font-weight:bold">📡 SIGNAL RECEIVED</span>: '
             f'{action} {ticker} (confidence: {confidence:.2f}, entry: ${entry_price:.2f})'
         )
+        self.cmd.log(
+            f'<span style="color:#8B949E">🔍 DEBUG</span>: '
+            f'Mode={self.current_mode}, Action={action}, Confidence={confidence}, EntryPrice={entry_price}'
+        )
 
         # Update trade ledger
         self._add_to_trade_ledger(signal_data)
-        
+
         # AUTO-EXECUTE: If confidence >= 0.80 AND action is BUY/SELL, execute immediately
         if confidence >= 0.80 and action in ["BUY", "SELL"] and entry_price > 0:
             self.cmd.log(
@@ -799,14 +804,24 @@ class VcaniTradeApp:
                 f'Auto-executing {action} {ticker} (confidence: {confidence:.2f})'
             )
             self.ai_narrator.notify_trade_approved(ticker, action, 1000.0)
-            self._execute_cloud_signal(signal_data)
+            self.cmd.log(f'<span style="color:#D29922">🔧 Calling _execute_cloud_signal...</span>')
+            try:
+                self._execute_cloud_signal(signal_data)
+                self.cmd.log(f'<span style="color:#3FB950">✅ _execute_cloud_signal completed</span>')
+            except Exception as e:
+                self.cmd.log(f'<span style="color:#F85149">❌ Execution failed: {e}</span>')
+                import traceback
+                self.cmd.log(f'<span style="color:#F85149">📝 {traceback.format_exc()}</span>')
         elif self.current_mode == "AUTONOMOUS" and action in ["BUY", "SELL"]:
             # In autonomous mode, execute all BUY/SELL signals
             self.cmd.log(
                 f'<span style="color:#D29922;font-weight:bold">🤖 AUTONOMOUS</span>: '
                 f'Executing {action} {ticker} in autonomous mode'
             )
-            self._execute_cloud_signal(signal_data)
+            try:
+                self._execute_cloud_signal(signal_data)
+            except Exception as e:
+                self.cmd.log(f'<span style="color:#F85149">❌ Autonomous execution failed: {e}</span>')
         else:
             # TEACHER mode or low confidence - just log it
             self.cmd.log(

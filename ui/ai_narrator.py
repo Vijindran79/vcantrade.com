@@ -144,29 +144,38 @@ class GlassmorphicPanel(QWidget):
         self.setGraphicsEffect(shadow)
     
     def paintEvent(self, event):
-        """Draw glassmorphic background."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Create glass gradient
-        gradient = QLinearGradient(0, 0, 0, self.height())
-        gradient.setColorAt(0, QColor(20, 25, 40, 200))      # Top - darker
-        gradient.setColorAt(0.5, QColor(15, 20, 35, 190))    # Middle
-        gradient.setColorAt(1, QColor(10, 15, 30, 200))      # Bottom - darker
-        
-        # Draw rounded rectangle
-        rect = self.rect().adjusted(2, 2, -2, -2)
-        painter.setBrush(QBrush(gradient))
-        painter.setPen(QPen(QColor(100, 120, 160, 80), 1.5))
-        painter.drawRoundedRect(rect, 16, 16)
-        
-        # Add subtle top highlight
-        highlight = QLinearGradient(0, 0, 0, 40)
-        highlight.setColorAt(0, QColor(255, 255, 255, 30))
-        highlight.setColorAt(1, QColor(255, 255, 255, 0))
-        painter.setBrush(QBrush(highlight))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(rect.adjusted(2, 2, -2, -30), 14, 14)
+        """Draw glassmorphic background with safety checks."""
+        # Safety: Don't paint if widget isn't visible or active
+        if not self.isVisible() or not self.isActiveWindow():
+            return
+            
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # Create glass gradient
+            gradient = QLinearGradient(0, 0, 0, self.height())
+            gradient.setColorAt(0, QColor(20, 25, 40, 200))      # Top - darker
+            gradient.setColorAt(0.5, QColor(15, 20, 35, 190))    # Middle
+            gradient.setColorAt(1, QColor(10, 15, 30, 200))      # Bottom - darker
+            
+            # Draw rounded rectangle
+            rect = self.rect().adjusted(2, 2, -2, -2)
+            painter.setBrush(QBrush(gradient))
+            painter.setPen(QPen(QColor(100, 120, 160, 80), 1.5))
+            painter.drawRoundedRect(rect, 16, 16)
+            
+            # Add subtle top highlight
+            highlight = QLinearGradient(0, 0, 0, 40)
+            highlight.setColorAt(0, QColor(255, 255, 255, 30))
+            highlight.setColorAt(1, QColor(255, 255, 255, 0))
+            painter.setBrush(QBrush(highlight))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(rect.adjusted(2, 2, -2, -30), 14, 14)
+            
+            painter.end()
+        except Exception:
+            pass  # Silently ignore paint errors
 
 
 class AINarratorOverlay(GlassmorphicPanel):

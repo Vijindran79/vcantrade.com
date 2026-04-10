@@ -631,3 +631,173 @@ reason
 2026-04-10 02:49:15,197 [INFO] core.scanner:    Signal: BUY ETH-USD (confidence: 0.80)
 2026-04-10 02:49:17,239 [INFO] core.signal_dispatcher: 📡 Signal received: BUY ETH-USD (confidence: 0.80)
 2026-04-10 02:49:17,239 [INFO] __main__: Signal received from cloud: {'ticker': 'ETH-USD', 'action': 'BUY', 'confidence': 0.8, 'entry_price': 2199.58, 'stop_loss': 2167.63, 'take_profit': 2241.53, 'reason': 'The RSI is at a neutral level, and the SMA cross indicates a bullish trend, suggesting potential upward momentum.', 'signal_type': 'SMA_CROSS_BULLISH', 'investment_amount': 1000.0, 'transcript': {'technical_sniper': {'agent': 'Qwen 2.5 Analyst', 'action': 'BUY', 'conviction': 'MEDIUM'}, 'macro_analyst': {'agent': 'Qwen 2.5 Analyst', 'action': 'BUY', 'conviction': 'MEDIUM'}, 'risk_manager': {'agent': 'Risk Manager', 'verdict': 'APPROVE', 'conviction': 'MEDIUM'}, 'ceo_verdict': 'BUY ETH-USD - MEDIUM confidence'}, 'received_at': '2026-04-10T01:49:17.239991', 'local_status': 'received'}
+2026-04-10 03:00:53,958 [INFO] __main__: Logging system initialized
+2026-04-10 03:00:54,664 [INFO] ui.dashboard: Command Center initialized - Professional Trading Mode
+2026-04-10 03:00:54,666 [INFO] ui.ai_narrator: AI Narrator Overlay initialized
+2026-04-10 03:00:54,683 [INFO] core.calibration: No calibration file found — using defaults
+2026-04-10 03:00:54,684 [INFO] core.trade_engine: Trade ledger initialized
+2026-04-10 03:00:54,694 [INFO] core.prop_firm_rules: Prop Firm Rule Engine initialized: TopStep
+2026-04-10 03:00:54,694 [INFO] core.prop_firm_rules: Rules: Daily Loss=$150.0, Drawdown=$3000.0, Target=$3000.0
+2026-04-10 03:00:54,694 [INFO] __main__: Prop Firm Rule Engine active: TopStep
+2026-04-10 03:00:54,694 [INFO] core.swarm_consensus: 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
+2026-04-10 03:00:54,694 [INFO] core.signal_dispatcher: Signal Dispatcher initialized on port 17199
+2026-04-10 03:00:54,694 [INFO] core.swarm_consensus: 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
+2026-04-10 03:00:54,697 [INFO] __main__: VcaniTrade AI initialized (Hybrid Architecture)
+2026-04-10 03:00:54,697 [INFO] __main__: Starting VcaniTrade AI (Hybrid)...
+2026-04-10 03:00:54,859 [INFO] __main__: Application running
+2026-04-10 03:00:54,860 [INFO] __main__: ============================================================
+2026-04-10 03:00:54,861 [INFO] __main__: ☁️ CLOUD SCANNER THREAD STARTED
+2026-04-10 03:00:54,861 [INFO] __main__: Analysis worker started (Swarm Consensus mode)
+2026-04-10 03:00:54,861 [INFO] __main__:    Monitoring 10 tickers
+2026-04-10 03:00:54,861 [INFO] __main__: Data Scout Listener started on port 5000
+2026-04-10 03:00:54,861 [INFO] core.watchtower: Watchtower Scanner started
+2026-04-10 03:00:54,861 [INFO] __main__:    Target: http://localhost:17199/api/signal
+2026-04-10 03:00:54,861 [INFO] __main__: Signal Listener started on port 17199
+2026-04-10 03:00:54,861 [INFO] __main__: ============================================================
+2026-04-10 03:00:54,865 [INFO] __main__: Data Scout Listener HTTP server running
+2026-04-10 03:00:54,865 [INFO] core.signal_dispatcher: Signal Dispatcher listening on port 17199
+2026-04-10 03:00:54,865 [INFO] __main__: ✅ Signal Dispatcher listening on port 17199
+2026-04-10 03:00:56,677 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on TSLA (strength: 0.34)
+2026-04-10 03:00:56,677 [INFO] core.swarm_consensus: 🧠 Analyzing TSLA with qwen2.5:latest
+2026-04-10 03:00:56,677 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:00:59,917 [ERROR] __main__: ⚠️ Signal Dispatcher health check failed: HTTPConnectionPool(host='localhost', port=17199): Read timed out. (read timeout=3)
+2026-04-10 03:00:59,920 [INFO] aiohttp.access: 127.0.0.1 [10/Apr/2026:03:00:59 +0100] "GET /api/health HTTP/1.1" 200 255 "-" "python-requests/2.32.3"
+2026-04-10 03:01:12,924 [INFO] __main__: Mode changed to AUTONOMOUS
+2026-04-10 03:01:16,986 [INFO] core.settings: ✅ Settings saved to trading_settings.json
+2026-04-10 03:01:16,986 [INFO] core.settings: ⚙️ Settings batch updated: ['investment', 'take_profit_pct', 'stop_loss_pct', 'max_daily_loss']
+2026-04-10 03:01:50,285 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:01:50,286 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD TSLA
+2026-04-10 03:01:50,286 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 03:01:50,286 [INFO] core.scanner: ⏸️ HOLD signal for TSLA - not dispatching (no trade)
+2026-04-10 03:01:50,286 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on SPY (strength: 0.46)
+2026-04-10 03:01:50,286 [INFO] core.swarm_consensus: 🧠 Analyzing SPY with qwen2.5:latest
+2026-04-10 03:01:50,286 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:01:54,568 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:01:54,568 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD SPY
+2026-04-10 03:01:54,568 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 03:01:54,568 [INFO] core.scanner: ⏸️ HOLD signal for SPY - not dispatching (no trade)
+2026-04-10 03:01:54,568 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on QQQ (strength: 0.45)
+2026-04-10 03:01:54,568 [INFO] core.swarm_consensus: 🧠 Analyzing QQQ with qwen2.5:latest
+2026-04-10 03:01:54,569 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:01:58,791 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:01:58,792 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD QQQ
+2026-04-10 03:01:58,792 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 03:01:58,792 [INFO] core.scanner: ⏸️ HOLD signal for QQQ - not dispatching (no trade)
+2026-04-10 03:01:58,792 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on AAPL (strength: 0.51)
+2026-04-10 03:01:58,792 [INFO] core.swarm_consensus: 🧠 Analyzing AAPL with qwen2.5:latest
+2026-04-10 03:01:58,792 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:02:02,800 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:02:02,800 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD AAPL
+2026-04-10 03:02:02,800 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 03:02:02,800 [INFO] core.scanner: ⏸️ HOLD signal for AAPL - not dispatching (no trade)
+2026-04-10 03:02:02,800 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on NVDA (strength: 0.36)
+2026-04-10 03:02:02,800 [INFO] core.swarm_consensus: 🧠 Analyzing NVDA with qwen2.5:latest
+2026-04-10 03:02:02,801 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:02:06,755 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:02:06,756 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD NVDA
+2026-04-10 03:02:06,756 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 03:02:06,756 [INFO] core.scanner: ⏸️ HOLD signal for NVDA - not dispatching (no trade)
+2026-04-10 03:06:56,300 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on TSLA (strength: 0.34)
+2026-04-10 03:06:56,300 [INFO] core.swarm_consensus: 🧠 Analyzing TSLA with qwen2.5:latest
+2026-04-10 03:06:56,300 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:07:01,194 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:07:01,195 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD TSLA
+2026-04-10 03:07:01,195 [INFO] core.scanner: Swarm consensus: 0.60 confidence
+2026-04-10 03:07:01,195 [INFO] core.scanner: ⏸️ HOLD signal for TSLA - not dispatching (no trade)
+2026-04-10 03:07:01,195 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on SPY (strength: 0.46)
+2026-04-10 03:07:01,195 [INFO] core.swarm_consensus: 🧠 Analyzing SPY with qwen2.5:latest
+2026-04-10 03:07:01,195 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:07:05,609 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:07:05,610 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD SPY
+2026-04-10 03:07:05,610 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 03:07:05,610 [INFO] core.scanner: ⏸️ HOLD signal for SPY - not dispatching (no trade)
+2026-04-10 03:07:05,610 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on QQQ (strength: 0.45)
+2026-04-10 03:07:05,610 [INFO] core.swarm_consensus: 🧠 Analyzing QQQ with qwen2.5:latest
+2026-04-10 03:07:05,610 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 03:07:10,181 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 03:07:10,181 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD QQQ
+2026-04-10 03:07:10,181 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 03:07:10,181 [INFO] core.scanner: ⏸️ HOLD signal for QQQ - not dispatching (no trade)
+2026-04-10 03:07:10,181 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on AAPL (strength: 0.51)
+2026-04-10 05:58:44,426 [INFO] __main__: Logging system initialized
+2026-04-10 05:58:45,630 [INFO] ui.dashboard: Command Center initialized - Professional Trading Mode
+2026-04-10 05:58:45,638 [INFO] ui.ai_narrator: AI Narrator Overlay initialized
+2026-04-10 05:58:45,648 [INFO] core.calibration: No calibration file found — using defaults
+2026-04-10 05:58:45,648 [INFO] core.trade_engine: Trade ledger initialized
+2026-04-10 05:58:45,668 [INFO] core.prop_firm_rules: Prop Firm Rule Engine initialized: TopStep
+2026-04-10 05:58:45,668 [INFO] core.prop_firm_rules: Rules: Daily Loss=$150.0, Drawdown=$3000.0, Target=$3000.0
+2026-04-10 05:58:45,668 [INFO] __main__: Prop Firm Rule Engine active: TopStep
+2026-04-10 05:58:45,668 [INFO] core.swarm_consensus: 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
+2026-04-10 05:58:45,668 [INFO] core.signal_dispatcher: Signal Dispatcher initialized on port 17199
+2026-04-10 05:58:45,668 [INFO] core.swarm_consensus: 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
+2026-04-10 05:58:45,676 [INFO] __main__: VcaniTrade AI initialized (Hybrid Architecture)
+2026-04-10 05:58:45,676 [INFO] __main__: Starting VcaniTrade AI (Hybrid)...
+2026-04-10 05:58:45,841 [INFO] __main__: Application running
+2026-04-10 05:58:45,842 [INFO] __main__: ============================================================
+2026-04-10 05:58:45,842 [INFO] core.watchtower: Watchtower Scanner started
+2026-04-10 05:58:45,842 [INFO] __main__: Data Scout Listener started on port 5000
+2026-04-10 05:58:45,842 [INFO] __main__: Signal Listener started on port 17199
+2026-04-10 05:58:45,842 [INFO] __main__: Analysis worker started (Swarm Consensus mode)
+2026-04-10 05:58:45,842 [INFO] __main__: ☁️ CLOUD SCANNER THREAD STARTED
+2026-04-10 05:58:45,844 [INFO] __main__:    Monitoring 10 tickers
+2026-04-10 05:58:45,844 [INFO] __main__:    Target: http://localhost:17199/api/signal
+2026-04-10 05:58:45,844 [INFO] __main__: ============================================================
+2026-04-10 05:58:45,846 [INFO] __main__: Data Scout Listener HTTP server running
+2026-04-10 05:58:45,847 [INFO] core.signal_dispatcher: Signal Dispatcher listening on port 17199
+2026-04-10 05:58:45,847 [INFO] __main__: ✅ Signal Dispatcher listening on port 17199
+2026-04-10 05:58:49,394 [INFO] core.scanner: 🔥 Signal detected: RSI_OVERBOUGHT on BTC-USD (strength: 0.75)
+2026-04-10 05:58:49,394 [INFO] core.swarm_consensus: 🧠 Analyzing BTC-USD with qwen2.5:latest
+2026-04-10 05:58:49,394 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 05:58:50,899 [ERROR] __main__: ⚠️ Signal Dispatcher health check failed: HTTPConnectionPool(host='localhost', port=17199): Read timed out. (read timeout=3)
+2026-04-10 05:58:50,899 [INFO] aiohttp.access: 127.0.0.1 [10/Apr/2026:05:58:50 +0100] "GET /api/health HTTP/1.1" 200 255 "-" "python-requests/2.32.3"
+2026-04-10 05:59:26,417 [ERROR] core.swarm_consensus: ❌ Local AI Error: 500 Server Error: Internal Server Error for url: http://localhost:11434/api/generate
+2026-04-10 05:59:26,417 [ERROR] core.swarm_consensus: Local brain failed: 500 Server Error: Internal Server Error for url: http://localhost:11434/api/generate
+2026-04-10 05:59:26,418 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD BTC-USD
+2026-04-10 05:59:26,418 [INFO] core.scanner: Swarm consensus: 0.60 confidence
+2026-04-10 05:59:26,418 [INFO] core.scanner: ⏸️ HOLD signal for BTC-USD - not dispatching (no trade)
+2026-04-10 05:59:26,418 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on TSLA (strength: 0.34)
+2026-04-10 05:59:26,418 [INFO] core.swarm_consensus: 🧠 Analyzing TSLA with qwen2.5:latest
+2026-04-10 05:59:26,419 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 06:00:24,273 [ERROR] core.swarm_consensus: ❌ Local AI Error: 500 Server Error: Internal Server Error for url: http://localhost:11434/api/generate
+2026-04-10 06:00:24,275 [ERROR] core.swarm_consensus: Local brain failed: 500 Server Error: Internal Server Error for url: http://localhost:11434/api/generate
+2026-04-10 06:00:24,275 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD TSLA
+2026-04-10 06:00:24,275 [INFO] core.scanner: Swarm consensus: 0.60 confidence
+2026-04-10 06:00:24,275 [INFO] core.scanner: ⏸️ HOLD signal for TSLA - not dispatching (no trade)
+2026-04-10 06:00:24,275 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on SPY (strength: 0.46)
+2026-04-10 06:00:24,275 [INFO] core.swarm_consensus: 🧠 Analyzing SPY with qwen2.5:latest
+2026-04-10 06:00:24,275 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 06:01:23,273 [ERROR] core.swarm_consensus: ❌ Local AI Error: 500 Server Error: Internal Server Error for url: http://localhost:11434/api/generate
+2026-04-10 06:01:23,275 [ERROR] core.swarm_consensus: Local brain failed: 500 Server Error: Internal Server Error for url: http://localhost:11434/api/generate
+2026-04-10 06:01:23,275 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD SPY
+2026-04-10 06:01:23,275 [INFO] core.scanner: Swarm consensus: 0.60 confidence
+2026-04-10 06:01:23,275 [INFO] core.scanner: ⏸️ HOLD signal for SPY - not dispatching (no trade)
+2026-04-10 06:01:23,275 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on QQQ (strength: 0.45)
+2026-04-10 06:01:23,275 [INFO] core.swarm_consensus: 🧠 Analyzing QQQ with qwen2.5:latest
+2026-04-10 06:01:23,275 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 06:02:13,462 [INFO] __main__: Mode changed to AUTONOMOUS
+2026-04-10 06:02:19,255 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 06:02:19,255 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD QQQ
+2026-04-10 06:02:19,255 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 06:02:19,255 [INFO] core.scanner: ⏸️ HOLD signal for QQQ - not dispatching (no trade)
+2026-04-10 06:02:19,256 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on AAPL (strength: 0.51)
+2026-04-10 06:02:19,256 [INFO] core.swarm_consensus: 🧠 Analyzing AAPL with qwen2.5:latest
+2026-04-10 06:02:19,256 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 06:02:25,205 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 06:02:25,206 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD AAPL
+2026-04-10 06:02:25,206 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 06:02:25,206 [INFO] core.scanner: ⏸️ HOLD signal for AAPL - not dispatching (no trade)
+2026-04-10 06:02:25,206 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on NVDA (strength: 0.36)
+2026-04-10 06:02:25,206 [INFO] core.swarm_consensus: 🧠 Analyzing NVDA with qwen2.5:latest
+2026-04-10 06:02:25,206 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 06:02:29,581 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 06:02:29,581 [INFO] core.swarm_consensus: ✅ Analysis complete: HOLD NVDA
+2026-04-10 06:02:29,581 [INFO] core.scanner: Swarm consensus: 0.80 confidence
+2026-04-10 06:02:29,582 [INFO] core.scanner: ⏸️ HOLD signal for NVDA - not dispatching (no trade)
+2026-04-10 06:02:40,709 [INFO] core.scanner: 🔥 Signal detected: VOLUME_SPIKE on BTC-USD (strength: 0.39)
+2026-04-10 06:02:40,709 [INFO] core.swarm_consensus: 🧠 Analyzing BTC-USD with qwen2.5:latest
+2026-04-10 06:02:40,709 [INFO] core.swarm_consensus: 🧠 Calling local brain: qwen2.5:latest
+2026-04-10 06:02:47,359 [INFO] core.swarm_consensus: ✅ Local brain responded successfully
+2026-04-10 06:02:47,360 [ERROR] core.scanner: Swarm consensus failed: 1 validation error for LLMAnalysisOutput
+reason
+  String should have at most 200 characters [type=string_too_long, input_value='The RSI is at a neutral ...rovide clear direction.', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.5/v/string_too_long

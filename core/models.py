@@ -37,7 +37,7 @@ class LLMAnalysisOutput(BaseModel):
     stop_loss: Optional[float] = Field(None, description="Stop loss price")
     take_profit: Optional[float] = Field(None, description="Take profit price")
     reason: str = Field(
-        ..., max_length=200, description="Brief explanation of the signal"
+        ..., max_length=500, description="Brief explanation of the signal"
     )
     timestamp: Optional[str] = Field(None, description="ISO timestamp of analysis")
 
