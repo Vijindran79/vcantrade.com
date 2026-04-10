@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(python *)",
+      "Bash(taskkill *)",
+      "Bash(ollama *)",
+      "Bash(rd *)",
+      "Bash(git pull)",
+      "Bash(git stash)",
+      "Bash(git checkout *)"
     ]
   },
   "$version": 3

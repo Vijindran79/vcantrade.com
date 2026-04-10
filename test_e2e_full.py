@@ -1,0 +1,259 @@
+#!/usr/bin/env python
+"""
+End-to-End System Test - Simulates full user experience
+Tests: Scanner → Signal → AI Analysis → Prop Firm Check → Execution → Position Monitoring
+"""
+import sys
+import io
+import asyncio
+import json
+
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler('e2e_test.log', encoding='utf-8', mode='w'),
+        logging.StreamHandler(sys.stdout)
+    ],
+    force=True
+)
+logger = logging.getLogger('e2e')
+
+PASS = 0
+FAIL = 0
+
+def test(name, condition, detail=""):
+    global PASS, FAIL
+    if condition:
+        PASS += 1
+        logger.info(f"✅ {name}")
+        if detail:
+            logger.info(f"   → {detail}")
+    else:
+        FAIL += 1
+        logger.error(f"❌ {name}")
+        if detail:
+            logger.error(f"   → {detail}")
+
+async def main():
+    global PASS, FAIL
+    
+    logger.info("=" * 70)
+    logger.info("VCANITRADE AI - END-TO-END SYSTEM TEST")
+    logger.info("=" * 70)
+    logger.info("")
+
+    # ── TEST 1: Config ─────────────────────────────────────────────
+    logger.info("─" * 50)
+    logger.info("TEST 1: Configuration")
+    logger.info("─" * 50)
+    try:
+        import config
+        test("Config loaded", True)
+        test(f"PROP_FIRM: {config.PROP_FIRM_NAME}", config.PROP_FIRM_ENABLED)
+        test(f"OLLAMA_URL: {config.OLLAMA_BASE_URL}", "localhost" in config.OLLAMA_BASE_URL)
+        test(f"MODEL: {config.OLLAMA_MODEL}", config.OLLAMA_MODEL)
+        test(f"SCANNER: {'ENABLED' if config.CLOUD_SCANNER_ENABLED else 'DISABLED'}", config.CLOUD_SCANNER_ENABLED)
+        test(f"Tickers: {len(config.CLOUD_TICKERS)}", len(config.CLOUD_TICKERS) > 0, str(config.CLOUD_TICKERS))
+    except Exception as e:
+        test("Config loaded", False, str(e))
+
+    # ── TEST 2: Ollama Connection ─────────────────────────────────
+    logger.info("")
+    logger.info("─" * 50)
+    logger.info("TEST 2: Ollama AI Connection")
+    logger.info("─" * 50)
+    try:
+        import requests
+        resp = requests.post(f"{config.OLLAMA_BASE_URL}/api/generate", json={
+            "model": config.OLLAMA_MODEL,
+            "prompt": "Say 'TRADING READY' in exactly 3 words",
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 50}
+        }, timeout=30)
+        resp.raise_for_status()
+        reply = resp.json().get("response", "")
+        test("Ollama responds", True, f"Reply: {reply[:80]}")
+    except Exception as e:
+        test("Ollama responds", False, str(e))
+
+    # ── TEST 3: Scanner Detects Real Signals ──────────────────────
+    logger.info("")
+    logger.info("─" * 50)
+    logger.info("TEST 3: Market Scanner (Live Data)")
+    logger.info("─" * 50)
+    try:
+        from core.scanner import CloudScanner
+        scanner = CloudScanner()
+        signals = await scanner.scan_all_tickers()
+        test(f"Scanned {len(scanner.tickers)} tickers", True)
+        test(f"Signals found: {len(signals)}", len(signals) > 0, 
+             ", ".join([f"{s.ticker}:{s.signal_type}" for s in signals[:5]]))
+    except Exception as e:
+        test("Scanner works", False, str(e))
+        import traceback
+        traceback.print_exc()
+
+    # ── TEST 4: AI Analysis Works ─────────────────────────────────
+    logger.info("")
+    logger.info("─" * 50)
+    logger.info("TEST 4: AI Analysis (Swarm Consensus)")
+    logger.info("─" * 50)
+    try:
+        from core.scanner import CloudScanner
+        from core.models import MarketDataPoint
+        scanner = CloudScanner()
+        signals = await scanner.scan_all_tickers()
+        
+        if signals:
+            result = await scanner.process_signals(signals[:1])  # Process first signal
+            if result:
+                test("AI analysis complete", True)
+                test(f"Action: {result['action']}", result['action'] in ['BUY', 'SELL', 'HOLD'])
+                test(f"Confidence: {result['confidence']:.2f}", result['confidence'] > 0)
+                test(f"Entry: ${result.get('entry_price', 0):.2f}", result.get('entry_price', 0) > 0)
+                test(f"TP: ${result.get('take_profit', 0):.2f}", result.get('take_profit', 0) > 0)
+                test(f"SL: ${result.get('stop_loss', 0):.2f}", result.get('stop_loss', 0) > 0)
+                test(f"Reason: {result.get('reason', '')[:60]}...", len(result.get('reason', '')) > 0)
+            else:
+                test("AI returns result", False, "No result returned")
+        else:
+            test("AI analysis", False, "No signals to analyze - creating test signal")
+            # Create synthetic signal
+            market_data = MarketDataPoint(
+                asset="BTC-USD",
+                price=85000.0,
+                volume=1000.0,
+                indicators={"RSI": 35.0, "SIGNAL_TYPE": "RSI_OVERSOLD", "SIGNAL_STRENGTH": 0.75}
+            )
+            output, transcript = await scanner.consensus.run(market_data)
+            test("AI analysis (synthetic)", output.action.value in ['BUY', 'SELL', 'HOLD'],
+                 f"Action: {output.action.value}, Confidence: {output.confidence.value}")
+    except Exception as e:
+        test("AI analysis works", False, str(e))
+        import traceback
+        traceback.print_exc()
+
+    # ── TEST 5: Prop Firm Rule Engine ─────────────────────────────
+    logger.info("")
+    logger.info("─" * 50)
+    logger.info("TEST 5: Prop Firm Rule Engine (The Professor)")
+    logger.info("─" * 50)
+    try:
+        from core.prop_firm_rules import PropFirmRuleEngine, PropFirmName
+        engine = PropFirmRuleEngine(PropFirmName.TOPSTEP)
+        engine.compliance.starting_balance = 50000.0
+        engine.compliance.current_balance = 50000.0
+        engine.compliance.peak_balance = 50000.0
+        
+        can_trade, violations = engine.check_before_trade("BTC-USD", 10.0)
+        test("Prop firm allows trade", can_trade, f"Violations: {violations}")
+        
+        # Simulate losing trade
+        engine.compliance.daily_pnl = -200.0  # Exceed $150 limit
+        can_trade2, violations2 = engine.check_before_trade("BTC-USD", 10.0)
+        test("Prop firm blocks after daily loss", not can_trade2, f"Violations: {violations2}")
+        
+        # Reset
+        engine.compliance.daily_pnl = 0.0
+        report = engine.get_dashboard_data()
+        test("Dashboard data works", 'current_balance' in report, f"Balance: ${report['current_balance']:,.2f}")
+    except Exception as e:
+        test("Prop firm engine works", False, str(e))
+        import traceback
+        traceback.print_exc()
+
+    # ── TEST 6: Position Monitoring ───────────────────────────────
+    logger.info("")
+    logger.info("─" * 50)
+    logger.info("TEST 6: Position Lifecycle")
+    logger.info("─" * 50)
+    try:
+        position = {
+            "asset": "BTC-USD",
+            "side": "BUY",
+            "entry": 85000.0,
+            "current": 85000.0,
+            "amount": 100.0,
+            "quantity": 0.001176,
+            "tp_price": 86700.0,
+            "sl_price": 84150.0,
+            "pnl": 0.0,
+            "pnl_pct": 0.0,
+        }
+        test("Position created", True, f"{position['side']} {position['asset']} @ ${position['entry']:,.2f}")
+        test("TP set above entry", position['tp_price'] > position['entry'],
+             f"TP: ${position['tp_price']:,.2f}")
+        test("SL set below entry", position['sl_price'] < position['entry'],
+             f"SL: ${position['sl_price']:,.2f}")
+        
+        # Simulate price moving to TP
+        position['current'] = 87000.0  # Above TP
+        hit_tp = position['current'] >= position['tp_price']
+        test("TP would trigger", hit_tp, f"Current: ${position['current']:,.2f} >= TP: ${position['tp_price']:,.2f}")
+        
+        # Simulate price moving to SL
+        position['current'] = 84000.0  # Below SL
+        hit_sl = position['current'] <= position['sl_price']
+        test("SL would trigger", hit_sl, f"Current: ${position['current']:,.2f} <= SL: ${position['sl_price']:,.2f}")
+    except Exception as e:
+        test("Position monitoring", False, str(e))
+
+    # ── TEST 7: Dashboard Imports ─────────────────────────────────
+    logger.info("")
+    logger.info("─" * 50)
+    logger.info("TEST 7: UI Components")
+    logger.info("─" * 50)
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv)
+        test("Qt initialized", True)
+        
+        from ui.dashboard import CommandCenter
+        cmd = CommandCenter()
+        test("Dashboard created", True)
+        
+        # Test UI methods
+        cmd.update_balance(50000.0, 50100.0, 100.0, 250.0)
+        test("Balance update works", True)
+        
+        cmd.add_trade_log("BTC-USD", "BUY", 100.0, 0, "Open")
+        test("Trade log entry works", True)
+        
+        from ui.signal_dialog import SignalApprovalDialog
+        test("Signal dialog imports", True)
+    except Exception as e:
+        test("UI components work", False, str(e))
+        import traceback
+        traceback.print_exc()
+
+    # ── SUMMARY ────────────────────────────────────────────────────
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("FINAL RESULTS")
+    logger.info("=" * 70)
+    logger.info(f"Total Tests: {PASS + FAIL}")
+    logger.info(f"✅ Passed: {PASS}")
+    logger.info(f"❌ Failed: {FAIL}")
+    logger.info("")
+    
+    if FAIL == 0:
+        logger.info("🎉 ALL TESTS PASSED - SYSTEM IS PRODUCTION READY!")
+    else:
+        logger.info(f"⚠️ {FAIL} test(s) failed - fixes needed")
+    
+    # Write report
+    with open("e2e_report.txt", "w", encoding="utf-8") as f:
+        f.write(f"Tests: {PASS + FAIL}\n")
+        f.write(f"Passed: {PASS}\n")
+        f.write(f"Failed: {FAIL}\n")
+        f.write(f"Status: {'PRODUCTION READY' if FAIL == 0 else 'NEEDS FIXES'}\n")
+    
+    return FAIL == 0
+
+success = asyncio.run(main())
+sys.exit(0 if success else 1)

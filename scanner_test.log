@@ -1,0 +1,4 @@
+2026-04-09 13:33:20,627 [INFO] 🔥 Signal detected: VOLUME_SPIKE on TSLA (strength: 0.31)
+2026-04-09 13:33:20,627 [INFO] Swarm Consensus: Analyzing TSLA (qwen2.5-coder:1.5b)
+2026-04-09 13:33:23,287 [INFO] Ollama responded: BUY TSLA
+2026-04-09 13:33:23,287 [INFO] Swarm consensus: 0.80 confidence

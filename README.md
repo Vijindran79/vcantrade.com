@@ -1,17 +1,36 @@
-# 🎯 VcaniTrade AI - Intelligent Trading Assistant
+# 🎯 VcaniTrade AI - Hybrid Trading Assistant
 
-**AI-powered trading assistant with transparent overlay HUD, teacher mode, and safety-first execution**
+**AI-powered hybrid trading system with cloud scanning, swarm intelligence, and RPA execution**
 
 ---
 
 ## 🌟 Features
 
-### ✨ **Transparent Glass Overlay HUD**
-- Always-on-top overlay floats above your trading platform (MetaTrader, TradingView, etc.)
-- Shows Entry, Stop Loss, and Take Profit zones with color coding
-- Displays AI reasoning in plain English
-- **100% click-through** - never blocks your mouse or trading platform
-- Updates in real-time with live signals
+### 🔄 **Hybrid Architecture**
+- **Cloud Scanner (Vast.ai)**: Monitors 10 tickers 24/7 using yfinance, no screen required
+- **Signal Dispatch**: High-confidence signals (>0.70) sent to local laptop via HTTP
+- **Local Executor**: Receives signals, performs vision confirmation, executes via RPA
+- **Best of Both Worlds**: Solves "blindness" of cloud bot and "paralysis" of local bot
+
+### 📡 **Cloud Market Scanner**
+- Monitors 10 core counters: XAUUSD, EURUSD, GBPUSD, BTC, ETH, TSLA, SPY, QQQ, AAPL, NVDA
+- Detects technical signals:
+  - **Volume Spike**: >3x average volume
+  - **RSI Cross**: Overbought (>70) / Oversold (<30)
+  - **SMA Cross**: Golden Cross / Death Cross (20/50 SMA)
+- Triggers Swarm Debate when signals detected
+- Only dispatches signals with >0.70 confidence threshold
+
+### 🖥️ **Enhanced Dashboard UI**
+- **Vertical ScrollArea**: No more cut-off elements, scroll to see all content
+- **Balance & Equity**: Real-time balance display with daily/total P/L
+- **Status LEDs**: Cloud connection, Watchtower, Vision, and RPA status
+- **Trade Ledger**: Scrollable table showing `Asset | Action | Price | Result`
+- **Control Panel**: 
+  - Mode toggle: `TEACHER` / `AUTONOMOUS`
+  - Ticker selector dropdown for 10 monitored counters
+  - Quick access: Calibrate RPA, Test Vision, EOD Report
+- **Minimum Window Size**: Prevents element overlapping on small screens
 
 ### 🎓 **Teacher Mode (Default)**
 - AI analyzes markets and shows signals overlay

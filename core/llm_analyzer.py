@@ -8,6 +8,7 @@ Dual-Vision Support:
 """
 
 import logging
+import asyncio
 from typing import Optional, Tuple
 
 import config
@@ -16,7 +17,7 @@ from core.models import (
     LLMAnalysisOutput,
     MarketDataPoint,
 )
-from core.swarm_consensus import SwarmConsensus
+from core.swarm_consensus import OllamaSwarmConsensus as SwarmConsensus
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,7 @@ class LLMAnalyzer:
     """Analyzes market data using the Swarm Consensus multi-agent architecture."""
 
     def __init__(self):
-        self.base_url = config.OLLAMA_BASE_URL
-        self.model = config.OLLAMA_MODEL
-        self.timeout = config.LLM_TIMEOUT
-        self.swarm = SwarmConsensus(self.base_url, self.model, self.timeout)
+        self.swarm = SwarmConsensus()
 
     def analyze_market(
         self,
@@ -46,8 +44,8 @@ class LLMAnalyzer:
                                 VLM-enhanced Technical Sniper analysis
         """
         try:
-            output, transcript = self.swarm.run(
-                market_data, news_context, chart_image_base64
+            output, transcript = asyncio.run(
+                self.swarm.run(market_data, news_context, chart_image_base64)
             )
             logger.info(
                 f"Swarm decision: {output.action.value} {market_data.asset} "
@@ -56,11 +54,10 @@ class LLMAnalyzer:
             return output, transcript
         except Exception as e:
             logger.error(f"Swarm consensus failed: {e}")
-            # Ultimate fallback
             output = LLMAnalysisOutput(
-                action="HOLD",
+                action=SignalAction.HOLD,  # Bug fix: use enum
                 asset=market_data.asset,
-                confidence="LOW",
+                confidence=ConfidenceLevel.LOW,  # Bug fix: use enum
                 reason="All analysis pipelines failed. Standing aside.",
             )
             return output, None

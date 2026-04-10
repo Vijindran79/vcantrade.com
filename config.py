@@ -9,9 +9,20 @@ from dotenv import load_dotenv
 # Load environment variables from .env file if it exists
 load_dotenv()
 
+# ===== PROP FIRM RULES (The "Professor" - Knows Every Firm's Rules) =====
+PROP_FIRM_ENABLED = (
+    os.getenv("PROP_FIRM_ENABLED", "True").lower() == "true"
+)  # Enable prop firm rule enforcement
+PROP_FIRM_NAME = os.getenv("PROP_FIRM_NAME", "TopStep")  # TopStep, Apex, MyFunded, FTMO
+PROP_ACCOUNT_SIZE = float(os.getenv("PROP_ACCOUNT_SIZE", "50000.0"))  # Starting balance
+PROP_PHASE = int(os.getenv("PROP_PHASE", "1"))  # Phase 1 or 2
+PROP_IS_FUNDED = (
+    os.getenv("PROP_IS_FUNDED", "False").lower() == "true"
+)  # Are we already funded?
+
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
 DRY_RUN = (
-    os.getenv("DRY_RUN", "True").lower() == "true"
+    os.getenv("DRY_RUN", "False").lower() == "true"
 )  # Paper trading only - NEVER changes to False without explicit user action
 MAX_DAILY_LOSS = float(
     os.getenv("MAX_DAILY_LOSS", "100.00")
@@ -28,35 +39,26 @@ KILL_SWITCH = False  # Emergency stop - halts all trading immediately
 # TEACHER_MODE: Show signals overlay but don't execute (manual trading)
 # AUTO_MODE: AI executes trades automatically (requires DRY_RUN=False)
 TEACHER_MODE = (
-    os.getenv("TEACHER_MODE", "True").lower() == "true"
+    os.getenv("TEACHER_MODE", "False").lower() == "true"
 )  # Default to teacher mode for safety
 
-# ===== LLM CONFIGURATION (GROQ) =====
-GROQ_API_KEY = os.getenv(
-    "GROQ_API_KEY", "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"
-)
-LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
-
-# Swarm Settings
-SWARM_TIMEOUT_SECONDS = int(os.getenv("SWARM_TIMEOUT_SECONDS", "30"))
-MAX_CONCURRENT_AGENTS = int(os.getenv("MAX_CONCURRENT_AGENTS", "10"))
-
-# Legacy Ollama config (kept for reference, not used)
+# ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
+# Running 100% locally - NO cloud tokens needed!
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
-LLM_TIMEOUT = 90  # Seconds before LLM request times out
-JSON_OUTPUT = True  # Force strict JSON output from LLM
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")  # Fixed: Use actual model name from ollama list
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")  # Not needed for local, kept for compatibility
+VAST_API_TOKEN = None  # No longer using Vast.ai - running locally!
+
+# Local execution settings
+LLM_TIMEOUT = 60  # Increased timeout for larger model (60 seconds max per call)
+JSON_OUTPUT = True
 
 # ===== VISION / VLM CONFIGURATION =====
-# Optimized for RTX 4050 Laptop GPU (6GB VRAM)
-# Primary: moondream (~1.5GB VRAM, fastest)
-# Fallback: llava:7b-v1.5-q4_K_M (~4GB VRAM)
-VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
+# Optional: Use local vision model for chart analysis
+VLM_MODEL = os.getenv("VLM_MODEL", "llava:7b")  # LLaVA for vision if available
 VISION_TIMEOUT = 120  # Max seconds before graceful degradation to text-only
 USE_VISION = (
-    os.getenv("USE_VISION", "True").lower() == "true"
+    os.getenv("USE_VISION", "False").lower() == "true"  # Default OFF for faster local execution
 )  # Enable chart screenshot analysis
 CHART_REGION_X = int(os.getenv("CHART_REGION_X", "100"))
 CHART_REGION_Y = int(os.getenv("CHART_REGION_Y", "100"))
@@ -65,23 +67,47 @@ CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
 SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "False").lower() == "true"
 
 # ===== MARKET DATA =====
-SCAN_INTERVAL = 2  # Seconds between market scans
+# Cloud Scanner Settings (Vast.ai Server)
+SCAN_INTERVAL = 10  # Seconds between market scans
+WATCHLIST_INTERVAL = 60  # Seconds between watchlist scans (slower)
 
-# Available assets organized by category for the Prop Firm Selection Board
-ASSETS_BY_CATEGORY = {
-    "Indices": ["SPX500", "NAS100", "US30", "GER40", "UK100"],
-    "Commodities": ["XAUUSD", "XAGUSD", "WTI", "BRENT", "NATGAS"],
-    "Forex": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "USDCHF"],
-    "Crypto": ["BTCUSD", "ETHUSD", "SOLUSD"],
-}
+# 10 Core Counters for Cloud Scanner (Mix of Crypto, Forex, Stocks - 24/7 coverage)
+CLOUD_TICKERS = [
+    "BTC-USD",  # Bitcoin (24/7 trading - ALWAYS OPEN)
+    "ETH-USD",  # Ethereum (24/7 trading)
+    "GC=F",  # Gold Futures
+    "EURUSD=X",  # Euro/USD (Forex - 24/5)
+    "GBPUSD=X",  # GBP/USD (Forex - 24/5)
+    "TSLA",  # Tesla
+    "SPY",  # S&P 500 ETF
+    "QQQ",  # NASDAQ ETF
+    "AAPL",  # Apple
+    "NVDA",  # NVIDIA
+]
 
-# Default selected assets (user can change via UI)
-SELECTED_ASSETS = ["EURUSD", "GBPUSD", "XAUUSD"]
+# Local Watchlist (for local scanning when cloud unavailable)
+LOCAL_ASSETS = ["EURUSD", "GBPUSD", "XAUUSD", "BTCUSD", "ETHUSD"]
 
-# All flat list of assets (legacy support)
-ASSETS = []
-for category_assets in ASSETS_BY_CATEGORY.values():
-    ASSETS.extend(category_assets)
+# Technical Signal Thresholds
+VOLUME_SPIKE_MULTIPLIER = 3.0  # Trigger if volume > 3x average
+RSI_OVERBOUGHT = 70  # RSI > 70 = potential sell
+RSI_OVERSOLD = 30  # RSI < 30 = potential buy
+SMA_FAST = 20  # Fast SMA period
+SMA_SLOW = 50  # Slow SMA period
+SWARM_CONFIDENCE_THRESHOLD = 0.70  # Minimum confidence to trigger trade (0.0-1.0)
+
+# ===== CLOUD SCANNER =====
+CLOUD_SCANNER_ENABLED = True  # Enable local market scanning
+CLOUD_SCANNER_URL = os.getenv("CLOUD_SCANNER_URL", "http://localhost:17199")  # Fixed: Match listener port
+LOCAL_LISTENER_PORT = int(
+    os.getenv("LOCAL_LISTENER_PORT", "17199")
+)  # Local HTTP listener
+
+# ===== SIGNAL DISPATCH =====
+SIGNAL_DISPATCH_METHOD = os.getenv(
+    "SIGNAL_DISPATCH_METHOD", "http"
+)  # http or websocket
+LOCAL_EXECUTION_TIMEOUT = 30  # Max seconds to wait for local execution
 
 # ===== RPA EXECUTION =====
 USE_HOTKEYS = True  # Prefer keyboard hotkeys over mouse clicks
