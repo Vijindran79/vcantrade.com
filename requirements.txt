@@ -14,3 +14,5 @@ pyautogui>=0.9.54
 mss>=9.0.0
 pygetwindow>=0.0.9
 playwright>=1.40.0  # Browser automation for autonomous price checking
+beautifulsoup4>=4.12.0  # News filter web scraping
+python-holidays>=0.39  # Market holiday awareness

@@ -87,6 +87,9 @@ class CommandCenter(QWidget):
     watchlist_updated = pyqtSignal(list)
     settings_changed = pyqtSignal(dict)
     ticker_changed = pyqtSignal(str)
+    test_browser_requested = pyqtSignal()
+    force_test_trade_requested = pyqtSignal()
+    user_command_sent = pyqtSignal(str)  # NEW: Co-Pilot Command Bridge
 
     def __init__(self):
         super().__init__()
@@ -142,6 +145,9 @@ class CommandCenter(QWidget):
         layout.addWidget(self._build_watchlist_panel())
         layout.addWidget(self._build_positions_panel())
         layout.addWidget(self._build_trade_log_panel())
+        layout.addWidget(self._build_copilot_chat_panel())  # NEW: Co-Pilot Command Bridge
+        layout.addWidget(self._build_institutional_governor_panel())  # NEW: Stage 3 Risk Governor
+        layout.addWidget(self._build_meta_cognition_panel())  # NEW: Stage 4 Meta-Cognition
         layout.addWidget(self._build_kill_switch())
 
         scroll.setWidget(content)
@@ -428,6 +434,19 @@ class CommandCenter(QWidget):
         row.addWidget(val)
 
         layout.addLayout(row)
+        
+        # Store references for dynamic updates
+        if not hasattr(self, 'compliance_bars'):
+            self.compliance_bars = {}
+        
+        self.compliance_bars[label] = {
+            'bar': bar,
+            'bar_frame': bar_frame,
+            'value_label': val,
+            'limit': limit,
+            'good_color': good_color,
+            'bad_color': bad_color
+        }
 
     def update_prop_firm_compliance(self, data: dict):
         """Update prop firm panel with compliance data."""
@@ -453,6 +472,41 @@ class CommandCenter(QWidget):
             self.violations_label.setText("⚠️ " + "\n".join(violations))
         else:
             self.violations_label.setText("")
+
+        # Update compliance bars dynamically
+        if hasattr(self, 'compliance_bars'):
+            # Update Daily Loss Used bar
+            if "Daily Loss Used" in self.compliance_bars:
+                bar_data = self.compliance_bars["Daily Loss Used"]
+                current = abs(data.get("daily_pnl", 0))
+                limit = data.get("daily_loss_limit", 150.0)
+                self._update_compliance_bar(bar_data, current, limit)
+
+            # Update Drawdown Used bar
+            if "Drawdown Used" in self.compliance_bars:
+                bar_data = self.compliance_bars["Drawdown Used"]
+                current = data.get("max_drawdown", 0)
+                limit = data.get("drawdown_limit", 3000.0)
+                self._update_compliance_bar(bar_data, current, limit)
+
+            # Update Profit Progress bar
+            if "Profit Progress" in self.compliance_bars:
+                bar_data = self.compliance_bars["Profit Progress"]
+                current = max(0, data.get("total_pnl", 0))
+                limit = data.get("profit_target", 3000.0)
+                self._update_compliance_bar(bar_data, current, limit)
+
+    def _update_compliance_bar(self, bar_data, current, limit):
+        """Update a single compliance bar with new values."""
+        pct = min(100, (current / max(0.01, limit)) * 100)
+        bar_color = bar_data['bad_color'] if pct > 80 else bar_data['good_color']
+        
+        # Update bar width
+        bar_data['bar'].setStyleSheet(f"background: {bar_color}; border-radius: 5px;")
+        bar_data['bar'].setMinimumWidth(max(4, int(pct * 2)))
+        
+        # Update value label
+        bar_data['value_label'].setText(f"${current:.0f} / ${limit:.0f}")
 
     # =================== CONTROL PANEL ===================
     def _build_control_panel(self) -> QWidget:
@@ -589,7 +643,110 @@ class CommandCenter(QWidget):
         save_btn.clicked.connect(self._save_settings)
         layout.addWidget(save_btn)
 
+        # Test Execution Section
+        test_section = self._build_test_execution_section()
+        layout.addWidget(test_section)
+
         return panel
+
+    def _build_test_execution_section(self) -> QWidget:
+        """Test Execution controls for verifying browser clicking."""
+        panel = QFrame()
+        panel.setStyleSheet(f"""
+            background: {BG_PANEL};
+            border: 2px solid {CYAN};
+            border-radius: 8px;
+            padding: 10px;
+        """)
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+
+        # Header
+        header = QLabel("🧪 TEST EXECUTION (Verify Browser Clicking)")
+        header.setStyleSheet(f"color: {CYAN}; font-size: 12px; font-weight: bold; font-family: 'Consolas';")
+        layout.addWidget(header)
+
+        # Test buttons row
+        test_row = QHBoxLayout()
+        test_row.setSpacing(8)
+
+        # Test Browser Click button
+        self.test_browser_btn = QPushButton("🌐 Test Browser")
+        self.test_browser_btn.setMinimumHeight(32)
+        self.test_browser_btn.setStyleSheet(f"""
+            QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            QPushButton:hover {{ background: #00b8e6; }}
+        """)
+        self.test_browser_btn.clicked.connect(self._test_browser_click)
+        test_row.addWidget(self.test_browser_btn)
+
+        # Force Test Trade button
+        self.force_test_btn = QPushButton("⚡ Force Test Trade")
+        self.force_test_btn.setMinimumHeight(32)
+        self.force_test_btn.setStyleSheet(f"""
+            QPushButton {{ background: {ORANGE}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            QPushButton:hover {{ background: #b8860b; }}
+        """)
+        self.force_test_btn.clicked.connect(self._force_test_trade)
+        test_row.addWidget(self.force_test_btn)
+
+        # Dry Run toggle
+        self.dry_run_btn = QPushButton("DRY RUN: ON")
+        self.dry_run_btn.setMinimumHeight(32)
+        self.dry_run_btn.setCheckable(True)
+        self.dry_run_btn.setChecked(True)
+        self.dry_run_btn.setStyleSheet(f"""
+            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+        """)
+        self.dry_run_btn.clicked.connect(self._toggle_dry_run)
+        test_row.addWidget(self.dry_run_btn)
+
+        test_row.addStretch()
+        layout.addLayout(test_row)
+
+        # Status label
+        self.test_status = QLabel("Status: Ready for testing")
+        self.test_status.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        layout.addWidget(self.test_status)
+
+        return panel
+
+    def _test_browser_click(self):
+        """Test browser agent navigation and clicking."""
+        self.test_status.setText("Status: Testing browser agent...")
+        self.test_status.setStyleSheet(f"color: {ORANGE}; font-size: 10px; font-family: 'Consolas';")
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, lambda: self.test_browser_requested.emit())
+        self.log("🧪 TEST: Browser agent click test requested")
+
+    def _force_test_trade(self):
+        """Force a test trade bypassing Saturday/holiday blocks."""
+        self.test_status.setText("Status: Force test trade initiated...")
+        self.test_status.setStyleSheet(f"color: {ORANGE}; font-size: 10px; font-family: 'Consolas';")
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, lambda: self.force_test_trade_requested.emit())
+        self.log("⚡ FORCE TEST: Test trade initiated (bypassing session blocks)")
+
+    def _toggle_dry_run(self):
+        """Toggle dry run mode."""
+        is_dry_run = self.dry_run_btn.isChecked()
+        if is_dry_run:
+            self.dry_run_btn.setText("DRY RUN: ON")
+            self.dry_run_btn.setStyleSheet(f"""
+                QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                             font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            """)
+            self.log("✅ DRY RUN: ON - Paper trading mode")
+        else:
+            self.dry_run_btn.setText("DRY RUN: OFF")
+            self.dry_run_btn.setStyleSheet(f"""
+                QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 6px;
+                             font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            """)
+            self.log("⚠️ DRY RUN: OFF - Live trading mode (CAUTION!)")
 
     # =================== WATCHLIST PANEL ===================
     def _build_watchlist_panel(self) -> QWidget:
@@ -758,15 +915,569 @@ class CommandCenter(QWidget):
         """)
         layout.addWidget(self.activity_log)
 
+        # Action buttons row
+        action_btn_row = QHBoxLayout()
+        action_btn_row.setSpacing(8)
+
+        clear_log_btn = QPushButton("🗑️ Clear Log")
+        clear_log_btn.setMinimumHeight(32)
+        clear_log_btn.setStyleSheet(f"""
+            QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            QPushButton:hover {{ background: {BORDER}; color: {WHITE}; }}
+        """)
+        clear_log_btn.clicked.connect(self._clear_activity_log)
+        action_btn_row.addWidget(clear_log_btn)
+
+        export_btn = QPushButton("📊 Export Trade History")
+        export_btn.setMinimumHeight(32)
+        export_btn.setStyleSheet(f"""
+            QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            QPushButton:hover {{ background: #00b8e6; }}
+        """)
+        export_btn.clicked.connect(self._export_trade_history)
+        action_btn_row.addWidget(export_btn)
+
+        action_btn_row.addStretch()
+        layout.addLayout(action_btn_row)
+
         return panel
+
+    # =================== CO-PILOT COMMAND BRIDGE ===================
+    def _build_copilot_chat_panel(self) -> QWidget:
+        """Co-Pilot Command Bridge - Human-AI Collaborative Trading"""
+        panel = QGroupBox("🚀 CO-PILOT COMMAND BRIDGE (Talk to Your AI)")
+        panel.setStyleSheet(f"""
+            QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
+                        border: 2px solid {CYAN}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px; }}
+        """)
+
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+
+        # Instruction text
+        instruction = QLabel("💡 Examples: 'Switch to 2H BTC longs' | 'News just dropped for ETH, analyze' | 'Force buy BTC now'")
+        instruction.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas'; font-style: italic;")
+        instruction.setWordWrap(True)
+        layout.addWidget(instruction)
+
+        # Chat display (AI responses + user messages)
+        self.copilot_chat = QTextEdit()
+        self.copilot_chat.setReadOnly(True)
+        self.copilot_chat.setMaximumHeight(250)
+        self.copilot_chat.setStyleSheet(f"""
+            QTextEdit {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {BORDER};
+                      border-radius: 6px; font-family: 'Consolas'; font-size: 11px; padding: 8px; }}
+        """)
+        # Add welcome message
+        self.copilot_chat.append(f'<span style="color:{CYAN}; font-weight:bold;">🤖 AI Co-Pilot:</span> <span style="color:{GREEN};">Ready for your commands. I\'m your Strict Boss - I\'ll push back if your idea conflicts with the data.</span>')
+        layout.addWidget(self.copilot_chat)
+
+        # Input row
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
+
+        self.copilot_input = QLineEdit()
+        self.copilot_input.setPlaceholderText("Type your command or suggestion here...")
+        self.copilot_input.setStyleSheet(f"""
+            QLineEdit {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {CYAN};
+                       border-radius: 6px; padding: 10px; font-size: 12px; font-family: 'Consolas'; }}
+        """)
+        self.copilot_input.returnPressed.connect(self._send_copilot_command)
+        input_row.addWidget(self.copilot_input, stretch=1)
+
+        # Send button
+        send_btn = QPushButton("📤 Send")
+        send_btn.setMinimumHeight(40)
+        send_btn.setFixedWidth(80)
+        send_btn.setStyleSheet(f"""
+            QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 12px; font-weight: bold; font-family: 'Consolas'; padding: 8px; }}
+            QPushButton:hover {{ background: #00b8e6; }}
+            QPushButton:pressed {{ background: #0099cc; }}
+        """)
+        send_btn.clicked.connect(self._send_copilot_command)
+        input_row.addWidget(send_btn)
+
+        layout.addLayout(input_row)
+
+        # Status indicators row
+        status_row = QHBoxLayout()
+        status_row.setSpacing(15)
+
+        self.copilot_status = QLabel("🟢 AI Status: Ready")
+        self.copilot_status.setStyleSheet(f"color: {GREEN}; font-size: 11px; font-weight: bold; font-family: 'Consolas';")
+        status_row.addWidget(self.copilot_status)
+
+        self.copilot_mode = QLabel("Current Mode: SCANNING")
+        self.copilot_mode.setStyleSheet(f"color: {CYAN}; font-size: 11px; font-family: 'Consolas';")
+        status_row.addWidget(self.copilot_mode)
+
+        status_row.addStretch()
+        layout.addLayout(status_row)
+
+        return panel
+
+    def _send_copilot_command(self):
+        """Send user command to AI Co-Pilot"""
+        command = self.copilot_input.text().strip()
+        if not command:
+            return
+
+        # Display user message
+        self.copilot_chat.append(f'<span style="color:{ORANGE}; font-weight:bold;">👤 You:</span> {command}')
+        
+        # Emit signal to main app for processing
+        self.user_command_sent.emit(command)
+        
+        # Clear input
+        self.copilot_input.clear()
+        
+        # Log
+        self.log(f"🚀 Co-Pilot command sent: {command}")
+
+    def add_copilot_response(self, thoughts: str, verdict: str, adjustment: str = ""):
+        """Add AI response to copilot chat in [THOUGHTS], [VERDICT], [ADJUSTMENT] format"""
+        self.copilot_chat.append(f'<span style="color:{CYAN}; font-weight:bold;">🤖 AI Co-Pilot:</span>')
+        self.copilot_chat.append(f'<span style="color:{YELLOW};">[THOUGHTS]</span> {thoughts}')
+        self.copilot_chat.append(f'<span style="color:{GREEN};">[VERDICT]</span> {verdict}')
+        if adjustment:
+            self.copilot_chat.append(f'<span style="color:{ORANGE};">[ADJUSTMENT]</span> {adjustment}')
+        self.copilot_chat.append("")  # Empty line for spacing
+        
+        # Auto-scroll
+        cursor = self.copilot_chat.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.copilot_chat.setTextCursor(cursor)
+
+    def update_copilot_status(self, status: str):
+        """Update AI Co-Pilot status indicator"""
+        self.copilot_status.setText(f"🟢 AI Status: {status}")
+
+    # =================== INSTITUTIONAL GOVERNOR (STAGE 3) ===================
+    def _build_institutional_governor_panel(self) -> QWidget:
+        """Stage 3: Institutional Governor & Risk Architect"""
+        panel = QGroupBox("🏛️ INSTITUTIONAL GOVERNOR (Stage 3 Risk Management)")
+        panel.setStyleSheet(f"""
+            QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
+                        border: 2px solid {ORANGE}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px; }}
+        """)
+
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+
+        # Row 1: Total Exposure, Correlation Risk, News Timer
+        top_row = QHBoxLayout()
+        top_row.setSpacing(15)
+
+        # Total Exposure
+        exp_layout = QVBoxLayout()
+        exp_label = QLabel("Total Exposure")
+        exp_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        exp_layout.addWidget(exp_label)
+
+        self.total_exposure_label = QLabel("0.0% / 15.0%")
+        self.total_exposure_label.setStyleSheet(f"color: {GREEN}; font-size: 16px; font-weight: bold; font-family: 'Consolas';")
+        exp_layout.addWidget(self.total_exposure_label)
+        top_row.addLayout(exp_layout)
+
+        # Correlation Risk
+        corr_layout = QVBoxLayout()
+        corr_label = QLabel("Correlation Risk")
+        corr_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        corr_layout.addWidget(corr_label)
+
+        self.correlation_risk_label = QLabel("0.00 (SAFE)")
+        self.correlation_risk_label.setStyleSheet(f"color: {GREEN}; font-size: 16px; font-weight: bold; font-family: 'Consolas';")
+        corr_layout.addWidget(self.correlation_risk_label)
+        top_row.addLayout(corr_layout)
+
+        # Time Until Next News Event
+        news_layout = QVBoxLayout()
+        news_label = QLabel("Next News Event")
+        news_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        news_layout.addWidget(news_label)
+
+        self.next_news_label = QLabel("None")
+        self.next_news_label.setStyleSheet(f"color: {CYAN}; font-size: 16px; font-weight: bold; font-family: 'Consolas';")
+        news_layout.addWidget(self.next_news_label)
+        top_row.addLayout(news_layout)
+
+        layout.addLayout(top_row)
+
+        # Row 2: RPA Status, Walk Away Status, Profit Lock
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(15)
+
+        # RPA Hand Status
+        rpa_layout = QVBoxLayout()
+        rpa_label = QLabel("RPA Hand")
+        rpa_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        rpa_layout.addWidget(rpa_label)
+
+        self.rpa_status_label = QLabel("✅ ENABLED")
+        self.rpa_status_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        rpa_layout.addWidget(self.rpa_status_label)
+        bottom_row.addLayout(rpa_layout)
+
+        # Walk Away Protocol
+        walk_layout = QVBoxLayout()
+        walk_label = QLabel("Walk Away Protocol")
+        walk_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        walk_layout.addWidget(walk_label)
+
+        self.walk_away_label = QLabel("✅ ACTIVE")
+        self.walk_away_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        walk_layout.addWidget(self.walk_away_label)
+        bottom_row.addLayout(walk_layout)
+
+        # Profit Lock Status
+        lock_layout = QVBoxLayout()
+        lock_label = QLabel("Profit Lock")
+        lock_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        lock_layout.addWidget(lock_label)
+
+        self.profit_lock_label = QLabel("UNLOCKED")
+        self.profit_lock_label.setStyleSheet(f"color: {GRAY}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        lock_layout.addWidget(self.profit_lock_label)
+        bottom_row.addLayout(lock_layout)
+
+        layout.addLayout(bottom_row)
+
+        # Row 3: Daily P&L Progress Bar
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(8)
+
+        progress_label = QLabel("Daily P&L Progress:")
+        progress_label.setStyleSheet(f"color: {WHITE}; font-size: 11px; font-weight: bold; font-family: 'Consolas';")
+        progress_row.addWidget(progress_label)
+
+        # Progress bar frame
+        bar_frame = QFrame()
+        bar_frame.setFixedHeight(18)
+        bar_frame.setStyleSheet(f"background: {BG_INPUT}; border: 1px solid {BORDER}; border-radius: 9px;")
+        bar_layout = QHBoxLayout(bar_frame)
+        bar_layout.setContentsMargins(2, 2, 2, 2)
+        bar_layout.setSpacing(0)
+
+        # Progress fill
+        self.daily_pnl_bar = QFrame()
+        self.daily_pnl_bar.setFixedHeight(14)
+        self.daily_pnl_bar.setStyleSheet(f"background: {GREEN}; border-radius: 7px;")
+        self.daily_pnl_bar.setMinimumWidth(4)
+        bar_layout.addWidget(self.daily_pnl_bar, stretch=1)
+
+        progress_row.addWidget(bar_frame, stretch=1)
+
+        # P&L value label
+        self.daily_pnl_value_label = QLabel("$0.00 (0.0%)")
+        self.daily_pnl_value_label.setStyleSheet(f"color: {WHITE}; font-size: 11px; font-family: 'Consolas';")
+        self.daily_pnl_value_label.setFixedWidth(140)
+        self.daily_pnl_value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        progress_row.addWidget(self.daily_pnl_value_label)
+
+        layout.addLayout(progress_row)
+
+        return panel
+
+    # =================== META-COGNITION (STAGE 4) ===================
+    def _build_meta_cognition_panel(self) -> QWidget:
+        """Stage 4: Meta-Cognition & Alpha Hunter - Learning Progress & Alpha Score"""
+        panel = QGroupBox("🧠 META-COGNITION (Stage 4 Self-Learning)")
+        panel.setStyleSheet(f"""
+            QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
+                        border: 2px solid {CYAN}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px; }}
+        """)
+
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(10)
+
+        # Row 1: Alpha Score (Big Display)
+        alpha_row = QHBoxLayout()
+        alpha_row.setSpacing(15)
+
+        # Alpha Score Display
+        alpha_layout = QVBoxLayout()
+        alpha_label = QLabel("Alpha Score (Learning Progress)")
+        alpha_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        alpha_layout.addWidget(alpha_label)
+
+        self.alpha_score_label = QLabel("50.0 / 100")
+        self.alpha_score_label.setStyleSheet(f"color: {ORANGE}; font-size: 24px; font-weight: bold; font-family: 'Consolas';")
+        alpha_layout.addWidget(self.alpha_score_label)
+        alpha_row.addLayout(alpha_layout)
+
+        # Alpha Score Progress Bar
+        alpha_bar_layout = QVBoxLayout()
+        alpha_bar_layout.setSpacing(4)
+
+        # Progress bar frame
+        alpha_bar_frame = QFrame()
+        alpha_bar_frame.setFixedHeight(22)
+        alpha_bar_frame.setStyleSheet(f"background: {BG_INPUT}; border: 1px solid {BORDER}; border-radius: 11px;")
+        alpha_bar_layout_inner = QHBoxLayout(alpha_bar_frame)
+        alpha_bar_layout_inner.setContentsMargins(2, 2, 2, 2)
+        alpha_bar_layout_inner.setSpacing(0)
+
+        # Progress fill
+        self.alpha_bar = QFrame()
+        self.alpha_bar.setFixedHeight(18)
+        self.alpha_bar.setStyleSheet(f"background: {ORANGE}; border-radius: 9px;")
+        self.alpha_bar.setMinimumWidth(4)
+        alpha_bar_layout_inner.addWidget(self.alpha_bar, stretch=1)
+
+        alpha_bar_layout.addWidget(alpha_bar_frame)
+
+        # Score description
+        self.alpha_desc_label = QLabel("Learning in progress...")
+        self.alpha_desc_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        self.alpha_desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        alpha_bar_layout.addWidget(self.alpha_desc_label)
+
+        alpha_row.addLayout(alpha_bar_layout, stretch=1)
+        layout.addLayout(alpha_row)
+
+        # Row 2: Best/Worst Asset, Best Timeframe
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(15)
+
+        # Best Asset
+        best_asset_layout = QVBoxLayout()
+        best_asset_label = QLabel("Best Performer")
+        best_asset_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        best_asset_layout.addWidget(best_asset_label)
+
+        self.best_asset_label = QLabel("N/A")
+        self.best_asset_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        best_asset_layout.addWidget(self.best_asset_label)
+        stats_row.addLayout(best_asset_layout)
+
+        # Worst Asset
+        worst_asset_layout = QVBoxLayout()
+        worst_asset_label = QLabel("Worst Performer")
+        worst_asset_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        worst_asset_layout.addWidget(worst_asset_label)
+
+        self.worst_asset_label = QLabel("N/A")
+        self.worst_asset_label.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        worst_asset_layout.addWidget(self.worst_asset_label)
+        stats_row.addLayout(worst_asset_layout)
+
+        # Best Timeframe
+        tf_layout = QVBoxLayout()
+        tf_label = QLabel("Best Timeframe")
+        tf_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        tf_layout.addWidget(tf_label)
+
+        self.best_timeframe_label = QLabel("N/A")
+        self.best_timeframe_label.setStyleSheet(f"color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        tf_layout.addWidget(self.best_timeframe_label)
+        stats_row.addLayout(tf_layout)
+
+        layout.addLayout(stats_row)
+
+        # Row 3: Review Stats
+        review_row = QHBoxLayout()
+        review_row.setSpacing(15)
+
+        # Total Reviews
+        reviews_layout = QVBoxLayout()
+        reviews_label = QLabel("Total Reviews")
+        reviews_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        reviews_layout.addWidget(reviews_label)
+
+        self.total_reviews_label = QLabel("0")
+        self.total_reviews_label.setStyleSheet(f"color: {WHITE}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        reviews_layout.addWidget(self.total_reviews_label)
+        review_row.addLayout(reviews_layout)
+
+        # Adjustments Made
+        adjustments_layout = QVBoxLayout()
+        adjustments_label = QLabel("Adjustments Made")
+        adjustments_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        adjustments_layout.addWidget(adjustments_label)
+
+        self.total_adjustments_label = QLabel("0")
+        self.total_adjustments_label.setStyleSheet(f"color: {WHITE}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        adjustments_layout.addWidget(self.total_adjustments_label)
+        review_row.addLayout(adjustments_layout)
+
+        # Success Rate
+        success_layout = QVBoxLayout()
+        success_label = QLabel("Adjustment Success Rate")
+        success_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        success_layout.addWidget(success_label)
+
+        self.adjustment_success_rate_label = QLabel("0.0%")
+        self.adjustment_success_rate_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        success_layout.addWidget(self.adjustment_success_rate_label)
+        review_row.addLayout(success_layout)
+
+        # Next Review
+        next_review_layout = QVBoxLayout()
+        next_review_label = QLabel("Next Review In")
+        next_review_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        next_review_layout.addWidget(next_review_label)
+
+        self.next_review_label = QLabel("24.0h")
+        self.next_review_label.setStyleSheet(f"color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        next_review_layout.addWidget(self.next_review_label)
+        review_row.addLayout(next_review_layout)
+
+        layout.addLayout(review_row)
+
+        return panel
+
+    def update_meta_cognition(self, data: Dict):
+        """Update Meta-Cognition panel with learning progress data."""
+        # Alpha Score
+        alpha_score = data.get("alpha_score", 50.0)
+        self.alpha_score_label.setText(f"{alpha_score:.1f} / 100")
+
+        # Color based on alpha score
+        if alpha_score >= 70:
+            alpha_color = GREEN
+            alpha_desc = "Excellent learning 🚀"
+        elif alpha_score >= 50:
+            alpha_color = ORANGE
+            alpha_desc = "Learning in progress..."
+        else:
+            alpha_color = RED
+            alpha_desc = "Needs improvement ⚠️"
+
+        self.alpha_score_label.setStyleSheet(f"color: {alpha_color}; font-size: 24px; font-weight: bold; font-family: 'Consolas';")
+        self.alpha_desc_label.setText(alpha_desc)
+
+        # Update alpha bar width
+        bar_width = int(alpha_score * 3)  # Max 300px
+        self.alpha_bar.setMinimumWidth(max(4, bar_width))
+        self.alpha_bar.setStyleSheet(f"background: {alpha_color}; border-radius: 9px;")
+
+        # Best/Worst Assets
+        best_asset = data.get("best_asset", "N/A")
+        worst_asset = data.get("worst_asset", "N/A")
+        best_timeframe = data.get("best_timeframe", "N/A")
+
+        self.best_asset_label.setText(best_asset)
+        self.worst_asset_label.setText(worst_asset)
+        self.best_timeframe_label.setText(best_timeframe)
+
+        # Review Stats
+        total_reviews = data.get("total_reviews", 0)
+        total_adjustments = data.get("total_adjustments", 0)
+        adjustment_success_rate = data.get("adjustment_success_rate", 0.0)
+        next_review_hours = data.get("next_review_in_hours", 24.0)
+
+        self.total_reviews_label.setText(str(total_reviews))
+        self.total_adjustments_label.setText(str(total_adjustments))
+        self.adjustment_success_rate_label.setText(f"{adjustment_success_rate:.1%}")
+        self.next_review_label.setText(f"{next_review_hours:.1f}h")
+
+        # Color the adjustment success rate
+        if adjustment_success_rate >= 0.7:
+            self.adjustment_success_rate_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        elif adjustment_success_rate >= 0.5:
+            self.adjustment_success_rate_label.setStyleSheet(f"color: {ORANGE}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        else:
+            self.adjustment_success_rate_label.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+
+    def update_institutional_governor(self, data: Dict):
+        """Update Institutional Governor panel with risk data."""
+        # Total Exposure
+        total_exposure = data.get("total_exposure_pct", 0.0)
+        max_exposure = data.get("max_total_exposure_pct", 15.0)
+        self.total_exposure_label.setText(f"{total_exposure:.1f}% / {max_exposure:.1f}%")
+        
+        # Color based on exposure level
+        if total_exposure > max_exposure * 0.8:
+            self.total_exposure_label.setStyleSheet(f"color: {RED}; font-size: 16px; font-weight: bold; font-family: 'Consolas';")
+        elif total_exposure > max_exposure * 0.5:
+            self.total_exposure_label.setStyleSheet(f"color: {ORANGE}; font-size: 16px; font-weight: bold; font-family: 'Consolas';")
+        else:
+            self.total_exposure_label.setStyleSheet(f"color: {GREEN}; font-size: 16px; font-weight: bold; font-family: 'Consolas';")
+
+        # Correlation Risk
+        avg_corr = data.get("avg_correlation", 0.0)
+        if avg_corr > 0.85:
+            corr_status = "HIGH"
+            corr_color = RED
+        elif avg_corr > 0.70:
+            corr_status = "MEDIUM"
+            corr_color = ORANGE
+        else:
+            corr_status = "SAFE"
+            corr_color = GREEN
+        
+        self.correlation_risk_label.setText(f"{avg_corr:.2f} ({corr_status})")
+        self.correlation_risk_label.setStyleSheet(f"color: {corr_color}; font-size: 16px; font-weight: bold; font-family: 'Consolas';")
+
+        # Next News Event
+        next_event = data.get("next_event", "None")
+        time_to_event = data.get("time_to_event", "N/A")
+        if next_event and next_event != "None":
+            self.next_news_label.setText(f"{next_event}\n({time_to_event})")
+        else:
+            self.next_news_label.setText("None")
+
+        # RPA Status
+        rpa_enabled = data.get("rpa_enabled", True)
+        if rpa_enabled:
+            self.rpa_status_label.setText("✅ ENABLED")
+            self.rpa_status_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        else:
+            self.rpa_status_label.setText("🛑 PAUSED")
+            self.rpa_status_label.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+
+        # Walk Away Protocol
+        walk_away_active = data.get("walk_away_can_trade", True)
+        if walk_away_active:
+            self.walk_away_label.setText("✅ ACTIVE")
+            self.walk_away_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        else:
+            remaining = data.get("walk_away_remaining_hours", 0)
+            self.walk_away_label.setText(f"🚶 SHUTDOWN ({remaining:.1f}h)")
+            self.walk_away_label.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+
+        # Profit Lock Status
+        stops_locked = data.get("stops_locked", False)
+        if stops_locked:
+            self.profit_lock_label.setText("🔒 LOCKED")
+            self.profit_lock_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+        else:
+            self.profit_lock_label.setText("UNLOCKED")
+            self.profit_lock_label.setStyleSheet(f"color: {GRAY}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+
+        # Daily P&L Progress Bar
+        daily_pnl_pct = data.get("daily_pnl_pct", 0.0)
+        daily_pnl_dollars = data.get("daily_pnl_dollars", 0.0)
+        progress_to_target = min(100, max(0, data.get("progress_to_target", 0)))
+        
+        # Update bar width
+        bar_width = int(progress_to_target * 3)  # Max 300px
+        self.daily_pnl_bar.setMinimumWidth(max(4, bar_width))
+        
+        # Color based on P&L
+        if daily_pnl_pct >= 0:
+            self.daily_pnl_bar.setStyleSheet(f"background: {GREEN}; border-radius: 7px;")
+            self.daily_pnl_value_label.setText(f"+${daily_pnl_dollars:.2f} (+{daily_pnl_pct:.2f}%)")
+            self.daily_pnl_value_label.setStyleSheet(f"color: {GREEN}; font-size: 11px; font-family: 'Consolas';")
+        else:
+            self.daily_pnl_bar.setStyleSheet(f"background: {RED}; border-radius: 7px;")
+            self.daily_pnl_value_label.setText(f"-${abs(daily_pnl_dollars):.2f} ({daily_pnl_pct:.2f}%)")
+            self.daily_pnl_value_label.setStyleSheet(f"color: {RED}; font-size: 11px; font-family: 'Consolas';")
 
     # =================== KILL SWITCH ===================
     def _build_kill_switch(self) -> QWidget:
-        """Emergency Stop Button"""
+        """Emergency Stop Button with Reset"""
         panel = QFrame()
         panel.setStyleSheet(f"background: {BG_PANEL}; border: 2px solid {RED}; border-radius: 8px; padding: 12px;")
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(12)
 
         warning = QLabel("⚠️ EMERGENCY:")
         warning.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
@@ -781,7 +1492,21 @@ class CommandCenter(QWidget):
             QPushButton:pressed {{ background: #cc0000; }}
         """)
         kill_btn.clicked.connect(self._on_kill_switch)
-        layout.addWidget(kill_btn)
+        layout.addWidget(kill_btn, stretch=1)
+
+        # Reset button
+        self.reset_kill_btn = QPushButton("🔄 RESET")
+        self.reset_kill_btn.setMinimumHeight(44)
+        self.reset_kill_btn.setFixedWidth(120)
+        self.reset_kill_btn.setStyleSheet(f"""
+            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 8px;
+                         font-size: 14px; font-weight: bold; font-family: 'Consolas'; padding: 10px; }}
+            QPushButton:hover {{ background: #2ea043; }}
+            QPushButton:disabled {{ background: {GRAY}; color: {DIM}; }}
+        """)
+        self.reset_kill_btn.clicked.connect(self._on_reset_kill_switch)
+        self.reset_kill_btn.setEnabled(False)  # Disabled until kill switch is triggered
+        layout.addWidget(self.reset_kill_btn)
 
         return panel
 
@@ -846,22 +1571,35 @@ class CommandCenter(QWidget):
         """Add entry to trade log."""
         row = self.trade_log_table.rowCount()
         self.trade_log_table.insertRow(row)
-        
+
         time_str = datetime.now().strftime("%H:%M:%S")
         pnl_str = f"${pnl:.2f}" if pnl != 0 else "-"
-        
+
         items = [time_str, asset, action, f"${amount:.2f}", pnl_str, status]
         for j, text in enumerate(items):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
+
             if j == 5:  # Status column
                 if status == "Closed - Profit":
                     item.setForeground(QColor(GREEN))
                 elif status == "Closed - Loss":
                     item.setForeground(QColor(RED))
-            
+
             self.trade_log_table.setItem(row, j, item)
+
+    def update_safety_status(self, safety_data: dict):
+        """Update safety status indicator in dashboard."""
+        # Log safety status updates
+        mode = safety_data.get("position_mode", "normal")
+        paused = safety_data.get("trading_paused", False)
+        pause_reason = safety_data.get("pause_reason", "")
+        
+        if paused:
+            self.log(f"🛑 Trading paused: {pause_reason}")
+        elif mode != "normal":
+            multiplier = safety_data.get("position_multiplier", 1.0)
+            self.log(f"📏 Position mode: {mode} ({multiplier:.0%} size)")
 
     # =================== EVENT HANDLERS ===================
 
@@ -909,7 +1647,13 @@ class CommandCenter(QWidget):
 
     def _add_ticker(self):
         ticker = self.ticker_input.text().strip().upper()
-        if ticker and ticker not in self.watchlist:
+        
+        # Validate ticker is not empty
+        if not ticker:
+            self.log("⚠️ Please enter a valid ticker symbol")
+            return
+            
+        if ticker not in self.watchlist:
             self.watchlist.append(ticker)
             self._refresh_watchlist()
             self.watchlist_updated.emit(self.watchlist)
@@ -972,4 +1716,54 @@ class CommandCenter(QWidget):
         self._killed = True
         self.kill_switch_triggered.emit()
         self.log("🛑 KILL SWITCH ACTIVATED - ALL TRADING STOPPED")
-        self.setEnabled(False)
+        # Don't disable the entire UI - just show reset button
+        self.reset_kill_btn.setEnabled(True)
+        self.log("⚠️ Use the RESET button to resume trading")
+
+    def _on_reset_kill_switch(self):
+        """Reset kill switch and re-enable trading."""
+        self._killed = False
+        self.reset_kill_btn.setEnabled(False)
+        self.log("✅ Kill switch reset - Trading can resume")
+
+    def _clear_activity_log(self):
+        """Clear the activity log."""
+        self.activity_log.clear()
+        self.log("🗑️ Activity log cleared")
+
+    def _export_trade_history(self):
+        """Export trade history to CSV file."""
+        from PyQt6.QtWidgets import QFileDialog
+        import csv
+
+        # Get save file path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Trade History",
+            "trade_history.csv",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                # Write headers
+                headers = []
+                for col in range(self.trade_log_table.columnCount()):
+                    headers.append(self.trade_log_table.horizontalHeaderItem(col).text())
+                writer.writerow(headers)
+
+                # Write data
+                for row in range(self.trade_log_table.rowCount()):
+                    row_data = []
+                    for col in range(self.trade_log_table.columnCount()):
+                        item = self.trade_log_table.item(row, col)
+                        row_data.append(item.text() if item else "")
+                    writer.writerow(row_data)
+
+            self.log(f"📊 Trade history exported to: {file_path}")
+        except Exception as e:
+            self.log(f"❌ Export failed: {e}")

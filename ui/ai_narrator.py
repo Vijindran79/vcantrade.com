@@ -14,8 +14,9 @@ Features:
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QScrollArea, QFrame, QGraphicsDropShadowEffect
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QScrollArea, QFrame, QGraphicsDropShadowEffect, QSizeGrip,
+    QPushButton, QSlider, QComboBox
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QPropertyAnimation, 
@@ -27,6 +28,7 @@ from PyQt6.QtGui import (
 )
 from datetime import datetime
 import logging
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +44,11 @@ class TypingLabel(QLabel):
         self.timer.timeout.connect(self._type_next_char)
         self.setStyleSheet("""
             color: #E6EDF3;
-            font-size: 13px;
+            font-size: 14px;
             padding: 8px;
             background: transparent;
         """)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     
     def start_typing(self, text: str):
         """Start typing animation."""
@@ -98,9 +101,10 @@ class ActivityItem(QWidget):
         msg_label.setWordWrap(True)
         msg_label.setStyleSheet("""
             color: #E6EDF3;
-            font-size: 12px;
+            font-size: 13px;
             background: transparent;
         """)
+        msg_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         
         # Timestamp
         time_label = QLabel(timestamp)
@@ -127,24 +131,40 @@ class GlassmorphicPanel(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._is_windows = sys.platform == "win32"
+        self._is_dragging = False
+        self._drag_offset = None
+
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.Tool
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not self._is_windows)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMinimumSize(340, 380)
         
-        # Shadow effect
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(30)
-        shadow.setXOffset(0)
-        shadow.setYOffset(8)
-        shadow.setColor(QColor(0, 0, 0, 100))
-        self.setGraphicsEffect(shadow)
+        # Windows-specific fallback avoids noisy UpdateLayeredWindowIndirect spam.
+        if self._is_windows:
+            self.setStyleSheet(
+                "background-color: rgba(16, 22, 36, 235);"
+                "border: 1px solid rgba(100, 120, 160, 120);"
+                "border-radius: 12px;"
+            )
+        else:
+            shadow = QGraphicsDropShadowEffect()
+            shadow.setBlurRadius(30)
+            shadow.setXOffset(0)
+            shadow.setYOffset(8)
+            shadow.setColor(QColor(0, 0, 0, 100))
+            self.setGraphicsEffect(shadow)
     
     def paintEvent(self, event):
         """Draw glassmorphic background with safety checks."""
+        if self._is_windows:
+            super().paintEvent(event)
+            return
+
         # Safety: Don't paint if widget isn't visible or active
         if not self.isVisible() or not self.isActiveWindow():
             return
@@ -177,6 +197,29 @@ class GlassmorphicPanel(QWidget):
         except Exception:
             pass  # Silently ignore paint errors
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_dragging = True
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._is_dragging and self._drag_offset is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._is_dragging = False
+            self._drag_offset = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
 
 class AINarratorOverlay(GlassmorphicPanel):
     """
@@ -196,6 +239,11 @@ class AINarratorOverlay(GlassmorphicPanel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.activity_count = 0
+        self._font_scale = 1.0
+        self._pinned = True
+        self._analysis_mode = False
+        self._current_opacity = 0.96 if sys.platform == "win32" else 1.0
+        self.setWindowOpacity(self._current_opacity)
         self.init_ui()
         self.start_status_timer()
         
@@ -206,7 +254,7 @@ class AINarratorOverlay(GlassmorphicPanel):
     
     def init_ui(self):
         """Initialize the narrator UI."""
-        self.setFixedSize(380, 520)
+        self.resize(440, 640)
         
         # Main layout
         main_layout = QVBoxLayout()
@@ -215,7 +263,58 @@ class AINarratorOverlay(GlassmorphicPanel):
         
         # Header with status indicator
         header = self._create_header()
+        self.header_widget = header
         main_layout.addWidget(header)
+
+        controls = self._create_controls_row()
+        main_layout.addWidget(controls)
+
+        self.live_pnl_label = QLabel("Live PnL: $0.00 | Positions: 0")
+        self.live_pnl_label.setStyleSheet(
+            "color: #3FB950; font-size: 12px; font-weight: bold; background: transparent;"
+        )
+        main_layout.addWidget(self.live_pnl_label)
+
+        # ── Live Ledger ──────────────────────────────────────────────────
+        ledger_frame = QFrame()
+        ledger_frame.setStyleSheet(
+            "QFrame { background: rgba(30,40,60,180); border: 1px solid rgba(88,166,255,0.25);"
+            "border-radius: 6px; }"
+        )
+        ledger_layout = QHBoxLayout()
+        ledger_layout.setContentsMargins(10, 6, 10, 6)
+        ledger_layout.setSpacing(0)
+
+        def _ledger_col(title: str, value: str, color: str = "#E6EDF3") -> QVBoxLayout:
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            t = QLabel(title)
+            t.setStyleSheet("color: #8B949E; font-size: 9px; background: transparent;")
+            t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            v = QLabel(value)
+            v.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: bold; background: transparent;")
+            v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(t)
+            col.addWidget(v)
+            return col, v
+
+        active_col, self._ledger_active_val = _ledger_col("ACTIVE TRADES", "0", "#58A6FF")
+        pnl_col, self._ledger_pnl_val = _ledger_col("UNREALIZED PnL", "$0.00", "#3FB950")
+        rate_col, self._ledger_rate_val = _ledger_col("DAILY SUCCESS", "0%", "#D29922")
+
+        sep_style = "color: rgba(88,166,255,0.3); font-size: 18px; background: transparent;"
+
+        ledger_layout.addLayout(active_col)
+        sep1 = QLabel("|"); sep1.setStyleSheet(sep_style); sep1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ledger_layout.addWidget(sep1)
+        ledger_layout.addLayout(pnl_col)
+        sep2 = QLabel("|"); sep2.setStyleSheet(sep_style); sep2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ledger_layout.addWidget(sep2)
+        ledger_layout.addLayout(rate_col)
+
+        ledger_frame.setLayout(ledger_layout)
+        main_layout.addWidget(ledger_frame)
+        # ─────────────────────────────────────────────────────────────────
         
         # Current status (typing label)
         self.status_label = TypingLabel()
@@ -275,11 +374,91 @@ class AINarratorOverlay(GlassmorphicPanel):
         
         self.scroll_area.setWidget(self.activity_container)
         main_layout.addWidget(self.scroll_area)
+
+        # Bottom bar with resize grip for multi-monitor usability.
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(0, 2, 0, 0)
+        help_label = QLabel("Drag anywhere to move • Resize from bottom-right")
+        help_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
+        bottom_bar.addWidget(help_label)
+        bottom_bar.addStretch()
+        self.size_grip = QSizeGrip(self)
+        self.size_grip.setStyleSheet("background: transparent;")
+        bottom_bar.addWidget(self.size_grip)
+        main_layout.addLayout(bottom_bar)
         
         self.setLayout(main_layout)
         
         # Set initial status
         self.set_status("idle")
+
+    def _create_controls_row(self) -> QWidget:
+        """Create mirror operator controls (pin, opacity, font, snap)."""
+        row = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.pin_btn = QPushButton("📌")
+        self.pin_btn.setCheckable(True)
+        self.pin_btn.setChecked(True)
+        self.pin_btn.setToolTip("Pin mirror on top")
+        self.pin_btn.setFixedSize(30, 24)
+        self.pin_btn.clicked.connect(self._toggle_pin)
+
+        self.font_minus_btn = QPushButton("A-")
+        self.font_minus_btn.setFixedSize(30, 24)
+        self.font_minus_btn.clicked.connect(lambda: self._change_font_scale(-0.05))
+
+        self.font_plus_btn = QPushButton("A+")
+        self.font_plus_btn.setFixedSize(30, 24)
+        self.font_plus_btn.clicked.connect(lambda: self._change_font_scale(0.05))
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setMinimum(55)
+        self.opacity_slider.setMaximum(100)
+        self.opacity_slider.setValue(int(self._current_opacity * 100))
+        self.opacity_slider.setFixedWidth(90)
+        self.opacity_slider.setToolTip("Mirror opacity")
+        self.opacity_slider.valueChanged.connect(self._set_overlay_opacity)
+
+        self.snap_combo = QComboBox()
+        self.snap_combo.addItems([
+            "Snap",
+            "Top-Left",
+            "Top-Right",
+            "Bottom-Left",
+            "Bottom-Right",
+            "Center",
+        ])
+        self.snap_combo.setFixedWidth(108)
+        self.snap_combo.currentIndexChanged.connect(self._snap_from_combo)
+
+        self.mode_label = QLabel("Mode: Normal")
+        self.mode_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
+
+        for btn in [self.pin_btn, self.font_minus_btn, self.font_plus_btn]:
+            btn.setStyleSheet(
+                "QPushButton { background: rgba(88,166,255,0.18); color: #E6EDF3;"
+                "border: 1px solid rgba(88,166,255,0.5); border-radius: 4px; font-size: 11px; }"
+                "QPushButton:checked { background: rgba(63,185,80,0.28); border-color: rgba(63,185,80,0.7); }"
+                "QPushButton:hover { background: rgba(88,166,255,0.28); }"
+            )
+
+        self.snap_combo.setStyleSheet(
+            "QComboBox { background: rgba(22,30,48,0.9); color: #E6EDF3;"
+            "border: 1px solid rgba(100,120,160,0.7); border-radius: 4px; padding: 2px 6px; font-size: 10px; }"
+        )
+
+        layout.addWidget(self.pin_btn)
+        layout.addWidget(self.font_minus_btn)
+        layout.addWidget(self.font_plus_btn)
+        layout.addWidget(self.opacity_slider)
+        layout.addWidget(self.snap_combo)
+        layout.addStretch()
+        layout.addWidget(self.mode_label)
+        row.setLayout(layout)
+        return row
     
     def _create_header(self) -> QWidget:
         """Create header with status indicator."""
@@ -301,7 +480,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         title = QLabel("AI Assistant")
         title.setStyleSheet("""
             color: #E6EDF3;
-            font-size: 16px;
+            font-size: 17px;
             font-weight: bold;
             background: transparent;
         """)
@@ -322,6 +501,120 @@ class AINarratorOverlay(GlassmorphicPanel):
         
         header.setLayout(header_layout)
         return header
+
+    def _toggle_pin(self):
+        self._pinned = self.pin_btn.isChecked()
+        flags = self.windowFlags()
+        if self._pinned:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
+
+    def _set_overlay_opacity(self, value: int):
+        self._current_opacity = max(0.55, min(1.0, value / 100.0))
+        self.setWindowOpacity(self._current_opacity)
+
+    def _change_font_scale(self, delta: float):
+        self._font_scale = max(0.85, min(1.35, self._font_scale + delta))
+        size_main = int(14 * self._font_scale)
+        size_title = int(17 * self._font_scale)
+        self.status_label.setStyleSheet(
+            f"color: #E6EDF3; font-size: {size_main}px; padding: 8px; background: transparent;"
+        )
+        self.count_label.setStyleSheet(
+            f"color: #8B949E; font-size: {max(10, int(11 * self._font_scale))}px; background: transparent;"
+        )
+        for lbl in self.findChildren(QLabel):
+            if lbl.text() == "AI Assistant":
+                lbl.setStyleSheet(
+                    f"color: #E6EDF3; font-size: {size_title}px; font-weight: bold; background: transparent;"
+                )
+
+    def _snap_from_combo(self, index: int):
+        if index == 0:
+            return
+        mapping = {
+            1: "top-left",
+            2: "top-right",
+            3: "bottom-left",
+            4: "bottom-right",
+            5: "center",
+        }
+        self.snap_to(mapping.get(index, "top-right"))
+        self.snap_combo.setCurrentIndex(0)
+
+    def snap_to(self, position: str = "top-right", screen_index: int = -1):
+        app = self.window().windowHandle().screen().virtualSiblingAt(self.pos()) if self.window().windowHandle() else None
+        screens = app.virtualSiblings() if app else []
+        if not screens:
+            from PyQt6.QtWidgets import QApplication
+            screens = QApplication.screens()
+        if not screens:
+            return
+
+        target = screens[screen_index] if 0 <= screen_index < len(screens) else screens[-1]
+        geo = target.availableGeometry()
+        margin = 20
+        x = geo.left() + margin
+        y = geo.top() + margin
+        if position == "top-right":
+            x = geo.right() - self.width() - margin
+        elif position == "bottom-left":
+            y = geo.bottom() - self.height() - margin
+        elif position == "bottom-right":
+            x = geo.right() - self.width() - margin
+            y = geo.bottom() - self.height() - margin
+        elif position == "center":
+            x = geo.left() + (geo.width() - self.width()) // 2
+            y = geo.top() + (geo.height() - self.height()) // 2
+        self.move(x, y)
+
+    def set_analysis_mode(self, enabled: bool, context: str = ""):
+        self._analysis_mode = enabled
+        if enabled:
+            self.mode_label.setText("Mode: Analysis")
+            self.mode_label.setStyleSheet("color: #58A6FF; font-size: 10px; font-weight: bold; background: transparent;")
+            self.set_status("analyzing", context or "Chart focus mode")
+            self.add_activity("🧭", f"Analysis Mode ON {('- ' + context) if context else ''}")
+        else:
+            self.mode_label.setText("Mode: Normal")
+            self.mode_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
+            self.add_activity("✅", "Analysis Mode OFF")
+
+    def update_live_pnl(self, pnl: float, positions: int = 0):
+        """Update real-time pnl strip on mirror."""
+        color = "#3FB950" if pnl >= 0 else "#F85149"
+        self.live_pnl_label.setText(f"Live PnL: ${pnl:.2f} | Positions: {positions}")
+        self.live_pnl_label.setStyleSheet(
+            f"color: {color}; font-size: 12px; font-weight: bold; background: transparent;"
+        )
+
+    def update_live_ledger(
+        self,
+        active_trades: int = 0,
+        unrealized_pnl: float = 0.0,
+        daily_success_rate: float = 0.0,
+    ):
+        """Refresh the Live Ledger strip (Active Trades | Unrealized PnL | Daily Success Rate)."""
+        self._ledger_active_val.setText(str(active_trades))
+        self._ledger_active_val.setStyleSheet(
+            "color: #58A6FF; font-size: 12px; font-weight: bold; background: transparent;"
+        )
+
+        pnl_color = "#3FB950" if unrealized_pnl >= 0 else "#F85149"
+        pnl_sign = "+" if unrealized_pnl >= 0 else ""
+        self._ledger_pnl_val.setText(f"{pnl_sign}${unrealized_pnl:.2f}")
+        self._ledger_pnl_val.setStyleSheet(
+            f"color: {pnl_color}; font-size: 12px; font-weight: bold; background: transparent;"
+        )
+
+        rate_color = "#3FB950" if daily_success_rate >= 50 else "#D29922"
+        self._ledger_rate_val.setText(f"{daily_success_rate:.0f}%")
+        self._ledger_rate_val.setStyleSheet(
+            f"color: {rate_color}; font-size: 12px; font-weight: bold; background: transparent;"
+        )
     
     def start_status_timer(self):
         """Start timer for status dot pulse animation."""

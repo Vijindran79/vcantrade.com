@@ -40,7 +40,7 @@ KILL_SWITCH = False  # Emergency stop - halts all trading immediately
 # AUTO_MODE: AI executes trades automatically (requires DRY_RUN=False)
 TEACHER_MODE = (
     os.getenv("TEACHER_MODE", "False").lower() == "true"
-)  # Default to teacher mode for safety
+)  # Changed to False for Autonomous action
 
 # ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
 # Running 100% locally - NO cloud tokens needed!
@@ -50,7 +50,7 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")  # Not needed for local, 
 VAST_API_TOKEN = None  # No longer using Vast.ai - running locally!
 
 # Local execution settings
-LLM_TIMEOUT = 60  # Increased timeout for larger model (60 seconds max per call)
+LLM_TIMEOUT = 15  # Reduced for speed over perfection
 JSON_OUTPUT = True
 
 # ===== VISION / VLM CONFIGURATION =====
@@ -94,7 +94,7 @@ RSI_OVERBOUGHT = 70  # RSI > 70 = potential sell
 RSI_OVERSOLD = 30  # RSI < 30 = potential buy
 SMA_FAST = 20  # Fast SMA period
 SMA_SLOW = 50  # Slow SMA period
-SWARM_CONFIDENCE_THRESHOLD = 0.70  # Minimum confidence to trigger trade (0.0-1.0)
+SWARM_CONFIDENCE_THRESHOLD = 0.55  # Minimum confidence to trigger trade (0.0-1.0) - Nuclear mode for active trading
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_ENABLED = True  # Enable local market scanning
@@ -114,6 +114,15 @@ USE_HOTKEYS = True  # Prefer keyboard hotkeys over mouse clicks
 HOTKEY_BUY = "<ctrl>+b"  # Buy order hotkey
 HOTKEY_SELL = "<ctrl>+s"  # Sell order hotkey
 HOTKEY_CLOSE = "<ctrl>+x"  # Close position hotkey
+
+# ===== SLIPPAGE GUARD (Execution Safety) =====
+# Relaxed for crypto volatility - was 0.50/0.10
+MAX_SLIPPAGE_PERCENT = float(
+    os.getenv("MAX_SLIPPAGE_PERCENT", "2.50")
+)  # Max 2.5% price movement allowed (crypto-friendly)
+MAX_SPREAD_PERCENT = float(
+    os.getenv("MAX_SPREAD_PERCENT", "0.30")
+)  # Max 0.3% bid-ask spread allowed (thin market tolerant)
 
 # ===== UI CONFIGURATION =====
 OVERLAY_ALPHA = float(
