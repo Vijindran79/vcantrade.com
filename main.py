@@ -36,7 +36,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QObject
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QObject, Qt
+from PyQt6.QtGui import QShortcut, QKeySequence
 
 import config
 from core.models import (
@@ -520,6 +521,7 @@ class VcaniTradeApp:
         else:
             self.ai_narrator.move(20, 20)
         self.ai_narrator.show()
+        self._mirror_shortcut = None
 
         # Core
         self.trade_engine = TradeEngine()
@@ -830,6 +832,10 @@ class VcaniTradeApp:
         self.position_timer.timeout.connect(self._update_positions)
         self.position_timer.start(5000)  # Update every 5 seconds
 
+        self._mirror_shortcut = QShortcut(QKeySequence("Ctrl+Shift+H"), self.cmd)
+        self._mirror_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._mirror_shortcut.activated.connect(self._toggle_mirror_visibility)
+
     def _apply_initial_mode_ui(self):
         """Align the dashboard controls with the backend's initial runtime mode."""
         if self.current_mode == "AUTONOMOUS":
@@ -897,6 +903,38 @@ class VcaniTradeApp:
         """Update dashboard and mirror with per-ticker scanner state."""
         self.cmd.update_watchlist_status(ticker, status)
         self.ai_narrator.update_ticker_status(ticker, status)
+        if status.startswith("brain_reasoning:"):
+            self.ai_narrator.notify_brain_thinking(ticker, status.split(":", 1)[1])
+
+    def _toggle_mirror_visibility(self):
+        """Hide/show the mirror instantly for single-screen research."""
+        if self.ai_narrator.isVisible():
+            self.ai_narrator.hide()
+            self.cmd.log("🪟 Mirror hidden via Ctrl+Shift+H")
+        else:
+            self.ai_narrator.show()
+            self.cmd.log("🪟 Mirror shown via Ctrl+Shift+H")
+
+    def _format_liquidity_label(self, signal_data: dict) -> str:
+        """Create a readable liquidity label for the mirror broadcast strip."""
+        liquidity_zone = signal_data.get("liquidity_zone") or {}
+        if liquidity_zone:
+            zone_type = str(liquidity_zone.get("type", "zone")).replace("_", " ").upper()
+            level = float(liquidity_zone.get("level", 0.0) or 0.0)
+            if level > 0:
+                return f"{zone_type} @ {level:.4f}"
+            return zone_type
+        return str(signal_data.get("liquidity_label") or signal_data.get("brain_reasoning") or "--")
+
+    def _broadcast_trade_levels(self, signal_data: dict):
+        """Send large SL/TP/liquidity text to the mirror for teacher-mode readability."""
+        ticker = signal_data.get("ticker", "UNKNOWN")
+        self.ai_narrator.update_trade_levels(
+            ticker=ticker,
+            stop_loss=signal_data.get("stop_loss"),
+            take_profit=signal_data.get("take_profit"),
+            liquidity_label=self._format_liquidity_label(signal_data),
+        )
 
     def _on_settings_changed(self, settings: dict):
         """Handle trading settings update from dashboard."""
@@ -1560,6 +1598,19 @@ class VcaniTradeApp:
     def _signal_label(self, action: str) -> str:
         """Map internal HOLD semantics to the user-facing WAIT label."""
         return "WAIT" if str(action or "").upper() == "HOLD" else str(action or "").upper()
+
+    def _brain_override_action(self, signal_data: dict) -> str:
+        """Return BUY/SELL when OpenRouter explicitly approved execution."""
+        verdict = str(signal_data.get("brain_verdict", "") or "").strip().upper()
+        if verdict == "[SIGNAL] BUY":
+            return "BUY"
+        if verdict == "[SIGNAL] SELL":
+            return "SELL"
+        return "HOLD"
+
+    def _has_brain_override(self, signal_data: dict) -> bool:
+        """True when OpenRouter explicitly approved immediate execution."""
+        return self._brain_override_action(signal_data) in {"BUY", "SELL"}
 
     def _dispatch_copilot_signal(self, signal_data: dict):
         """Route Co-Pilot BUY/SELL output through the normal teacher/autonomous execution path."""
@@ -2449,14 +2500,21 @@ class VcaniTradeApp:
         
         # Update AI Narrator
         self.ai_narrator.notify_trade_rejected(signal_data["ticker"])
+        self._broadcast_trade_levels(signal_data)
 
     def _on_signal_received(self, signal_data: dict):
         """Handle signal received from cloud via HTTP."""
-        action = self._resolve_directional_action(signal_data)
+        brain_override_action = self._brain_override_action(signal_data)
+        action = brain_override_action if brain_override_action in {"BUY", "SELL"} else self._resolve_directional_action(signal_data)
         signal_data["action"] = action
+        signal_data["force_execute"] = bool(signal_data.get("force_execute")) or brain_override_action in {"BUY", "SELL"}
         ticker = signal_data.get("ticker", "UNKNOWN")
         confidence = signal_data.get("confidence", 0.0)
         entry_price = signal_data.get("entry_price", 0.0)
+        brain_verdict = str(signal_data.get("brain_verdict", "") or "").upper()
+        brain_reasoning = str(signal_data.get("brain_reasoning", "") or "").strip()
+        brain_model = str(signal_data.get("brain_model", "") or "").strip()
+        brain_override = self._has_brain_override(signal_data)
 
         if self.current_watchlist and ticker not in self.current_watchlist:
             logger.info("APP_SIGNAL_HANDLER: ignoring inactive ticker %s", ticker)
@@ -2465,17 +2523,19 @@ class VcaniTradeApp:
             return
 
         logger.info(
-            "APP_SIGNAL_HANDLER: received %s %s confidence=%s entry=%s mode=%s",
+            "APP_SIGNAL_HANDLER: received %s %s confidence=%s entry=%s mode=%s brain_verdict=%s force_execute=%s",
             action,
             ticker,
             confidence,
             entry_price,
             self.current_mode,
+            brain_verdict,
+            signal_data["force_execute"],
         )
 
         confidence_score = self._confidence_to_score(confidence)
         required_confidence_score = self._confidence_to_score(config.SWARM_CONFIDENCE_THRESHOLD)
-        if confidence_score < required_confidence_score:
+        if confidence_score < required_confidence_score and not brain_override:
             logger.info(
                 "APP_SIGNAL_HANDLER: rejected by confidence gate (%s%% < %s%%) for %s %s",
                 confidence_score,
@@ -2488,6 +2548,11 @@ class VcaniTradeApp:
             self.ai_narrator.set_status("error", self.analysis_mode_status)
             self.cmd.log("Trade Ignored: Low AI Confidence")
             return
+        if confidence_score < required_confidence_score and brain_override:
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
+                f'bypassing listener confidence gate for {action} {ticker} | verdict={brain_verdict}'
+            )
         
         # DEBUG: Log current mode and signal details
         self.cmd.log(
@@ -2501,6 +2566,7 @@ class VcaniTradeApp:
 
         # Update trade ledger
         self._add_to_trade_ledger(signal_data)
+        self._broadcast_trade_levels(signal_data)
 
         if action not in ["BUY", "SELL"]:
             self.cmd.log(
@@ -2514,6 +2580,18 @@ class VcaniTradeApp:
                 f'<span style="color:#D29922">⚠️ SIGNAL BLOCKED</span>: '
                 f'{ticker} has no valid entry price for {action}'
             )
+            return
+
+        if brain_override:
+            amount = float(signal_data.get("investment_amount", self.default_investment) or self.default_investment)
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER FORCE EXECUTION</span>: '
+                f'{action} {ticker} approved by {brain_model or "OpenRouter"} {brain_verdict}'
+            )
+            if brain_reasoning:
+                self.cmd.log(f'<span style="color:#58A6FF">🧾 BRAIN</span>: {brain_reasoning}')
+            self.ai_narrator.notify_trade_approved(ticker, action, amount)
+            self._execute_cloud_signal(signal_data)
             return
 
         if self.current_mode == "AUTONOMOUS":
@@ -2562,11 +2640,16 @@ class VcaniTradeApp:
 
     def _execute_cloud_signal(self, signal_data: dict):
         """Execute a cloud-generated signal locally with Professor Mode controls."""
-        action = self._resolve_directional_action(signal_data)
+        brain_override_action = self._brain_override_action(signal_data)
+        action = brain_override_action if brain_override_action in {"BUY", "SELL"} else self._resolve_directional_action(signal_data)
         signal_data["action"] = action
         ticker = signal_data.get("ticker", "UNKNOWN")
         entry_price = float(signal_data.get("entry_price", 0.0) or 0.0)
-        force_execute = bool(signal_data.get("force_execute"))
+        brain_verdict = str(signal_data.get("brain_verdict", "") or "").strip().upper()
+        brain_reasoning = str(signal_data.get("brain_reasoning", "") or "").strip()
+        brain_model = str(signal_data.get("brain_model", "") or "").strip()
+        force_execute = bool(signal_data.get("force_execute")) or brain_override_action in {"BUY", "SELL"}
+        signal_data["force_execute"] = force_execute
         raw_confidence_score = self._confidence_to_score(
             signal_data.get("confidence", self.latest_confidence_score)
         )
@@ -2581,13 +2664,15 @@ class VcaniTradeApp:
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
         logger.info(
-            "EXEC_CLOUD: start action=%s ticker=%s raw_confidence=%.2f adjusted_confidence=%.2f entry=%.4f force_execute=%s",
+            "EXEC_CLOUD: start action=%s ticker=%s raw_confidence=%.2f adjusted_confidence=%.2f entry=%.4f force_execute=%s brain_verdict=%s model=%s",
             action,
             ticker,
             raw_confidence_score,
             confidence_score,
             entry_price,
             force_execute,
+            brain_verdict,
+            brain_model,
         )
 
         if penalty_info.get("summary") and not force_execute:
@@ -2639,7 +2724,7 @@ class VcaniTradeApp:
             return
 
         # Check if trading is paused due to news
-        if self.financial_safety.trading_paused:
+        if self.financial_safety.trading_paused and not force_execute:
             logger.info("EXEC_CLOUD: blocked by financial_safety pause for %s", ticker)
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">🛑 NEWS FILTER BLOCKED</span>: '
@@ -2647,6 +2732,11 @@ class VcaniTradeApp:
             )
             self.ai_narrator.notify_error(f"News filter blocked: {ticker}")
             return
+        elif self.financial_safety.trading_paused and force_execute:
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
+                f'bypassing news pause for {action} {ticker}'
+            )
 
         levels = self.support_resistance_levels.get(ticker, {
             "supports": signal_data.get("support_levels", []),
@@ -2657,7 +2747,7 @@ class VcaniTradeApp:
         sizer = PositionSizer(balance=self.balance, risk_pct=1.0)
         risk_eval = sizer.evaluate(entry_price=entry_price, side=action, levels=levels)
 
-        if not risk_eval["ok"] or risk_eval["risk_score"] != "Low":
+        if (not risk_eval["ok"] or risk_eval["risk_score"] != "Low") and not force_execute:
             logger.info("EXEC_CLOUD: rejected by risk gate for %s - %s", ticker, risk_eval.get("reason", "n/a"))
             self.analysis_mode_status = "REJECTED - Too Risky"
             self.cmd.update_copilot_status("TRADE SKIPPED: Criteria not met")
@@ -2669,12 +2759,32 @@ class VcaniTradeApp:
             self.ai_narrator.add_activity("🛑", f"TRADE SKIPPED - {risk_eval['reason'][:80]}")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
+        elif not risk_eval["ok"] or risk_eval["risk_score"] != "Low":
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
+                f'bypassing risk gate for {action} {ticker} | {risk_eval.get("reason", "risk sizing fallback")}'
+            )
 
-        sl_price = risk_eval["stop_loss"]
-        risk_dollar = risk_eval["risk_amount"]
-        quantity = risk_eval["quantity"]
+        sl_price = float(
+            risk_eval.get("stop_loss")
+            or (
+                entry_price * (1 - self.stop_loss_pct / 100)
+                if action == "BUY"
+                else entry_price * (1 + self.stop_loss_pct / 100)
+            )
+        )
+        quantity = float(risk_eval.get("quantity") or 0.0)
+        risk_dollar = float(risk_eval.get("risk_amount") or 0.0)
 
-        if quantity <= 0:
+        if quantity <= 0 and force_execute:
+            fallback_amount = float(signal_data.get("investment_amount", self.default_investment) or self.default_investment or 1000.0)
+            quantity = max(fallback_amount, 100.0) / max(entry_price, 1.0)
+            risk_dollar = abs(entry_price - sl_price) * quantity
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
+                f'using fallback quantity {quantity:.4f} for {action} {ticker}'
+            )
+        elif quantity <= 0:
             logger.info("EXEC_CLOUD: invalid quantity after sizing for %s (%s)", ticker, quantity)
             self.cmd.log(f"⚠️ Invalid risk sizing for {ticker}; aborting trade")
             return
@@ -2694,27 +2804,37 @@ class VcaniTradeApp:
                 f'Position reduced to ${amount:.2f} ({size_mode.value})'
             )
 
-        if self.daily_pnl <= -self.max_daily_loss:
+        if self.daily_pnl <= -self.max_daily_loss and not force_execute:
             logger.info("EXEC_CLOUD: blocked by max daily loss for %s", ticker)
             self.cmd.log(f"🛑 MAX DAILY LOSS REACHED (${self.daily_pnl:.2f} / -${self.max_daily_loss:.2f}) - Trading halted")
             self.ai_narrator.notify_error("Max daily loss reached")
             return
+        elif self.daily_pnl <= -self.max_daily_loss and force_execute:
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
+                f'bypassing max-daily-loss lock for {action} {ticker}'
+            )
 
         # Prop firm risk gate uses hard-stop implied loss.
         if self.prop_engine:
             potential_loss = abs(entry_price - sl_price) * quantity
             can_trade, violations = self.prop_engine.check_before_trade(ticker, potential_loss)
-            if not can_trade:
+            if not can_trade and not force_execute:
                 logger.info("EXEC_CLOUD: blocked by prop rules for %s: %s", ticker, violations)
                 self.cmd.log(f'<span style="color:#F85149;font-weight:bold">🛑 PROP FIRM BLOCKED</span>: {ticker}')
                 for v in violations:
                     self.cmd.log(f'<span style="color:#F85149">   {v}</span>')
                 self.ai_narrator.notify_error(f"Prop firm blocked: {ticker}")
                 return
+            elif not can_trade:
+                self.cmd.log(
+                    f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
+                    f'bypassing prop rules for {action} {ticker}'
+                )
 
         # ── RPA Hand: move mouse and click on TradingView paper trading ──
         mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action)
-        if not mtf_passed:
+        if not mtf_passed and not force_execute:
             logger.info("EXEC_CLOUD: blocked by MTF sniper gate for %s %s: %s", action, ticker, mtf_votes)
             self.cmd.log(
                 f'<span style="color:#D29922;font-weight:bold">🎯 SNIPER GATE BLOCKED</span>: '
@@ -2723,12 +2843,21 @@ class VcaniTradeApp:
             self.ai_narrator.add_activity("🎯", f"MTF gate blocked {action} {ticker}")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
+        elif not mtf_passed:
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
+                f'bypassing MTF gate for {action} {ticker} {mtf_votes}'
+            )
 
         tp_price = (
             entry_price * (1 + self.take_profit_pct / 100)
             if action == "BUY"
             else entry_price * (1 - self.take_profit_pct / 100)
         )
+        signal_data["stop_loss"] = sl_price
+        signal_data["take_profit"] = tp_price
+        signal_data["liquidity_label"] = self._format_liquidity_label(signal_data)
+        self._broadcast_trade_levels(signal_data)
 
         rpa_trade = TradeRecord(
             asset=ticker,
@@ -2740,6 +2869,23 @@ class VcaniTradeApp:
             ai_reason=signal_data.get("reason", ""),
             mode="AUTONOMOUS",
         )
+
+        if force_execute and brain_verdict in {"[SIGNAL] BUY", "[SIGNAL] SELL"}:
+            verdict_reason = brain_reasoning or f"{brain_model or 'OpenRouter'} approved {action} {ticker}"
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🧠 FINAL CYBERNETIC HANDSHAKE</span>: '
+                f'{brain_verdict} from {brain_model or "OpenRouter"} for {ticker}'
+            )
+            self.ai_narrator.flash_brain_verdict(ticker, brain_verdict, verdict_reason, hold_ms=3000)
+            focus_locked = self.rpa_hand.bring_tradingview_to_front(ticker_hint=ticker)
+            logger.info("EXEC_CLOUD: pre-strike TradingView focus for %s -> %s", ticker, focus_locked)
+            if not focus_locked:
+                self.cmd.log(
+                    f'<span style="color:#F85149;font-weight:bold">⚠️ STRIKE BLOCKED</span>: '
+                    f'could not bring TradingView to front for {ticker}'
+                )
+                self.ai_narrator.notify_error(f"TradingView focus failed: {ticker}")
+                return
 
         liquidity_zone = signal_data.get("liquidity_zone")
         if liquidity_zone:

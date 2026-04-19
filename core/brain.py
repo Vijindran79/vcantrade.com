@@ -1,4 +1,4 @@
-"""External live brain connector for final trade verdicts."""
+"""OpenRouter brain connector for final trade verdicts."""
 
 from __future__ import annotations
 
@@ -7,11 +7,6 @@ import logging
 from typing import Any, Optional
 
 import config
-
-try:
-    from google import genai as google_genai
-except ImportError:  # pragma: no cover - optional dependency at runtime
-    google_genai = None
 
 try:
     from openai import OpenAI
@@ -23,72 +18,74 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiBrain:
-    """Provider-agnostic final execution gate for external model verdicts."""
+    """OpenRouter-backed final execution gate for external model verdicts."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
     ) -> None:
-        self.provider = str(config.BRAIN_PROVIDER or "gemini").strip().lower()
+        self.provider = "openrouter"
         self.api_keys = self._resolve_api_keys(api_key)
         self._key_index = 0
         self.api_key = self.api_keys[0] if self.api_keys else ""
-        self.model = model or self._resolve_model()
-        self.timeout = int(config.GEMINI_TIMEOUT)
-        self._client = None
-
-        if self.provider == "openrouter":
-            self._client = self._build_openrouter_client()
-        else:
-            self._client = self._build_gemini_client()
+        self.models = self._resolve_models(model)
+        self.model = self.models[0] if self.models else "anthropic/claude-3.5-sonnet"
+        self.timeout = int(getattr(config, "GEMINI_TIMEOUT", 20) or 20)
+        self._client = self._build_openrouter_client()
+        self.last_decision = self._fallback_decision("OpenRouter not queried yet.", self.model)
 
     def is_available(self) -> bool:
         return bool(self.api_key and self._client is not None)
 
     def request_verdict(self, proposed_action: str, package: dict[str, Any]) -> str:
-        """Return the external brain's exact trade approval string."""
+        """Return the exact trade approval string used by the scanner."""
+        return self.request_decision(proposed_action, package).get("verdict", "[SIGNAL] WAIT")
+
+    def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
+        """Return OpenRouter's verdict plus short reasoning for UI/execution use."""
         if not self.is_available():
-            logger.warning("External brain unavailable (%s) - defaulting to WAIT", self.provider)
-            return "[SIGNAL] WAIT"
+            logger.warning("OpenRouter brain unavailable - defaulting to WAIT")
+            self.last_decision = self._fallback_decision("OpenRouter unavailable.")
+            return dict(self.last_decision)
 
         prompt = self._build_prompt(proposed_action, package)
-        text = self._request_text(prompt).strip()
-        normalized = text.upper()
-        if normalized in {"[SIGNAL] BUY", "[SIGNAL] SELL", "[SIGNAL] WAIT"}:
-            return normalized
-        return text or "[SIGNAL] WAIT"
-
-    def _resolve_api_key(self) -> str:
-        if self.provider == "openrouter":
-            return str(config.OPENROUTER_API_KEY or "").strip()
-        return str(config.GEMINI_API_KEY or "").strip()
+        decision = self._request_openrouter_decision(prompt, proposed_action)
+        self.last_decision = decision
+        return dict(decision)
 
     def _resolve_api_keys(self, api_key: Optional[str]) -> list[str]:
         if api_key:
             return [str(api_key).strip()]
-        if self.provider == "openrouter":
-            keys = [key for key in config.OPENROUTER_API_KEYS if key]
-            if keys:
-                return keys
-            single_key = str(config.OPENROUTER_API_KEY or "").strip()
-            return [single_key] if single_key else []
-        single_key = self._resolve_api_key()
+
+        keys = [str(key).strip() for key in getattr(config, "OPENROUTER_API_KEYS", []) if str(key).strip()]
+        if keys:
+            return keys
+
+        single_key = str(getattr(config, "OPENROUTER_API_KEY", "") or "").strip()
         return [single_key] if single_key else []
 
-    def _resolve_model(self) -> str:
-        if self.provider == "openrouter":
-            return str(config.OPENROUTER_MODEL or "deepseek/deepseek-chat").strip()
-        return str(config.GEMINI_MODEL or "gemini-2.5-flash").strip()
+    def _resolve_models(self, model: Optional[str]) -> list[str]:
+        candidates: list[str] = []
+        for candidate in [
+            model,
+            getattr(config, "OPENROUTER_MODEL", ""),
+            "anthropic/claude-3.5-sonnet",
+            "meta-llama/llama-3-70b",
+        ]:
+            value = str(candidate or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+        return candidates
 
     def _build_openrouter_client(self):
         if not self.api_key or OpenAI is None:
             return None
         try:
             default_headers = {}
-            if config.OPENROUTER_SITE_URL:
+            if getattr(config, "OPENROUTER_SITE_URL", ""):
                 default_headers["HTTP-Referer"] = config.OPENROUTER_SITE_URL
-            if config.OPENROUTER_APP_NAME:
+            if getattr(config, "OPENROUTER_APP_NAME", ""):
                 default_headers["X-Title"] = config.OPENROUTER_APP_NAME
             return OpenAI(
                 api_key=self.api_key,
@@ -99,60 +96,109 @@ class GeminiBrain:
             logger.warning("OpenRouter client init failed: %s", exc)
             return None
 
-    def _build_gemini_client(self):
-        if not config.GEMINI_ENABLED or not self.api_key or google_genai is None:
-            return None
-        try:
-            return google_genai.Client(api_key=self.api_key)
-        except Exception as exc:  # pragma: no cover - network/client init failure
-            logger.warning("Gemini client init failed: %s", exc)
-            return None
+    def _request_openrouter_decision(self, prompt: str, proposed_action: str) -> dict[str, Any]:
+        if not self.api_keys or self._client is None:
+            return self._fallback_decision("OpenRouter client unavailable.")
 
-    def _request_text(self, prompt: str) -> str:
-        if self.provider == "openrouter":
-            return self._request_openrouter_text(prompt)
-
-        try:
-            response = self._client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-            )
-            return self._extract_text(response)
-        except Exception as exc:  # pragma: no cover - SDK/network failure
-            logger.warning("External brain request failed (%s): %s", self.provider, exc)
-            return ""
-
-    def _request_openrouter_text(self, prompt: str) -> str:
-        if not self.api_keys:
-            return ""
-
-        attempts = len(self.api_keys)
-        for _ in range(attempts):
-            try:
-                response = self._client.chat.completions.create(
-                    model=self.model,
-                    temperature=0,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are the final trade gate. Reply with exactly one signal string.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                choice = (response.choices or [None])[0]
-                message = getattr(choice, "message", None)
-                return str(getattr(message, "content", "") or "")
-            except Exception as exc:  # pragma: no cover - SDK/network failure
-                if self._should_rotate_key(exc) and self._rotate_openrouter_key():
-                    logger.warning(
-                        "OpenRouter key rotated after request failure: %s",
-                        self._describe_exception(exc),
+        last_error = "OpenRouter returned no usable response."
+        for model_name in self.models:
+            attempts = max(1, len(self.api_keys))
+            for _ in range(attempts):
+                try:
+                    response = self._client.chat.completions.create(
+                        model=model_name,
+                        temperature=0,
+                        timeout=self.timeout,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are the final trade gate for a trading bot. "
+                                    "Return JSON only with keys verdict and reasoning."
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
                     )
-                    continue
-                logger.warning("External brain request failed (%s): %s", self.provider, exc)
-                return ""
-        return ""
+                    choice = (response.choices or [None])[0]
+                    message = getattr(choice, "message", None)
+                    content = self._extract_message_content(getattr(message, "content", ""))
+                    decision = self._parse_decision_text(content, proposed_action, model_name)
+                    if decision:
+                        return decision
+                    last_error = f"Model {model_name} returned unparsable content."
+                    break
+                except Exception as exc:  # pragma: no cover - SDK/network failure
+                    last_error = self._describe_exception(exc)
+                    if self._should_rotate_key(exc) and self._rotate_openrouter_key():
+                        logger.warning("OpenRouter key rotated after request failure: %s", last_error)
+                        continue
+                    logger.warning("OpenRouter request failed for %s: %s", model_name, last_error)
+                    break
+
+        return self._fallback_decision(last_error)
+
+    def _extract_message_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                    if text:
+                        parts.append(str(text))
+                elif item:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        return str(content or "")
+
+    def _parse_decision_text(self, text: str, proposed_action: str, model_name: str) -> Optional[dict[str, Any]]:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return None
+
+        reasoning = ""
+        verdict_source = raw_text
+        try:
+            payload = json.loads(raw_text)
+            if isinstance(payload, dict):
+                verdict_source = payload.get("verdict") or payload.get("signal") or payload.get("action") or raw_text
+                reasoning = str(payload.get("reasoning") or payload.get("reason") or "").strip()
+        except json.JSONDecodeError:
+            reasoning = ""
+
+        verdict = self._normalize_verdict(verdict_source, proposed_action)
+        return {
+            "verdict": verdict,
+            "reasoning": reasoning[:240],
+            "model": model_name,
+            "raw_text": raw_text,
+        }
+
+    def _normalize_verdict(self, value: Any, proposed_action: str) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized in {"[SIGNAL] BUY", "[SIGNAL] SELL", "[SIGNAL] WAIT"}:
+            return normalized
+        if "BUY" in normalized:
+            return "[SIGNAL] BUY"
+        if "SELL" in normalized:
+            return "[SIGNAL] SELL"
+        if "WAIT" in normalized or "HOLD" in normalized:
+            return "[SIGNAL] WAIT"
+
+        action = str(proposed_action or "WAIT").strip().upper()
+        if action in {"BUY", "SELL"} and normalized == action:
+            return f"[SIGNAL] {action}"
+        return "[SIGNAL] WAIT"
+
+    def _fallback_decision(self, reasoning: str = "", model: Optional[str] = None) -> dict[str, Any]:
+        return {
+            "verdict": "[SIGNAL] WAIT",
+            "reasoning": str(reasoning or "").strip()[:240],
+            "model": model or self.model,
+            "raw_text": "",
+        }
 
     def _should_rotate_key(self, exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None)
@@ -196,37 +242,28 @@ class GeminiBrain:
     def _build_prompt(self, proposed_action: str, package: dict[str, Any]) -> str:
         candles_json = json.dumps(package.get("recent_ohlcv", []), ensure_ascii=False)
         zones_json = json.dumps(package.get("liquidity_zones", []), ensure_ascii=False)
-        provider_name = "OpenRouter" if self.provider == "openrouter" else "GeminiBrain"
-        return f"""You are {provider_name}, the final execution gate for an automated trading bot.
+        liquidity_label = str(package.get("liquidity_zone_label", "N/A") or "N/A")
+        signal_type = str(package.get("signal_type", "UNKNOWN") or "UNKNOWN")
+        return f"""You are OpenRouter, the final execution gate for an automated trading bot.
 
-You are reviewing a proposed {str(proposed_action or 'WAIT').upper()} after a confirmed 5m/3m/1m triple alignment.
+Review the proposed {str(proposed_action or 'WAIT').upper()} and decide if the bot should strike now.
 
-Data package:
+Market snapshot:
+- Signal type: {signal_type}
 - Last 10 OHLCV candles: {candles_json}
 - Current RSI: {package.get('rsi', 50.0)}
 - Current ATR: {package.get('atr', 0.0)}
+- Primary liquidity label: {liquidity_label}
 - Nearest liquidity zone coordinates: {zones_json}
 
+Return JSON only in this format:
+{{"verdict":"[SIGNAL] BUY or [SIGNAL] SELL or [SIGNAL] WAIT","reasoning":"one short trading reason under 240 chars"}}
+
 Rules:
-- Return EXACTLY one of these strings and nothing else: [SIGNAL] {str(proposed_action or 'WAIT').upper()} or [SIGNAL] WAIT.
-- Approve only if the provided data supports the proposed action.
-- If the data is unclear, conflicting, or weak, return [SIGNAL] WAIT.
+- Approve only if the snapshot supports immediate execution.
+- If the setup is weak, conflicting, or unclear, return [SIGNAL] WAIT.
+- Do not include any keys other than verdict and reasoning.
 """
 
-    def _extract_text(self, response: Any) -> str:
-        text = getattr(response, "text", None)
-        if isinstance(text, str) and text.strip():
-            return text
 
-        candidates = getattr(response, "candidates", None) or []
-        for candidate in candidates:
-            content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", None) or []
-            texts = []
-            for part in parts:
-                part_text = getattr(part, "text", None)
-                if part_text:
-                    texts.append(str(part_text))
-            if texts:
-                return "\n".join(texts)
-        return ""
+OpenRouterBrain = GeminiBrain

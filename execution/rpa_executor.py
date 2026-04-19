@@ -346,6 +346,13 @@ class RPAExecutor:
 
         return True
 
+    def bring_tradingview_to_front(self, ticker_hint: Optional[str] = None) -> bool:
+        """Public focus interlock used before an immediate strike."""
+        visible = self._verify_window_visible(ticker_hint=ticker_hint)
+        if visible:
+            logger.info("TradingView focus locked for %s", ticker_hint or "current symbol")
+        return visible
+
     def _fire_blind_error(self, reason: str):
         """Log and notify that the Professor cannot see the chart."""
         logger.error(f"[SAFETY INTERLOCK] Professor is blind: {reason}")
@@ -393,7 +400,7 @@ class RPAExecutor:
 
         # ── Safety Interlock ─────────────────────────────────────────────
         # Do NOT click if TradingView is minimized or covered by another app
-        if not self._verify_window_visible(ticker_hint=trade.asset):
+        if not self.bring_tradingview_to_front(ticker_hint=trade.asset):
             logger.error("[ABORT] Professor is blind — execution cancelled")
             return False
 

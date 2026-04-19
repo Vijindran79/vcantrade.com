@@ -16,11 +16,11 @@ Features:
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QFrame, QGraphicsDropShadowEffect, QSizeGrip,
-    QPushButton, QSlider, QComboBox
+    QPushButton, QSlider, QComboBox, QApplication
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QPropertyAnimation, 
-    QEasingCurve, QVariantAnimation
+    QEasingCurve, QVariantAnimation, QEventLoop
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QBrush, QPen,
@@ -138,8 +138,7 @@ class GlassmorphicPanel(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool |
-            Qt.WindowType.WindowTransparentForInput
+            Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not self._is_windows)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -218,6 +217,9 @@ class GlassmorphicPanel(QWidget):
             pass  # Silently ignore paint errors
 
     def mousePressEvent(self, event):
+        if getattr(self, "_pinned", False):
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_dragging = True
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -226,6 +228,9 @@ class GlassmorphicPanel(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if getattr(self, "_pinned", False):
+            event.ignore()
+            return
         if self._is_dragging and self._drag_offset is not None:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             event.accept()
@@ -233,6 +238,9 @@ class GlassmorphicPanel(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if getattr(self, "_pinned", False):
+            event.ignore()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._is_dragging = False
             self._drag_offset = None
@@ -266,6 +274,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self._current_opacity = 0.96 if sys.platform == "win32" else 1.0
         self.setWindowOpacity(self._current_opacity)
         self.init_ui()
+        self._apply_window_mode()
         self.start_status_timer()
         
         # Connect signals
@@ -355,6 +364,48 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.status_label = TypingLabel()
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
+
+        self.levels_frame = QFrame()
+        self.levels_frame.setStyleSheet(
+            "QFrame { background: rgba(12,18,30,220); border: 1px solid rgba(88,166,255,0.45); border-radius: 10px; }"
+        )
+        levels_layout = QVBoxLayout()
+        levels_layout.setContentsMargins(12, 10, 12, 10)
+        levels_layout.setSpacing(6)
+
+        self.levels_title = QLabel("TEACHER BROADCAST")
+        self.levels_title.setStyleSheet(
+            "color: #58A6FF; font-size: 13px; font-weight: bold; letter-spacing: 1px; background: transparent;"
+        )
+        levels_layout.addWidget(self.levels_title)
+
+        self.levels_ticker = QLabel("NO ACTIVE LEVELS")
+        self.levels_ticker.setStyleSheet(
+            "color: #E6EDF3; font-size: 18px; font-weight: bold; background: transparent;"
+        )
+        levels_layout.addWidget(self.levels_ticker)
+
+        self.levels_sl_label = QLabel("SL: --")
+        self.levels_sl_label.setStyleSheet(
+            "color: #FF7B72; font-size: 26px; font-weight: bold; background: transparent;"
+        )
+        levels_layout.addWidget(self.levels_sl_label)
+
+        self.levels_tp_label = QLabel("TP: --")
+        self.levels_tp_label.setStyleSheet(
+            "color: #3FB950; font-size: 26px; font-weight: bold; background: transparent;"
+        )
+        levels_layout.addWidget(self.levels_tp_label)
+
+        self.levels_liquidity_label = QLabel("LIQ: --")
+        self.levels_liquidity_label.setWordWrap(True)
+        self.levels_liquidity_label.setStyleSheet(
+            "color: #F2CC60; font-size: 24px; font-weight: bold; background: transparent;"
+        )
+        levels_layout.addWidget(self.levels_liquidity_label)
+
+        self.levels_frame.setLayout(levels_layout)
+        main_layout.addWidget(self.levels_frame)
         
         # Separator
         separator = QFrame()
@@ -413,9 +464,9 @@ class AINarratorOverlay(GlassmorphicPanel):
         # Bottom bar with resize grip for multi-monitor usability.
         bottom_bar = QHBoxLayout()
         bottom_bar.setContentsMargins(0, 2, 0, 0)
-        help_label = QLabel("Drag anywhere to move • Resize from bottom-right")
-        help_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
-        bottom_bar.addWidget(help_label)
+        self.help_label = QLabel("Drag anywhere to move • Resize from bottom-right")
+        self.help_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
+        bottom_bar.addWidget(self.help_label)
         bottom_bar.addStretch()
         self.size_grip = QSizeGrip(self)
         self.size_grip.setStyleSheet("background: transparent;")
@@ -426,6 +477,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         
         # Set initial status
         self._refresh_mode_label()
+        self._refresh_pin_state(announce=False)
         self.set_status("idle")
 
     def _create_controls_row(self) -> QWidget:
@@ -435,11 +487,11 @@ class AINarratorOverlay(GlassmorphicPanel):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self.pin_btn = QPushButton("📌")
+        self.pin_btn = QPushButton("Toggle Pin")
         self.pin_btn.setCheckable(True)
         self.pin_btn.setChecked(True)
-        self.pin_btn.setToolTip("Pin mirror on top")
-        self.pin_btn.setFixedSize(30, 24)
+        self.pin_btn.setToolTip("Pinned: transparent overlay. Unpinned: movable window.")
+        self.pin_btn.setFixedSize(88, 24)
         self.pin_btn.clicked.connect(self._toggle_pin)
 
         self.font_minus_btn = QPushButton("A-")
@@ -507,6 +559,9 @@ class AINarratorOverlay(GlassmorphicPanel):
             text = "Mode: Normal"
             style = "color: #8B949E; font-size: 10px; background: transparent;"
 
+        pin_state = "Pinned" if getattr(self, "_pinned", True) else "Unpinned"
+        text = f"{text} | {pin_state}"
+
         self.mode_label.setText(text)
         self.mode_label.setStyleSheet(style)
         self._apply_panel_chrome()
@@ -556,13 +611,43 @@ class AINarratorOverlay(GlassmorphicPanel):
 
     def _toggle_pin(self):
         self._pinned = self.pin_btn.isChecked()
-        flags = self.windowFlags()
+        self._apply_window_mode()
+
+    def _apply_window_mode(self):
+        geometry = self.geometry()
         if self._pinned:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
+            flags = (
+                Qt.WindowType.FramelessWindowHint |
+                Qt.WindowType.WindowStaysOnTopHint |
+                Qt.WindowType.Tool |
+                Qt.WindowType.WindowTransparentForInput
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            flags = Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+
         self.setWindowFlags(flags)
         self.show()
+        self.setGeometry(geometry)
+        self._refresh_pin_state()
+
+    def _refresh_pin_state(self, announce: bool = True):
+        state_text = "Pinned" if self._pinned else "Unpinned"
+        self.pin_btn.setToolTip(
+            "Pinned: transparent, click-through, non-movable mirror"
+            if self._pinned
+            else "Unpinned: standard movable mirror window"
+        )
+        if hasattr(self, "help_label"):
+            self.help_label.setText(
+                "Mirror pinned • Click-through overlay active"
+                if self._pinned
+                else "Mirror unpinned • Drag the title bar or frame to reposition"
+            )
+        self._refresh_mode_label()
+        if announce:
+            self.add_activity("📌" if self._pinned else "🪟", f"Mirror {state_text.lower()}")
 
     def _set_overlay_opacity(self, value: int):
         self._current_opacity = max(0.55, min(1.0, value / 100.0))
@@ -734,6 +819,8 @@ class AINarratorOverlay(GlassmorphicPanel):
             "idle": "💤 Standing by... Waiting for market signals",
             "scanning": f"📡 Scanning markets... Monitoring {message or '10 tickers'} for opportunities",
             "analyzing": "🧠 Analyzing signal... Running multi-agent swarm debate",
+            "thinking": f"🧠 AI Reasoning... {message or 'Consulting OpenRouter'}",
+            "verdict": f"⚡ Brain verdict locked... {message or 'Awaiting execution'}",
             "executing": f"⚡ Executing trade... {message or 'Processing order'}",
             "monitoring": f"👁️ Monitoring positions... Watching {message or 'active trades'}",
             "error": f"❌ Error detected... {message or 'Checking system status'}",
@@ -749,6 +836,8 @@ class AINarratorOverlay(GlassmorphicPanel):
             "idle": "#8B949E",
             "scanning": "#58A6FF",
             "analyzing": "#D29922",
+            "thinking": "#D29922",
+            "verdict": "#58A6FF",
             "executing": "#F85149",
             "monitoring": "#3FB950",
             "error": "#F85149",
@@ -814,8 +903,58 @@ class AINarratorOverlay(GlassmorphicPanel):
             "analyzing_liquidity": ("🟡", "Analyzing Liquidity"),
             "trade_rejected": ("🔴", "Trade Rejected"),
         }
-        icon, text = icon_map.get(status, ("⚪", status))
+        if status.startswith("brain_reasoning:"):
+            icon, text = ("🧠", f"AI Reasoning {status.split(':', 1)[1]}")
+        elif status.startswith("brain_verdict:"):
+            verdict = status.split(':', 1)[1].strip().upper()
+            verdict_map = {
+                "[SIGNAL] BUY": ("🟩", "Brain BUY"),
+                "[SIGNAL] SELL": ("🟥", "Brain SELL"),
+                "[SIGNAL] WAIT": ("⏸️", "Brain WAIT"),
+            }
+            icon, text = verdict_map.get(verdict, ("⚪", verdict or "Brain"))
+        else:
+            icon, text = icon_map.get(status, ("⚪", status))
         self.ticker_status_labels[ticker].setText(f"{icon} {ticker} | {text}")
+
+    def notify_brain_thinking(self, ticker: str, proposed_action: str = ""):
+        action_label = proposed_action.upper() if proposed_action else "SCAN"
+        self.set_status("thinking", f"{ticker} → {action_label}")
+        self.add_activity("🧠", f"AI Reasoning... {ticker} → {action_label}")
+
+    def flash_brain_verdict(self, ticker: str, verdict: str, reasoning: str = "", hold_ms: int = 3000):
+        clean_verdict = str(verdict or "[SIGNAL] WAIT").strip().upper()
+        action = clean_verdict.replace("[SIGNAL]", "").strip() or "WAIT"
+        reasoning_text = (reasoning or "OpenRouter approved the trade.").strip()
+        self.set_status("verdict", f"{action} {ticker}")
+        self.add_activity("⚡", f"Brain verdict: {action} {ticker}")
+        if reasoning_text:
+            self.add_activity("🧾", reasoning_text[:180])
+        QApplication.processEvents()
+        loop = QEventLoop()
+        QTimer.singleShot(max(1, int(hold_ms)), loop.quit)
+        loop.exec()
+
+    def update_trade_levels(
+        self,
+        ticker: str,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        liquidity_label: str = "",
+    ):
+        """Show SL/TP/liquidity in large type for cross-room teacher mode reading."""
+        self.levels_ticker.setText(str(ticker or "NO ACTIVE LEVELS").upper())
+        self.levels_sl_label.setText(
+            f"SL: {float(stop_loss):.4f}" if stop_loss not in (None, 0, 0.0) else "SL: --"
+        )
+        self.levels_tp_label.setText(
+            f"TP: {float(take_profit):.4f}" if take_profit not in (None, 0, 0.0) else "TP: --"
+        )
+        self.levels_liquidity_label.setText(f"LIQ: {liquidity_label or '--'}")
+
+    def clear_trade_levels(self):
+        """Reset large trade-level broadcast when nothing actionable is active."""
+        self.update_trade_levels("NO ACTIVE LEVELS", None, None, "")
     
     def notify_signal_detected(self, ticker: str, signal_type: str, confidence: float):
         """Notify that a trading signal was detected."""

@@ -834,13 +834,24 @@ class CloudScanner:
                     continue
 
                 approved_brain_verdict = f"[SIGNAL] {analysis.action.value}"
-                brain_verdict = await self._request_brain_verdict(signal, analysis.action.value)
+                logger.info(
+                    "OPENROUTER STRIKE REVIEW: %s %s proposed=%s",
+                    signal.signal_type,
+                    signal.ticker,
+                    analysis.action.value,
+                )
+                self._emit_status(signal.ticker, f"brain_reasoning:{analysis.action.value}")
+                brain_decision = await self._request_brain_verdict(signal, analysis.action.value)
+                brain_verdict = str(brain_decision.get("verdict", "[SIGNAL] WAIT") or "[SIGNAL] WAIT").upper()
+                self._emit_status(signal.ticker, f"brain_verdict:{brain_verdict}")
                 if brain_verdict != approved_brain_verdict:
                     logger.info(
-                        "BRAIN VETOED TRADE: %s %s | response=%s",
+                        "BRAIN VETOED TRADE: %s %s | response=%s | model=%s | reasoning=%s",
                         analysis.action.value,
                         signal.ticker,
                         brain_verdict,
+                        brain_decision.get("model", "n/a"),
+                        brain_decision.get("reasoning", ""),
                     )
                     self._emit_status(signal.ticker, "trade_rejected")
                     continue
@@ -866,6 +877,9 @@ class CloudScanner:
                     "signal_type": signal.signal_type,
                     "mtf_check": mtf_votes,
                     "brain_verdict": brain_verdict,
+                    "brain_reasoning": str(brain_decision.get("reasoning", "") or ""),
+                    "brain_model": str(brain_decision.get("model", self.brain.model) or self.brain.model),
+                    "force_execute": brain_verdict in {"[SIGNAL] BUY", "[SIGNAL] SELL"},
                     "liquidity_zone": signal.metadata.get("liquidity_zone"),
                     "investment_amount": 1000.0,  # Default $1000 per trade
                     "transcript": {
@@ -922,26 +936,36 @@ class CloudScanner:
             }
         )
 
-    async def _request_brain_verdict(self, signal: TechnicalSignal, proposed_action: str) -> str:
-        """Ask GeminiBrain for the final approval after triple alignment passes."""
+    async def _request_brain_verdict(self, signal: TechnicalSignal, proposed_action: str) -> dict:
+        """Ask OpenRouter for the final approval after triple alignment passes."""
         package = {
             "recent_ohlcv": signal.metadata.get("recent_ohlcv", []),
             "rsi": signal.metadata.get("rsi", 50.0),
             "atr": signal.metadata.get("atr", 0.0),
             "liquidity_zones": signal.metadata.get("liquidity_zones", []),
+            "liquidity_zone_label": signal.metadata.get("liquidity_zone_label", self._format_liquidity_zone_label(signal.metadata.get("liquidity_zone"))),
+            "signal_type": signal.signal_type,
         }
 
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self.brain.request_verdict, proposed_action, package),
+                asyncio.to_thread(self.brain.request_decision, proposed_action, package),
                 timeout=max(1, int(config.GEMINI_TIMEOUT)),
             )
         except asyncio.TimeoutError:
-            logger.warning("GeminiBrain timeout for %s %s", proposed_action, signal.ticker)
-            return "[SIGNAL] WAIT"
+            logger.warning("OpenRouter brain timeout for %s %s", proposed_action, signal.ticker)
+            return {
+                "verdict": "[SIGNAL] WAIT",
+                "reasoning": "OpenRouter timed out.",
+                "model": self.brain.model,
+            }
         except Exception as exc:
-            logger.warning("GeminiBrain request failed for %s %s: %s", proposed_action, signal.ticker, exc)
-            return "[SIGNAL] WAIT"
+            logger.warning("OpenRouter brain request failed for %s %s: %s", proposed_action, signal.ticker, exc)
+            return {
+                "verdict": "[SIGNAL] WAIT",
+                "reasoning": str(exc),
+                "model": self.brain.model,
+            }
     
     def _calculate_confidence(self, analysis, transcript, signal_strength: float = 0.5) -> float:
         """
