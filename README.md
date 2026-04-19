@@ -2,6 +2,8 @@
 
 **AI-powered hybrid trading system with cloud scanning, swarm intelligence, and RPA execution**
 
+Current repo handoff status: see [CURRENT_STATUS.md](CURRENT_STATUS.md).
+
 ---
 
 ## 🌟 Features
