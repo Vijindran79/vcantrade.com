@@ -24,6 +24,7 @@ import requests
 
 import config
 from core.brain import GeminiBrain
+from core.code_architect import CodeArchitect
 from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
 from core.swarm_consensus import OllamaSwarmConsensus as SwarmConsensus
 from core.market_sessions import MarketSessionDetector
@@ -58,6 +59,7 @@ class CloudScanner:
         self.priority_scan_list = []
         self.consensus = SwarmConsensus()
         self.brain = GeminiBrain()
+        self.code_architect = CodeArchitect()
         self.recent_signals: Dict[str, datetime] = {}  # Prevent duplicate signals
         self.signal_cooldown = 300  # 5 minutes between signals for same ticker
         self.status_callback = None
@@ -155,6 +157,12 @@ class CloudScanner:
         brain_package = self._build_brain_package(df, liquidity_zone)
         if liquidity_zone:
             self._emit_status(ticker, "analyzing_liquidity")
+
+        liquidity_signal = self._detect_liquidity_reversal(df, ticker, liquidity_zone)
+        if liquidity_signal:
+            liquidity_signal.metadata.update(brain_package)
+            liquidity_signal.metadata["liquidity_zone"] = liquidity_zone
+            signals.append(liquidity_signal)
         
         # Detect signals
         volume_spike = self._detect_volume_spike(df, ticker)
@@ -229,6 +237,112 @@ class CloudScanner:
                 best_zone["level"],
             )
         return best_zone
+
+    def _format_liquidity_zone_label(self, liquidity_zone: Optional[dict]) -> str:
+        """Build a compact label for prompts, logs, and AI context."""
+        if not liquidity_zone:
+            return "N/A"
+
+        zone_type = str(liquidity_zone.get("type", "zone")).strip() or "zone"
+        level = float(liquidity_zone.get("level", 0.0) or 0.0)
+        return f"{zone_type} @ {level:.4f}"
+
+    def _detect_liquidity_reversal(
+        self,
+        df: pd.DataFrame,
+        ticker: str,
+        liquidity_zone: Optional[dict],
+    ) -> Optional[TechnicalSignal]:
+        """Promote a nearby liquidity rejection into an actionable signal candidate."""
+        if liquidity_zone is None or df is None or df.empty or len(df) < 3:
+            return None
+
+        zone_type = str(liquidity_zone.get("type", "")).strip().lower()
+        zone_level = float(liquidity_zone.get("level", 0.0) or 0.0)
+        if zone_type not in {"equal_highs", "swing_lows"} or zone_level <= 0:
+            return None
+
+        last = df.iloc[-1]
+        candle = {
+            "open": float(last.get("Open", 0.0) or 0.0),
+            "high": float(last.get("High", 0.0) or 0.0),
+            "low": float(last.get("Low", 0.0) or 0.0),
+            "close": float(last.get("Close", 0.0) or 0.0),
+            "volume": float(last.get("Volume", 0.0) or 0.0),
+        }
+        if candle["close"] <= 0:
+            return None
+
+        rsi_value = float(last.get("RSI", 50.0) or 50.0)
+        atr_value = float(last.get("ATR", 0.0) or 0.0)
+        distance_ratio = abs(candle["close"] - zone_level) / max(abs(zone_level), 1.0)
+        zone_width = max(abs(zone_level) * 0.0015, atr_value * 0.25 if atr_value > 0 else 0.0, 0.5)
+
+        demand_zones = []
+        supply_zones = []
+        if zone_type == "equal_highs":
+            supply_zones.append({
+                "low": zone_level - zone_width,
+                "high": zone_level + zone_width,
+                "strength": 0.7,
+            })
+        else:
+            demand_zones.append({
+                "low": zone_level - zone_width,
+                "high": zone_level + zone_width,
+                "strength": 0.7,
+            })
+
+        sweep = self.code_architect.detect_liquidity_sweep(
+            candle=candle,
+            demand_zones=demand_zones,
+            supply_zones=supply_zones,
+            rsi_value=rsi_value,
+            rsi_divergence=False,
+        )
+
+        signal_type = None
+        strength = 0.0
+        bias = None
+
+        if sweep:
+            bias = "SELL" if sweep.get("direction") == "BEARISH" else "BUY"
+            signal_type = f"LIQUIDITY_SWEEP_{bias}"
+            strength = max(0.65, float(sweep.get("conviction", 0.65) or 0.65))
+        else:
+            near_supply = zone_type == "equal_highs" and candle["high"] >= (zone_level - zone_width) and candle["close"] < candle["open"]
+            near_demand = zone_type == "swing_lows" and candle["low"] <= (zone_level + zone_width) and candle["close"] > candle["open"]
+            if near_supply:
+                bias = "SELL"
+                signal_type = "LIQUIDITY_REJECTION_SELL"
+            elif near_demand:
+                bias = "BUY"
+                signal_type = "LIQUIDITY_REJECTION_BUY"
+            else:
+                return None
+
+            strength = max(0.60, min(0.85, 0.85 - (distance_ratio * 100)))
+
+        logger.info(
+            "🎯 Liquidity trigger armed for %s: %s near %s",
+            ticker,
+            signal_type,
+            self._format_liquidity_zone_label(liquidity_zone),
+        )
+
+        return TechnicalSignal(
+            ticker=ticker,
+            signal_type=signal_type,
+            strength=round(strength, 2),
+            metadata={
+                "price": candle["close"],
+                "rsi": rsi_value,
+                "atr": atr_value,
+                "liquidity_bias": bias,
+                "liquidity_sweep": sweep,
+                "liquidity_zone_label": self._format_liquidity_zone_label(liquidity_zone),
+            },
+        )
     
     async def _fetch_market_data(
         self,
@@ -801,6 +915,7 @@ class CloudScanner:
                 "ATR": signal.metadata.get("atr", 0.0),
                 "SIGNAL_TYPE": signal.signal_type,
                 "SIGNAL_STRENGTH": signal.strength,
+                "LIQUIDITY_ZONE": signal.metadata.get("liquidity_zone_label", self._format_liquidity_zone_label(signal.metadata.get("liquidity_zone"))),
                 "RECENT_CANDLES": signal.metadata.get("recent_candle_lines", []),
                 "RECENT_OHLCV": signal.metadata.get("recent_ohlcv", []),
                 "LIQUIDITY_ZONES": signal.metadata.get("liquidity_zones", []),

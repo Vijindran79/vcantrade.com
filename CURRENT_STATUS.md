@@ -26,7 +26,9 @@ The bot is past the pure scanning stage, but it is not yet considered reliably e
 Current stop point:
 
 - Market scan is working.
-- Signal generation is working.
+- Classic signal generation is working for volume, RSI, and SMA events.
+- Liquidity zones were being detected but were previously only logged as metadata, which meant BTC-style `equal_highs` / `swing_lows` setups could scan forever without producing an executable trade candidate.
+- The current local fix promotes a real liquidity rejection or sweep into a scanner signal before the downstream AI and execution gates.
 - Signal dispatch into the local app is working.
 - Execution logic and RPA click path exist in code.
 - Live order opening/clicking is still the open blocker on the user's current setup.
@@ -77,10 +79,11 @@ That means GitHub contains the logic and documentation, but not the exact local 
 
 If work resumes from this point, focus on confirming the real execution chain on the live desktop in this order:
 
-1. verify chart window focus and active tab selection
-2. verify hotkey execution opens the order panel
-3. verify calibrated input fields and confirm button locations
-4. verify post-click confirmation that an order actually opened
+1. verify the scanner now logs `🎯 Liquidity trigger armed` and then `🔥 Signal detected` for live BTC liquidity rejections
+2. verify chart window focus and active tab selection
+3. verify hotkey execution opens the order panel
+4. verify calibrated input fields and confirm button locations
+5. verify post-click confirmation that an order actually opened
 
 ## Short Summary
 
