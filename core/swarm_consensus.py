@@ -125,6 +125,72 @@ class OllamaSwarmConsensus:
         self.devils_advocate = DevilsAdvocate()
         logger.info(f"🧠 Local Brain initialized: {self.model} at {self.base_url}")
 
+    def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
+        """Fallback strike gate used when the cloud brain is unavailable."""
+        prompt = self._build_fallback_brain_prompt(proposed_action, package)
+        result = call_local_brain(prompt, model=self.model, timeout=self.timeout)
+        if "error" in result:
+            return {
+                "verdict": "[SIGNAL] WAIT",
+                "reasoning": str(result.get("error") or "Local Predator unavailable.")[:240],
+                "model": self.model,
+                "brain_used": "OLLAMA_PREDATOR",
+                "fallback_mode": True,
+                "raw_text": str(result),
+            }
+
+        verdict = self._normalize_fallback_verdict(
+            result.get("verdict") or result.get("signal") or result.get("action"),
+            proposed_action,
+        )
+        reasoning = str(result.get("reasoning") or result.get("reason") or "Local Predator strike gate engaged.").strip()[:240]
+        return {
+            "verdict": verdict,
+            "reasoning": reasoning,
+            "model": self.model,
+            "brain_used": "OLLAMA_PREDATOR",
+            "fallback_mode": True,
+            "raw_text": json.dumps(result, ensure_ascii=False),
+        }
+
+    def _build_fallback_brain_prompt(self, proposed_action: str, package: dict[str, Any]) -> str:
+        candles_json = json.dumps(package.get("recent_ohlcv", []), ensure_ascii=False)
+        zones_json = json.dumps(package.get("liquidity_zones", []), ensure_ascii=False)
+        return f"""{PREDATOR_SYSTEM_INSTRUCTION}
+
+You are the local Predator fallback strike gate.
+
+Review the proposed {str(proposed_action or 'WAIT').upper()}.
+
+Market snapshot:
+- Signal type: {package.get('signal_type', 'UNKNOWN')}
+- Asset: {package.get('asset', 'UNKNOWN')}
+- Last 10 OHLCV candles: {candles_json}
+- Current RSI: {package.get('rsi', 50.0)}
+- Current ATR: {package.get('atr', 0.0)}
+- Primary liquidity label: {package.get('liquidity_zone_label', 'N/A')}
+- Nearest liquidity zone coordinates: {zones_json}
+
+Return JSON only:
+{{"verdict":"[SIGNAL] BUY or [SIGNAL] SELL or [SIGNAL] WAIT","reasoning":"one short execution reason under 240 chars"}}
+"""
+
+    def _normalize_fallback_verdict(self, value: Any, proposed_action: str) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized in {"[SIGNAL] BUY", "[SIGNAL] SELL", "[SIGNAL] WAIT"}:
+            return normalized
+        if "BUY" in normalized:
+            return "[SIGNAL] BUY"
+        if "SELL" in normalized:
+            return "[SIGNAL] SELL"
+        if "WAIT" in normalized or "HOLD" in normalized:
+            return "[SIGNAL] WAIT"
+
+        action = str(proposed_action or "WAIT").strip().upper()
+        if action in {"BUY", "SELL"}:
+            return f"[SIGNAL] {action}"
+        return "[SIGNAL] WAIT"
+
     async def run(
         self,
         market_data: MarketDataPoint,

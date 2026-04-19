@@ -1142,8 +1142,8 @@ class CommandCenter(QWidget):
             icon = "🟢"
             color = GREEN
         elif normalized == "fallback":
-            icon = "🔴"
-            color = RED
+            icon = "🟡"
+            color = YELLOW
         elif normalized == "standby":
             icon = "🟡"
             color = ORANGE

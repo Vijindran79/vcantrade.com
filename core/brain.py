@@ -7,6 +7,7 @@ import logging
 from typing import Any, Optional
 
 import config
+from core.swarm_consensus import OllamaSwarmConsensus
 
 try:
     from openai import OpenAI
@@ -33,6 +34,7 @@ class GeminiBrain:
         self.model = self.models[0] if self.models else "anthropic/claude-3.5-sonnet"
         self.timeout = int(getattr(config, "GEMINI_TIMEOUT", 20) or 20)
         self._client = self._build_openrouter_client()
+        self.predator = OllamaSwarmConsensus()
         self.last_decision = self._fallback_decision("OpenRouter not queried yet.", self.model)
 
     def is_available(self) -> bool:
@@ -45,12 +47,12 @@ class GeminiBrain:
     def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
         """Return OpenRouter's verdict plus short reasoning for UI/execution use."""
         if not self.is_available():
-            logger.warning("OpenRouter brain unavailable - defaulting to WAIT")
-            self.last_decision = self._fallback_decision("OpenRouter unavailable.")
+            logger.warning("OpenRouter brain unavailable - switching to local Predator")
+            self.last_decision = self._use_predator_fallback(proposed_action, package, "OpenRouter unavailable.")
             return dict(self.last_decision)
 
         prompt = self._build_prompt(proposed_action, package)
-        decision = self._request_openrouter_decision(prompt, proposed_action)
+        decision = self._request_openrouter_decision(prompt, proposed_action, package)
         self.last_decision = decision
         return dict(decision)
 
@@ -96,9 +98,14 @@ class GeminiBrain:
             logger.warning("OpenRouter client init failed: %s", exc)
             return None
 
-    def _request_openrouter_decision(self, prompt: str, proposed_action: str) -> dict[str, Any]:
+    def _request_openrouter_decision(
+        self,
+        prompt: str,
+        proposed_action: str,
+        package: dict[str, Any],
+    ) -> dict[str, Any]:
         if not self.api_keys or self._client is None:
-            return self._fallback_decision("OpenRouter client unavailable.")
+            return self._use_predator_fallback(proposed_action, package, "OpenRouter client unavailable.")
 
         last_error = "OpenRouter returned no usable response."
         for model_name in self.models:
@@ -127,16 +134,16 @@ class GeminiBrain:
                     if decision:
                         return decision
                     last_error = f"Model {model_name} returned unparsable content."
-                    break
+                    return self._use_predator_fallback(proposed_action, package, last_error)
                 except Exception as exc:  # pragma: no cover - SDK/network failure
                     last_error = self._describe_exception(exc)
                     if self._should_rotate_key(exc) and self._rotate_openrouter_key():
                         logger.warning("OpenRouter key rotated after request failure: %s", last_error)
                         continue
                     logger.warning("OpenRouter request failed for %s: %s", model_name, last_error)
-                    break
+                    return self._use_predator_fallback(proposed_action, package, last_error)
 
-        return self._fallback_decision(last_error)
+        return self._use_predator_fallback(proposed_action, package, last_error)
 
     def _extract_message_content(self, content: Any) -> str:
         if isinstance(content, str):
@@ -173,6 +180,8 @@ class GeminiBrain:
             "verdict": verdict,
             "reasoning": reasoning[:240],
             "model": model_name,
+            "brain_used": "OPENROUTER",
+            "fallback_mode": False,
             "raw_text": raw_text,
         }
 
@@ -197,8 +206,24 @@ class GeminiBrain:
             "verdict": "[SIGNAL] WAIT",
             "reasoning": str(reasoning or "").strip()[:240],
             "model": model or self.model,
+            "brain_used": "OPENROUTER",
+            "fallback_mode": False,
             "raw_text": "",
         }
+
+    def _use_predator_fallback(
+        self,
+        proposed_action: str,
+        package: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        logger.warning("[FALLBACK MODE] Local Predator engaged: %s", reason)
+        fallback_package = dict(package or {})
+        fallback_package.setdefault("signal_type", package.get("signal_type") if isinstance(package, dict) else "UNKNOWN")
+        decision = self.predator.request_decision(proposed_action, fallback_package)
+        if not decision.get("reasoning"):
+            decision["reasoning"] = str(reason)[:240]
+        return decision
 
     def _should_rotate_key(self, exc: Exception) -> bool:
         status_code = getattr(exc, "status_code", None)

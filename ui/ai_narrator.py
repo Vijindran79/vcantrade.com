@@ -820,6 +820,7 @@ class AINarratorOverlay(GlassmorphicPanel):
             "scanning": f"📡 Scanning markets... Monitoring {message or '10 tickers'} for opportunities",
             "analyzing": "🧠 Analyzing signal... Running multi-agent swarm debate",
             "thinking": f"🧠 AI Reasoning... {message or 'Consulting OpenRouter'}",
+            "fallback": f"🟡 [FALLBACK MODE] {message or 'Local Predator intelligence active'}",
             "verdict": f"⚡ Brain verdict locked... {message or 'Awaiting execution'}",
             "executing": f"⚡ Executing trade... {message or 'Processing order'}",
             "monitoring": f"👁️ Monitoring positions... Watching {message or 'active trades'}",
@@ -837,6 +838,7 @@ class AINarratorOverlay(GlassmorphicPanel):
             "scanning": "#58A6FF",
             "analyzing": "#D29922",
             "thinking": "#D29922",
+            "fallback": "#F0E68C",
             "verdict": "#58A6FF",
             "executing": "#F85149",
             "monitoring": "#3FB950",
@@ -845,6 +847,10 @@ class AINarratorOverlay(GlassmorphicPanel):
             "rejected": "#F85149",
         }
         
+        text_color = "#F0E68C" if status == "fallback" else "#E6EDF3"
+        self.status_label.setStyleSheet(
+            f"color: {text_color}; font-size: 14px; padding: 8px; background: transparent;"
+        )
         color = status_colors.get(status, "#8B949E")
         self.status_dot.setStyleSheet(f"""
             color: {color};
@@ -905,6 +911,9 @@ class AINarratorOverlay(GlassmorphicPanel):
         }
         if status.startswith("brain_reasoning:"):
             icon, text = ("🧠", f"AI Reasoning {status.split(':', 1)[1]}")
+        elif status.startswith("brain_fallback:"):
+            brain = status.split(':', 1)[1].strip().upper() or "LOCAL"
+            icon, text = ("🟡", f"[FALLBACK MODE] {brain}")
         elif status.startswith("brain_verdict:"):
             verdict = status.split(':', 1)[1].strip().upper()
             verdict_map = {
@@ -922,11 +931,28 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.set_status("thinking", f"{ticker} → {action_label}")
         self.add_activity("🧠", f"AI Reasoning... {ticker} → {action_label}")
 
-    def flash_brain_verdict(self, ticker: str, verdict: str, reasoning: str = "", hold_ms: int = 3000):
+    def notify_fallback_mode(self, brain_used: str = "OLLAMA_PREDATOR"):
+        brain_label = str(brain_used or "OLLAMA_PREDATOR").replace("_", " ").title()
+        self.set_status("fallback", f"{brain_label} engaged")
+        self.add_activity("🟡", f"[FALLBACK MODE] {brain_label}")
+
+    def flash_brain_verdict(
+        self,
+        ticker: str,
+        verdict: str,
+        reasoning: str = "",
+        hold_ms: int = 3000,
+        fallback_mode: bool = False,
+        brain_used: str = "OPENROUTER",
+    ):
         clean_verdict = str(verdict or "[SIGNAL] WAIT").strip().upper()
         action = clean_verdict.replace("[SIGNAL]", "").strip() or "WAIT"
         reasoning_text = (reasoning or "OpenRouter approved the trade.").strip()
-        self.set_status("verdict", f"{action} {ticker}")
+        if fallback_mode:
+            self.set_status("fallback", f"{action} {ticker} via {str(brain_used or 'OLLAMA_PREDATOR').replace('_', ' ')}")
+            self.add_activity("🟡", f"[FALLBACK MODE] {brain_used}")
+        else:
+            self.set_status("verdict", f"{action} {ticker}")
         self.add_activity("⚡", f"Brain verdict: {action} {ticker}")
         if reasoning_text:
             self.add_activity("🧾", reasoning_text[:180])

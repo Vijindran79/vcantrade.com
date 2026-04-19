@@ -685,13 +685,22 @@ class VcaniTradeApp:
             self._set_vibe_status_ui("Standby", "standby")
         else:
             self._set_vibe_status_ui("Fallback", "fallback")
-            self._log_ui("🛡️ VIBE SHIELD: CLI unavailable, Professor fallback will be used")
+            self._log_ui("🛡️ VIBE SHIELD: CLI unavailable, local market intelligence will be used")
 
     def _set_copilot_status_ui(self, text: str):
         self._run_on_ui_thread(lambda: self.cmd.update_copilot_status(text))
 
     def _set_vibe_status_ui(self, status: str, mode: str = "standby"):
         self._run_on_ui_thread(lambda: self.cmd.update_vibe_status(status, mode))
+
+    def _sync_brain_runtime_ui(self, brain_used: str, fallback_mode: bool):
+        """Keep dashboard and mirror aligned with the currently active strike brain."""
+        normalized_brain = str(brain_used or "OPENROUTER").strip().upper()
+        if fallback_mode:
+            self._set_vibe_status_ui("Fallback Mode", "fallback")
+            self.ai_narrator.notify_fallback_mode(normalized_brain)
+        else:
+            self._set_vibe_status_ui("OpenRouter Active", "active")
 
     def _add_copilot_response_ui(self, thoughts: str, verdict: str, adjustment: str):
         self._run_on_ui_thread(
@@ -905,6 +914,8 @@ class VcaniTradeApp:
         self.ai_narrator.update_ticker_status(ticker, status)
         if status.startswith("brain_reasoning:"):
             self.ai_narrator.notify_brain_thinking(ticker, status.split(":", 1)[1])
+        elif status.startswith("brain_fallback:"):
+            self._sync_brain_runtime_ui(status.split(":", 1)[1], True)
 
     def _toggle_mirror_visibility(self):
         """Hide/show the mirror instantly for single-screen research."""
@@ -1377,13 +1388,13 @@ class VcaniTradeApp:
 
         reason = error or "Vibe CLI failed"
         self._set_vibe_status_ui("Fallback", "fallback")
-        self._log_ui(f"🛡️ VIBE SHIELD: {reason} - falling back to Professor logic")
+        self._log_ui(f"🛡️ VIBE SHIELD: {reason} - local market intelligence is taking over")
         self._add_copilot_response_ui(
             thoughts=f"Vibe strategy generation failed for: {prompt}",
             verdict="VIBE_FALLBACK",
-            adjustment=f"⚠️ {reason}. Professor logic is taking over automatically.",
+            adjustment=f"⚠️ {reason}. Local market intelligence is taking over automatically.",
         )
-        self._set_copilot_status_ui("Professor fallback engaged")
+        self._set_copilot_status_ui("Local market intelligence active")
         self._trigger_ai_analysis(prompt)
 
     def _finalize_vibe_strategy_worker(self):
@@ -2514,7 +2525,11 @@ class VcaniTradeApp:
         brain_verdict = str(signal_data.get("brain_verdict", "") or "").upper()
         brain_reasoning = str(signal_data.get("brain_reasoning", "") or "").strip()
         brain_model = str(signal_data.get("brain_model", "") or "").strip()
+        brain_used = str(signal_data.get("brain_used", "OPENROUTER") or "OPENROUTER").strip().upper()
+        fallback_mode = bool(signal_data.get("fallback_mode"))
         brain_override = self._has_brain_override(signal_data)
+
+        self._sync_brain_runtime_ui(brain_used, fallback_mode)
 
         if self.current_watchlist and ticker not in self.current_watchlist:
             logger.info("APP_SIGNAL_HANDLER: ignoring inactive ticker %s", ticker)
@@ -2550,8 +2565,8 @@ class VcaniTradeApp:
             return
         if confidence_score < required_confidence_score and brain_override:
             self.cmd.log(
-                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
-                f'bypassing listener confidence gate for {action} {ticker} | verdict={brain_verdict}'
+                f'<span style="color:#F85149;font-weight:bold">🧠 BRAIN OVERRIDE</span>: '
+                f'bypassing listener confidence gate for {action} {ticker} | brain={brain_used} verdict={brain_verdict}'
             )
         
         # DEBUG: Log current mode and signal details
@@ -2585,8 +2600,8 @@ class VcaniTradeApp:
         if brain_override:
             amount = float(signal_data.get("investment_amount", self.default_investment) or self.default_investment)
             self.cmd.log(
-                f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER FORCE EXECUTION</span>: '
-                f'{action} {ticker} approved by {brain_model or "OpenRouter"} {brain_verdict}'
+                f'<span style="color:#F85149;font-weight:bold">🧠 BRAIN FORCE EXECUTION</span>: '
+                f'{action} {ticker} approved by {brain_used} {brain_verdict}'
             )
             if brain_reasoning:
                 self.cmd.log(f'<span style="color:#58A6FF">🧾 BRAIN</span>: {brain_reasoning}')
@@ -2648,8 +2663,13 @@ class VcaniTradeApp:
         brain_verdict = str(signal_data.get("brain_verdict", "") or "").strip().upper()
         brain_reasoning = str(signal_data.get("brain_reasoning", "") or "").strip()
         brain_model = str(signal_data.get("brain_model", "") or "").strip()
+        brain_used = str(signal_data.get("brain_used", "OPENROUTER") or "OPENROUTER").strip().upper()
+        fallback_mode = bool(signal_data.get("fallback_mode"))
         force_execute = bool(signal_data.get("force_execute")) or brain_override_action in {"BUY", "SELL"}
         signal_data["force_execute"] = force_execute
+        signal_data["brain_used"] = brain_used
+        signal_data["fallback_mode"] = fallback_mode
+        self._sync_brain_runtime_ui(brain_used, fallback_mode)
         raw_confidence_score = self._confidence_to_score(
             signal_data.get("confidence", self.latest_confidence_score)
         )
@@ -2664,13 +2684,14 @@ class VcaniTradeApp:
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
         logger.info(
-            "EXEC_CLOUD: start action=%s ticker=%s raw_confidence=%.2f adjusted_confidence=%.2f entry=%.4f force_execute=%s brain_verdict=%s model=%s",
+            "EXEC_CLOUD: start action=%s ticker=%s raw_confidence=%.2f adjusted_confidence=%.2f entry=%.4f force_execute=%s brain=%s brain_verdict=%s model=%s",
             action,
             ticker,
             raw_confidence_score,
             confidence_score,
             entry_price,
             force_execute,
+            brain_used,
             brain_verdict,
             brain_model,
         )
@@ -2871,12 +2892,19 @@ class VcaniTradeApp:
         )
 
         if force_execute and brain_verdict in {"[SIGNAL] BUY", "[SIGNAL] SELL"}:
-            verdict_reason = brain_reasoning or f"{brain_model or 'OpenRouter'} approved {action} {ticker}"
+            verdict_reason = brain_reasoning or f"{brain_used} approved {action} {ticker}"
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">🧠 FINAL CYBERNETIC HANDSHAKE</span>: '
-                f'{brain_verdict} from {brain_model or "OpenRouter"} for {ticker}'
+                f'{brain_verdict} from {brain_used} for {ticker}'
             )
-            self.ai_narrator.flash_brain_verdict(ticker, brain_verdict, verdict_reason, hold_ms=3000)
+            self.ai_narrator.flash_brain_verdict(
+                ticker,
+                brain_verdict,
+                verdict_reason,
+                hold_ms=3000,
+                fallback_mode=fallback_mode,
+                brain_used=brain_used,
+            )
             focus_locked = self.rpa_hand.bring_tradingview_to_front(ticker_hint=ticker)
             logger.info("EXEC_CLOUD: pre-strike TradingView focus for %s -> %s", ticker, focus_locked)
             if not focus_locked:
@@ -2940,6 +2968,7 @@ class VcaniTradeApp:
             stop_loss=sl_price,
             ai_confidence=confidence_score,
             ai_reasoning=signal_data.get("reason", "No reasoning provided"),
+            brain_used=brain_used,
             outcome="OPEN",
         )
         self.sql_journal.save_trade_vibe(

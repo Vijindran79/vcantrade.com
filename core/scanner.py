@@ -843,13 +843,18 @@ class CloudScanner:
                 self._emit_status(signal.ticker, f"brain_reasoning:{analysis.action.value}")
                 brain_decision = await self._request_brain_verdict(signal, analysis.action.value)
                 brain_verdict = str(brain_decision.get("verdict", "[SIGNAL] WAIT") or "[SIGNAL] WAIT").upper()
+                brain_used = str(brain_decision.get("brain_used", "OPENROUTER") or "OPENROUTER").upper()
+                fallback_mode = bool(brain_decision.get("fallback_mode"))
+                if fallback_mode:
+                    self._emit_status(signal.ticker, f"brain_fallback:{brain_used}")
                 self._emit_status(signal.ticker, f"brain_verdict:{brain_verdict}")
                 if brain_verdict != approved_brain_verdict:
                     logger.info(
-                        "BRAIN VETOED TRADE: %s %s | response=%s | model=%s | reasoning=%s",
+                        "BRAIN VETOED TRADE: %s %s | response=%s | brain=%s | model=%s | reasoning=%s",
                         analysis.action.value,
                         signal.ticker,
                         brain_verdict,
+                        brain_used,
                         brain_decision.get("model", "n/a"),
                         brain_decision.get("reasoning", ""),
                     )
@@ -879,6 +884,8 @@ class CloudScanner:
                     "brain_verdict": brain_verdict,
                     "brain_reasoning": str(brain_decision.get("reasoning", "") or ""),
                     "brain_model": str(brain_decision.get("model", self.brain.model) or self.brain.model),
+                    "brain_used": brain_used,
+                    "fallback_mode": fallback_mode,
                     "force_execute": brain_verdict in {"[SIGNAL] BUY", "[SIGNAL] SELL"},
                     "liquidity_zone": signal.metadata.get("liquidity_zone"),
                     "investment_amount": 1000.0,  # Default $1000 per trade
@@ -939,6 +946,7 @@ class CloudScanner:
     async def _request_brain_verdict(self, signal: TechnicalSignal, proposed_action: str) -> dict:
         """Ask OpenRouter for the final approval after triple alignment passes."""
         package = {
+            "asset": signal.ticker,
             "recent_ohlcv": signal.metadata.get("recent_ohlcv", []),
             "rsi": signal.metadata.get("rsi", 50.0),
             "atr": signal.metadata.get("atr", 0.0),
@@ -953,19 +961,19 @@ class CloudScanner:
                 timeout=max(1, int(config.GEMINI_TIMEOUT)),
             )
         except asyncio.TimeoutError:
-            logger.warning("OpenRouter brain timeout for %s %s", proposed_action, signal.ticker)
-            return {
-                "verdict": "[SIGNAL] WAIT",
-                "reasoning": "OpenRouter timed out.",
-                "model": self.brain.model,
-            }
+            logger.warning("OpenRouter brain timeout for %s %s - switching to local Predator", proposed_action, signal.ticker)
+            return await asyncio.to_thread(
+                self.brain.predator.request_decision,
+                proposed_action,
+                package,
+            )
         except Exception as exc:
-            logger.warning("OpenRouter brain request failed for %s %s: %s", proposed_action, signal.ticker, exc)
-            return {
-                "verdict": "[SIGNAL] WAIT",
-                "reasoning": str(exc),
-                "model": self.brain.model,
-            }
+            logger.warning("OpenRouter brain request failed for %s %s: %s - switching to local Predator", proposed_action, signal.ticker, exc)
+            return await asyncio.to_thread(
+                self.brain.predator.request_decision,
+                proposed_action,
+                package,
+            )
     
     def _calculate_confidence(self, analysis, transcript, signal_strength: float = 0.5) -> float:
         """

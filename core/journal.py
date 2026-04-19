@@ -32,10 +32,14 @@ class TradeJournalDB:
                     stop_loss REAL NOT NULL,
                     ai_confidence REAL NOT NULL,
                     ai_reasoning TEXT NOT NULL,
+                    brain_used TEXT NOT NULL DEFAULT 'UNKNOWN',
                     outcome TEXT NOT NULL
                 )
                 """
             )
+            trade_columns = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            if "brain_used" not in trade_columns:
+                conn.execute("ALTER TABLE trades ADD COLUMN brain_used TEXT NOT NULL DEFAULT 'UNKNOWN'")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS trade_vibes (
@@ -102,6 +106,7 @@ class TradeJournalDB:
         stop_loss: float,
         ai_confidence: float,
         ai_reasoning: str,
+        brain_used: str,
         outcome: str,
         timestamp: Optional[str] = None,
     ) -> int:
@@ -111,8 +116,8 @@ class TradeJournalDB:
                 """
                 INSERT INTO trades (
                     timestamp, coin, entry, stop_loss,
-                    ai_confidence, ai_reasoning, outcome
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ai_confidence, ai_reasoning, brain_used, outcome
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ts,
@@ -121,6 +126,7 @@ class TradeJournalDB:
                     float(stop_loss),
                     float(ai_confidence),
                     ai_reasoning,
+                    str(brain_used or "UNKNOWN").strip() or "UNKNOWN",
                     outcome,
                 ),
             )
