@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
 
 import config
 from core.models import SignalAction
+from core.settings import settings_manager
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +97,20 @@ class CommandCenter(QWidget):
         self._mode = "TEACHER"
         self._killed = False
         self.positions = {}  # Live positions tracking
-        self.watchlist = config.CLOUD_TICKERS.copy()
+        saved_watchlist = settings_manager.get("session_watchlist", [])
+        if not isinstance(saved_watchlist, list):
+            saved_watchlist = []
+        self.watchlist = [str(ticker).strip().upper() for ticker in saved_watchlist if str(ticker).strip()]
+        if not self.watchlist:
+            self.watchlist = config.CLOUD_TICKERS.copy()
+        self.watchlist_slots: List[QLineEdit] = []
+        self.watchlist_sync_timer = QTimer(self)
+        self.watchlist_sync_timer.setSingleShot(True)
+        self.watchlist_sync_timer.timeout.connect(self._sync_watchlist_from_inputs)
 
         self._setup_window()
         self._build_ui()
+        self._update_analysis_option_visibility()
         logger.info("Command Center initialized - Professional Trading Mode")
 
     def _setup_window(self):
@@ -643,6 +654,37 @@ class CommandCenter(QWidget):
         save_btn.clicked.connect(self._save_settings)
         layout.addWidget(save_btn)
 
+        analysis_frame = QFrame()
+        analysis_frame.setStyleSheet(f"background: {BG_INPUT}; border: 1px solid {BORDER}; border-radius: 6px; padding: 8px;")
+        analysis_layout = QHBoxLayout(analysis_frame)
+        analysis_layout.setContentsMargins(8, 6, 8, 6)
+        analysis_layout.setSpacing(10)
+
+        analysis_label = QLabel("Analysis Tools:")
+        analysis_label.setStyleSheet(f"color: {GRAY}; font-size: 11px; font-weight: bold; font-family: 'Consolas';")
+        analysis_layout.addWidget(analysis_label)
+
+        self.analysis_option_labels = {}
+        option_styles = {
+            "Liquidity": ORANGE,
+            "MTF": CYAN,
+            "Risk": GREEN,
+        }
+        for name, color in option_styles.items():
+            chip = QLabel(f"{name}: ON")
+            chip.setStyleSheet(
+                f"color: {color}; background: {BG_PANEL}; border: 1px solid {BORDER}; "
+                f"border-radius: 5px; padding: 4px 8px; font-size: 11px; font-weight: bold; font-family: 'Consolas';"
+            )
+            analysis_layout.addWidget(chip)
+            self.analysis_option_labels[name] = chip
+
+        analysis_layout.addStretch()
+        self.analysis_visibility_label = QLabel("Waiting for watchlist")
+        self.analysis_visibility_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+        analysis_layout.addWidget(self.analysis_visibility_label)
+        layout.addWidget(analysis_frame)
+
         # Test Execution Section
         test_section = self._build_test_execution_section()
         layout.addWidget(test_section)
@@ -682,7 +724,7 @@ class CommandCenter(QWidget):
         test_row.addWidget(self.test_browser_btn)
 
         # Force Test Trade button
-        self.force_test_btn = QPushButton("⚡ Force Test Trade")
+        self.force_test_btn = QPushButton("⚡ FORCE HAND TEST")
         self.force_test_btn.setMinimumHeight(32)
         self.force_test_btn.setStyleSheet(f"""
             QPushButton {{ background: {ORANGE}; color: {BG_DARK}; border: none; border-radius: 6px;
@@ -723,12 +765,12 @@ class CommandCenter(QWidget):
         self.log("🧪 TEST: Browser agent click test requested")
 
     def _force_test_trade(self):
-        """Force a test trade bypassing Saturday/holiday blocks."""
-        self.test_status.setText("Status: Force test trade initiated...")
+        """Force a visible RPA hand-move diagnostic against the active TradingView chart."""
+        self.test_status.setText("Status: Force hand move diagnostic initiated...")
         self.test_status.setStyleSheet(f"color: {ORANGE}; font-size: 10px; font-family: 'Consolas';")
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(100, lambda: self.force_test_trade_requested.emit())
-        self.log("⚡ FORCE TEST: Test trade initiated (bypassing session blocks)")
+        self.log("⚡ FORCE HAND TEST: visible TradingView hand-move requested")
 
     def _toggle_dry_run(self):
         """Toggle dry run mode."""
@@ -801,6 +843,37 @@ class CommandCenter(QWidget):
 
         add_row.addStretch()
         layout.addLayout(add_row)
+
+        # 10 live dashboard slots that drive the scanner in real time.
+        slots_frame = QFrame()
+        slots_layout = QVBoxLayout(slots_frame)
+        slots_layout.setContentsMargins(0, 0, 0, 0)
+        slots_layout.setSpacing(6)
+
+        slot_label = QLabel("Live Watchlist Slots (scanner follows these instantly)")
+        slot_label.setStyleSheet(f"color: {GRAY}; font-size: 11px; font-family: 'Consolas';")
+        slots_layout.addWidget(slot_label)
+
+        self.watchlist_slots = []
+        for row_index in range(2):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            for col_index in range(5):
+                slot_index = row_index * 5 + col_index
+                slot = QLineEdit()
+                slot.setPlaceholderText(f"Slot {slot_index + 1}")
+                if slot_index < len(self.watchlist):
+                    slot.setText(self.watchlist[slot_index])
+                slot.setStyleSheet(f"""
+                    QLineEdit {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {BORDER};
+                               border-radius: 6px; padding: 6px; font-size: 11px; font-family: 'Consolas'; }}
+                """)
+                slot.textChanged.connect(self._queue_watchlist_sync)
+                row.addWidget(slot)
+                self.watchlist_slots.append(slot)
+            slots_layout.addLayout(row)
+
+        layout.addWidget(slots_frame)
 
         # Watchlist table
         self.watchlist_table = QTableWidget()
@@ -1015,6 +1088,10 @@ class CommandCenter(QWidget):
         self.copilot_mode.setStyleSheet(f"color: {CYAN}; font-size: 11px; font-family: 'Consolas';")
         status_row.addWidget(self.copilot_mode)
 
+        self.vibe_status = QLabel("🟡 Vibe Status: Standby")
+        self.vibe_status.setStyleSheet(f"color: {ORANGE}; font-size: 11px; font-weight: bold; font-family: 'Consolas';")
+        status_row.addWidget(self.vibe_status)
+
         status_row.addStretch()
         layout.addLayout(status_row)
 
@@ -1055,6 +1132,29 @@ class CommandCenter(QWidget):
     def update_copilot_status(self, status: str):
         """Update AI Co-Pilot status indicator"""
         self.copilot_status.setText(f"🟢 AI Status: {status}")
+
+    def update_vibe_status(self, status: str, mode: str = "standby"):
+        """Update Vibe shield status indicator."""
+        normalized = str(mode or "standby").lower()
+        icon = "🟡"
+        color = ORANGE
+        if normalized == "active":
+            icon = "🟢"
+            color = GREEN
+        elif normalized == "fallback":
+            icon = "🔴"
+            color = RED
+        elif normalized == "standby":
+            icon = "🟡"
+            color = ORANGE
+        elif normalized == "offline":
+            icon = "⚪"
+            color = GRAY
+
+        self.vibe_status.setText(f"{icon} Vibe Status: {status}")
+        self.vibe_status.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-weight: bold; font-family: 'Consolas';"
+        )
 
     # =================== INSTITUTIONAL GOVERNOR (STAGE 3) ===================
     def _build_institutional_governor_panel(self) -> QWidget:
@@ -1653,13 +1753,18 @@ class CommandCenter(QWidget):
             self.log("⚠️ Please enter a valid ticker symbol")
             return
             
-        if ticker not in self.watchlist:
-            self.watchlist.append(ticker)
-            self._refresh_watchlist()
-            self.watchlist_updated.emit(self.watchlist)
-            self.log(f"➕ Added {ticker} to watchlist")
+        current_watchlist = self._collect_watchlist_from_inputs()
+
+        if ticker not in current_watchlist:
+            empty_slot = next((slot for slot in self.watchlist_slots if not slot.text().strip()), None)
+            if empty_slot is None:
+                self.log("⚠️ All 10 watchlist slots are full")
+                return
+            empty_slot.setText(ticker)
+            self._sync_watchlist_from_inputs()
             self.ticker_input.clear()
-        elif ticker in self.watchlist:
+            self.log(f"➕ Added {ticker} to watchlist")
+        elif ticker in current_watchlist:
             self.log(f"⚠️ {ticker} already in watchlist")
 
     def _remove_ticker(self):
@@ -1671,11 +1776,48 @@ class CommandCenter(QWidget):
         row = selected[0].row()
         ticker = self.watchlist_table.item(row, 1).text()
         
-        if ticker in self.watchlist:
-            self.watchlist.remove(ticker)
-            self._refresh_watchlist()
-            self.watchlist_updated.emit(self.watchlist)
+        if ticker in self._collect_watchlist_from_inputs():
+            for slot in self.watchlist_slots:
+                if slot.text().strip().upper() == ticker:
+                    slot.clear()
+                    break
+            self._sync_watchlist_from_inputs()
             self.log(f"➖ Removed {ticker} from watchlist")
+
+    def _queue_watchlist_sync(self):
+        """Debounce rapid text edits from the 10 dashboard slots."""
+        self.watchlist_sync_timer.start(150)
+
+    def _apply_watchlist_to_inputs(self, watchlist: List[str]):
+        """Normalize slot contents so active tickers are packed from top to bottom."""
+        for index, slot in enumerate(self.watchlist_slots):
+            new_value = watchlist[index] if index < len(watchlist) else ""
+            if slot.text() == new_value:
+                continue
+            was_blocked = slot.blockSignals(True)
+            slot.setText(new_value)
+            slot.blockSignals(was_blocked)
+
+    def _collect_watchlist_from_inputs(self) -> List[str]:
+        """Read the 10 dashboard slots into a normalized watchlist."""
+        watchlist = []
+        seen = set()
+        for slot in self.watchlist_slots:
+            ticker = slot.text().strip().upper()
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            watchlist.append(ticker)
+        return watchlist
+
+    def _sync_watchlist_from_inputs(self):
+        """Push live slot contents into current dashboard watchlist immediately."""
+        self.watchlist = self._collect_watchlist_from_inputs()
+        settings_manager.update({"session_watchlist": list(self.watchlist)})
+        self._apply_watchlist_to_inputs(self.watchlist)
+        self._refresh_watchlist()
+        self._update_analysis_option_visibility()
+        self.watchlist_updated.emit(self.watchlist)
 
     def _refresh_watchlist(self):
         self.watchlist_table.setRowCount(len(self.watchlist))
@@ -1701,6 +1843,40 @@ class CommandCenter(QWidget):
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             status_item.setForeground(QColor(CYAN))
             self.watchlist_table.setItem(i, 3, status_item)
+
+    def _update_analysis_option_visibility(self):
+        """Keep the analysis option strip visible whenever dashboard slots contain tickers."""
+        has_watchlist = bool(self.watchlist)
+        for name, label in self.analysis_option_labels.items():
+            state = "ON" if has_watchlist else "STANDBY"
+            label.setText(f"{name}: {state}")
+            label.setVisible(True)
+        if has_watchlist:
+            self.analysis_visibility_label.setText(f"Dashboard live: {len(self.watchlist)} ticker(s)")
+            self.analysis_visibility_label.setStyleSheet(f"color: {CYAN}; font-size: 10px; font-family: 'Consolas';")
+        else:
+            self.analysis_visibility_label.setText("Waiting for watchlist")
+            self.analysis_visibility_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
+
+    def update_watchlist_status(self, ticker: str, status: str):
+        """Update the watchlist table row with live status text/icon."""
+        status_map = {
+            "scanning": ("🟢 Scanning", QColor(GREEN)),
+            "analyzing_liquidity": ("🟡 Analyzing Liquidity", QColor(ORANGE)),
+            "trade_rejected": ("🔴 Trade Rejected", QColor(RED)),
+        }
+        label, color = status_map.get(status, (status, QColor(CYAN)))
+        for row in range(self.watchlist_table.rowCount()):
+            item = self.watchlist_table.item(row, 1)
+            if item and item.text() == ticker:
+                status_item = self.watchlist_table.item(row, 3)
+                if status_item is None:
+                    status_item = QTableWidgetItem()
+                    self.watchlist_table.setItem(row, 3, status_item)
+                status_item.setText(label)
+                status_item.setForeground(color)
+                status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                break
 
     def _save_settings(self):
         settings = {

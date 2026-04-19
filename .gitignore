@@ -1,1 +1,8 @@
-Nothing should be ignored based on the provided file changes, as they only include source code files (.py) without any build artifacts, dependencies, or temporary files.
+.env
+__pycache__/
+*.pyc
+*.log
+*.db
+startup_*.txt
+calibration.json
+assets/tv_confirm_button.png

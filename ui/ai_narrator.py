@@ -138,19 +138,15 @@ class GlassmorphicPanel(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowTransparentForInput
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, not self._is_windows)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMinimumSize(340, 380)
-        
-        # Windows-specific fallback avoids noisy UpdateLayeredWindowIndirect spam.
+
         if self._is_windows:
-            self.setStyleSheet(
-                "background-color: rgba(16, 22, 36, 235);"
-                "border: 1px solid rgba(100, 120, 160, 120);"
-                "border-radius: 12px;"
-            )
+            self._apply_panel_chrome()
         else:
             shadow = QGraphicsDropShadowEffect()
             shadow.setBlurRadius(30)
@@ -158,6 +154,20 @@ class GlassmorphicPanel(QWidget):
             shadow.setYOffset(8)
             shadow.setColor(QColor(0, 0, 0, 100))
             self.setGraphicsEffect(shadow)
+
+    def _apply_panel_chrome(self):
+        """Apply Windows-safe panel styling, including aggression-mode chrome."""
+        if not self._is_windows:
+            return
+
+        aggression = getattr(self, "_aggression_mode", False)
+        background = "rgba(56, 16, 22, 240)" if aggression else "rgba(16, 22, 36, 235)"
+        border = "rgba(248, 81, 73, 200)" if aggression else "rgba(100, 120, 160, 120)"
+        self.setStyleSheet(
+            f"background-color: {background};"
+            f"border: 1px solid {border};"
+            "border-radius: 12px;"
+        )
     
     def paintEvent(self, event):
         """Draw glassmorphic background with safety checks."""
@@ -174,20 +184,30 @@ class GlassmorphicPanel(QWidget):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             
             # Create glass gradient
+            aggression = getattr(self, "_aggression_mode", False)
             gradient = QLinearGradient(0, 0, 0, self.height())
-            gradient.setColorAt(0, QColor(20, 25, 40, 200))      # Top - darker
-            gradient.setColorAt(0.5, QColor(15, 20, 35, 190))    # Middle
-            gradient.setColorAt(1, QColor(10, 15, 30, 200))      # Bottom - darker
+            if aggression:
+                gradient.setColorAt(0, QColor(74, 14, 22, 225))
+                gradient.setColorAt(0.5, QColor(52, 10, 18, 215))
+                gradient.setColorAt(1, QColor(32, 8, 14, 225))
+                border_color = QColor(248, 81, 73, 190)
+                highlight_top = QColor(255, 120, 120, 42)
+            else:
+                gradient.setColorAt(0, QColor(20, 25, 40, 200))
+                gradient.setColorAt(0.5, QColor(15, 20, 35, 190))
+                gradient.setColorAt(1, QColor(10, 15, 30, 200))
+                border_color = QColor(100, 120, 160, 80)
+                highlight_top = QColor(255, 255, 255, 30)
             
             # Draw rounded rectangle
             rect = self.rect().adjusted(2, 2, -2, -2)
             painter.setBrush(QBrush(gradient))
-            painter.setPen(QPen(QColor(100, 120, 160, 80), 1.5))
+            painter.setPen(QPen(border_color, 1.5))
             painter.drawRoundedRect(rect, 16, 16)
             
             # Add subtle top highlight
             highlight = QLinearGradient(0, 0, 0, 40)
-            highlight.setColorAt(0, QColor(255, 255, 255, 30))
+            highlight.setColorAt(0, highlight_top)
             highlight.setColorAt(1, QColor(255, 255, 255, 0))
             painter.setBrush(QBrush(highlight))
             painter.setPen(Qt.PenStyle.NoPen)
@@ -242,6 +262,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self._font_scale = 1.0
         self._pinned = True
         self._analysis_mode = False
+        self._aggression_mode = False
         self._current_opacity = 0.96 if sys.platform == "win32" else 1.0
         self.setWindowOpacity(self._current_opacity)
         self.init_ui()
@@ -274,6 +295,20 @@ class AINarratorOverlay(GlassmorphicPanel):
             "color: #3FB950; font-size: 12px; font-weight: bold; background: transparent;"
         )
         main_layout.addWidget(self.live_pnl_label)
+
+        self.watchlist_status_frame = QFrame()
+        self.watchlist_status_frame.setStyleSheet(
+            "QFrame { background: rgba(30,40,60,180); border: 1px solid rgba(88,166,255,0.25); border-radius: 6px; }"
+        )
+        self.watchlist_status_layout = QVBoxLayout()
+        self.watchlist_status_layout.setContentsMargins(10, 8, 10, 8)
+        self.watchlist_status_layout.setSpacing(4)
+        self.watchlist_status_frame.setLayout(self.watchlist_status_layout)
+        watchlist_title = QLabel("Watchlist Radar")
+        watchlist_title.setStyleSheet("color: #58A6FF; font-size: 11px; font-weight: bold; background: transparent;")
+        self.watchlist_status_layout.addWidget(watchlist_title)
+        self.ticker_status_labels = {}
+        main_layout.addWidget(self.watchlist_status_frame)
 
         # ── Live Ledger ──────────────────────────────────────────────────
         ledger_frame = QFrame()
@@ -390,6 +425,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.setLayout(main_layout)
         
         # Set initial status
+        self._refresh_mode_label()
         self.set_status("idle")
 
     def _create_controls_row(self) -> QWidget:
@@ -434,8 +470,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.snap_combo.setFixedWidth(108)
         self.snap_combo.currentIndexChanged.connect(self._snap_from_combo)
 
-        self.mode_label = QLabel("Mode: Normal")
-        self.mode_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
+        self.mode_label = QLabel()
 
         for btn in [self.pin_btn, self.font_minus_btn, self.font_plus_btn]:
             btn.setStyleSheet(
@@ -459,6 +494,23 @@ class AINarratorOverlay(GlassmorphicPanel):
         layout.addWidget(self.mode_label)
         row.setLayout(layout)
         return row
+
+    def _refresh_mode_label(self):
+        """Update the mirror mode indicator based on analysis/aggression state."""
+        if self._aggression_mode:
+            text = "Mode: High Aggression"
+            style = "color: #F85149; font-size: 10px; font-weight: bold; background: transparent;"
+        elif self._analysis_mode:
+            text = "Mode: Analysis"
+            style = "color: #58A6FF; font-size: 10px; font-weight: bold; background: transparent;"
+        else:
+            text = "Mode: Normal"
+            style = "color: #8B949E; font-size: 10px; background: transparent;"
+
+        self.mode_label.setText(text)
+        self.mode_label.setStyleSheet(style)
+        self._apply_panel_chrome()
+        self.update()
     
     def _create_header(self) -> QWidget:
         """Create header with status indicator."""
@@ -574,14 +626,17 @@ class AINarratorOverlay(GlassmorphicPanel):
     def set_analysis_mode(self, enabled: bool, context: str = ""):
         self._analysis_mode = enabled
         if enabled:
-            self.mode_label.setText("Mode: Analysis")
-            self.mode_label.setStyleSheet("color: #58A6FF; font-size: 10px; font-weight: bold; background: transparent;")
+            self._refresh_mode_label()
             self.set_status("analyzing", context or "Chart focus mode")
             self.add_activity("🧭", f"Analysis Mode ON {('- ' + context) if context else ''}")
         else:
-            self.mode_label.setText("Mode: Normal")
-            self.mode_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
+            self._refresh_mode_label()
             self.add_activity("✅", "Analysis Mode OFF")
+
+    def set_aggression_mode(self, enabled: bool):
+        """Turn the mirror red when FORCE ACTION is armed."""
+        self._aggression_mode = bool(enabled)
+        self._refresh_mode_label()
 
     def update_live_pnl(self, pnl: float, positions: int = 0):
         """Update real-time pnl strip on mirror."""
@@ -624,6 +679,18 @@ class AINarratorOverlay(GlassmorphicPanel):
     
     def _pulse_status_dot(self):
         """Animate status dot opacity."""
+        if self._aggression_mode:
+            current_style = self.status_dot.styleSheet()
+            next_color = "#FF7B72" if "F85149" in current_style else "#F85149"
+            self.status_dot.setStyleSheet(
+                f"""
+                color: {next_color};
+                font-size: 14px;
+                background: transparent;
+            """
+            )
+            return
+
         current_style = self.status_dot.styleSheet()
         if "3FB950" in current_style:  # Green
             self.status_dot.setStyleSheet("""
@@ -720,6 +787,35 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Notify that market scanning has started."""
         self.set_status("scanning", f"{ticker_count} tickers")
         self.add_activity("📡", f"Started scanning {ticker_count} markets", datetime.now().strftime("%H:%M:%S"))
+
+    def set_watchlist(self, tickers: list[str]):
+        """Replace live watchlist badge rows in the mirror."""
+        for label in self.ticker_status_labels.values():
+            self.watchlist_status_layout.removeWidget(label)
+            label.deleteLater()
+        self.ticker_status_labels = {}
+
+        for ticker in tickers:
+            label = QLabel(f"⚪ {ticker}")
+            label.setStyleSheet("color: #E6EDF3; font-size: 11px; background: transparent;")
+            self.watchlist_status_layout.addWidget(label)
+            self.ticker_status_labels[ticker] = label
+
+    def update_ticker_status(self, ticker: str, status: str):
+        """Update a per-ticker badge in the mirror."""
+        if ticker not in self.ticker_status_labels:
+            label = QLabel(f"⚪ {ticker}")
+            label.setStyleSheet("color: #E6EDF3; font-size: 11px; background: transparent;")
+            self.watchlist_status_layout.addWidget(label)
+            self.ticker_status_labels[ticker] = label
+
+        icon_map = {
+            "scanning": ("🟢", "Scanning"),
+            "analyzing_liquidity": ("🟡", "Analyzing Liquidity"),
+            "trade_rejected": ("🔴", "Trade Rejected"),
+        }
+        icon, text = icon_map.get(status, ("⚪", status))
+        self.ticker_status_labels[ticker].setText(f"{icon} {ticker} | {text}")
     
     def notify_signal_detected(self, ticker: str, signal_type: str, confidence: float):
         """Notify that a trading signal was detected."""
@@ -733,10 +829,14 @@ class AINarratorOverlay(GlassmorphicPanel):
     
     def notify_trade_approved(self, ticker: str, action: str, amount: float):
         """Notify that user approved a trade."""
-        self.set_status("executing", f"{action} {ticker} ${amount:.2f}")
+        action_upper = str(action).upper()
+        is_sell = action_upper == "SELL"
+        icon = "🟥" if is_sell else "🟩"
+        approval_text = "APPROVED: SELL" if is_sell else "APPROVED: BUY"
+        self.set_status("executing", f"{approval_text} {ticker} ${amount:.2f}")
         self.add_activity(
-            "✅",
-            f"APPROVED: {action} {ticker} with ${amount:.2f}",
+            icon,
+            f"{approval_text} {ticker} with ${amount:.2f}",
             datetime.now().strftime("%H:%M:%S")
         )
     

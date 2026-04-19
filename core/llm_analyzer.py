@@ -16,10 +16,21 @@ from core.models import (
     DebateTranscript,
     LLMAnalysisOutput,
     MarketDataPoint,
+    SignalAction,
+    ConfidenceLevel,
 )
 from core.swarm_consensus import OllamaSwarmConsensus as SwarmConsensus
 
 logger = logging.getLogger(__name__)
+
+
+def _get_or_create_event_loop():
+    """Get existing event loop or create a new one safely."""
+    try:
+        loop = asyncio.get_running_loop()
+        return loop, True  # Loop was already running
+    except RuntimeError:
+        return asyncio.new_event_loop(), False  # New loop created
 
 
 class LLMAnalyzer:
@@ -44,20 +55,35 @@ class LLMAnalyzer:
                                 VLM-enhanced Technical Sniper analysis
         """
         try:
-            output, transcript = asyncio.run(
-                self.swarm.run(market_data, news_context, chart_image_base64)
-            )
+            loop, loop_was_running = _get_or_create_event_loop()
+
+            if loop_was_running:
+                # Loop already running, use run_coroutine_threadsafe
+                import concurrent.futures
+                future = asyncio.run_coroutine_threadsafe(
+                    self.swarm.run(market_data, news_context, chart_image_base64),
+                    loop
+                )
+                output, transcript = future.result(timeout=config.OLLAMA_TIMEOUT)
+            else:
+                # No loop running, safe to use asyncio.run
+                output, transcript = loop.run_until_complete(
+                    self.swarm.run(market_data, news_context, chart_image_base64)
+                )
+                loop.close()
+
             logger.info(
                 f"Swarm decision: {output.action.value} {market_data.asset} "
                 f"({output.confidence.value})"
             )
             return output, transcript
+
         except Exception as e:
             logger.error(f"Swarm consensus failed: {e}")
             output = LLMAnalysisOutput(
-                action=SignalAction.HOLD,  # Bug fix: use enum
+                action=SignalAction.HOLD,
                 asset=market_data.asset,
-                confidence=ConfidenceLevel.LOW,  # Bug fix: use enum
+                confidence=ConfidenceLevel.LOW,
                 reason="All analysis pipelines failed. Standing aside.",
             )
             return output, None

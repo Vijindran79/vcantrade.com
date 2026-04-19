@@ -9,7 +9,7 @@ In AUTONOMOUS mode, this dialog is NEVER shown - trades execute automatically.
 """
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -155,6 +155,61 @@ class SignalApprovalDialog(QDialog):
         reason_label.setWordWrap(True)
         layout.addWidget(reason_label)
 
+        # 😈 Devil's Advocate Warning Section
+        transcript = self.signal_data.get("transcript", {})
+        devils_advocate = transcript.get("devils_advocate", {})
+        
+        if devils_advocate and devils_advocate.get("rating") in ["STRONG_AVOID", "CAUTIOUS"]:
+            warning_box = QWidget()
+            warning_box.setStyleSheet("""
+                background: rgba(248, 81, 73, 0.1);
+                border: 2px solid #F85149;
+                border-radius: 8px;
+                padding: 10px;
+            """)
+            warning_layout = QVBoxLayout(warning_box)
+            warning_layout.setSpacing(6)
+
+            # Warning header
+            warning_header = QLabel("😈 DEVIL'S ADVOCATE WARNINGS")
+            warning_header.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+            warning_header.setStyleSheet("color: #F85149;")
+            warning_layout.addWidget(warning_header)
+
+            # Rating badge
+            rating = devils_advocate.get("rating", "NEUTRAL")
+            rating_color = "#F85149" if rating == "STRONG_AVOID" else "#D29922"
+            rating_label = QLabel(f"Rating: {rating}")
+            rating_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+            rating_label.setStyleSheet(f"color: {rating_color};")
+            warning_layout.addWidget(rating_label)
+
+            # Rejection reasons
+            reasons = devils_advocate.get("rejection_reasons", [])
+            if reasons:
+                reasons_label = QLabel("⚠️ Reasons to avoid this trade:")
+                reasons_label.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+                reasons_label.setStyleSheet("color: #E6EDF3;")
+                warning_layout.addWidget(reasons_label)
+
+                for reason in reasons:
+                    reason_item = QLabel(f"• {reason}")
+                    reason_item.setFont(QFont("Consolas", 9))
+                    reason_item.setStyleSheet("color: #8B949E;")
+                    reason_item.setWordWrap(True)
+                    warning_layout.addWidget(reason_item)
+
+            # Hidden risks
+            hidden_risks = devils_advocate.get("hidden_risks", "")
+            if hidden_risks:
+                risk_label = QLabel(f"🔍 Hidden Risk: {hidden_risks}")
+                risk_label.setFont(QFont("Consolas", 9))
+                risk_label.setStyleSheet("color: #D29922;")
+                risk_label.setWordWrap(True)
+                warning_layout.addWidget(risk_label)
+
+            layout.addWidget(warning_box)
+
         # Buttons
         button_layout = QHBoxLayout()
 
@@ -177,7 +232,7 @@ class SignalApprovalDialog(QDialog):
         layout.addLayout(button_layout)
         
         # Keyboard shortcuts hint
-        hint = QLabel("💡 Tip: Press ENTER to approve quickly")
+        hint = QLabel("💡 Tip: ENTER to approve | ESC to reject")
         hint.setFont(QFont("Consolas", 9))
         hint.setStyleSheet("color: #8B949E;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -187,9 +242,13 @@ class SignalApprovalDialog(QDialog):
         self.amount_input.setFocus()
         self.amount_input.returnPressed.connect(self._on_approve)
         self.amount_input.textChanged.connect(self._update_calculation)
-        
+
         # Set default value
         self.amount_input.setText("1000")
+
+        # Keyboard shortcuts: ESC to reject
+        esc_shortcut = QShortcut(QKeySequence("Escape"), self)
+        esc_shortcut.activated.connect(self._on_reject)
 
     def _on_mode_changed(self, checked: bool):
         """Switch between dollar and lots mode."""

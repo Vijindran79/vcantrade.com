@@ -40,18 +40,16 @@ DEFAULT_COORDINATES: Dict[str, Tuple[int, int]] = {
     "tp_input": (0, 0),
     "lot_size_input": (0, 0),
     "confirm_button": (0, 0),
+    "rectangle_tool": (0, 0),
+    "chart_top_left": (0, 0),
+    "chart_bottom_right": (0, 0),
 }
 
 
 class CalibrationManager:
     """
     Manages RPA coordinate calibration and persistence.
-
-    Workflow:
-    1. User clicks "Start Calibration" in UI
-    2. For each required point, UI prompts user to click the element
-    3. Coordinates are captured and saved to calibration.json
-    4. RPAExecutor loads these coordinates for mouse-based execution
+    Coordinates are stored RELATIVE to the browser window top-left.
     """
 
     def __init__(self, filepath: Path = CALIBRATION_FILE):
@@ -85,13 +83,13 @@ class CalibrationManager:
         logger.info(f"Calibration saved to {self.filepath}")
 
     def get_coordinate(self, point_name: str) -> Tuple[int, int]:
-        """Get calibrated coordinate for a UI element."""
+        """Get calibrated coordinate for a UI element (relative to window)."""
         return self.coordinates.get(point_name, (0, 0))
 
     def set_coordinate(self, point_name: str, x: int, y: int):
-        """Record a calibrated coordinate."""
+        """Record a calibrated coordinate (should be relative)."""
         self.coordinates[point_name] = (x, y)
-        logger.info(f"Calibrated {point_name}: ({x}, {y})")
+        logger.info(f"Calibrated {point_name} (Relative): ({x}, {y})")
 
     def is_calibrated(self) -> bool:
         """Check if all required points have been calibrated."""
@@ -131,6 +129,9 @@ class CalibrationWizard:
         "tp_input": "Click the Take Profit input field",
         "lot_size_input": "Click the Lot Size / Volume input field",
         "confirm_button": "Click the Confirm / Execute trade button",
+        "rectangle_tool": "Optional: Click the TradingView rectangle tool",
+        "chart_top_left": "Optional: Click the top-left of the chart drawing area",
+        "chart_bottom_right": "Optional: Click the bottom-right of the chart drawing area",
     }
 
     def __init__(self, manager: CalibrationManager):
@@ -138,11 +139,13 @@ class CalibrationWizard:
         self._pyautogui = None
         try:
             import pyautogui
+            import pygetwindow as gw
 
             self._pyautogui = pyautogui
+            self._gw = gw
             pyautogui.FAILSAFE = True
         except ImportError:
-            logger.error("pyautogui not available — calibration disabled")
+            logger.error("pyautogui or pygetwindow not available — calibration disabled")
 
     def is_available(self) -> bool:
         return self._pyautogui is not None
@@ -152,19 +155,37 @@ class CalibrationWizard:
         uncalibrated = self.manager.get_uncalibrated_points()
         return uncalibrated[0] if uncalibrated else None
 
+    def _get_browser_window(self):
+        """Find the browser window (TradingView)."""
+        windows = self._gw.getWindowsWithTitle("TradingView")
+        if not windows:
+            # Fallback to common browser titles
+            for title in ["Chrome", "Edge", "Firefox"]:
+                windows = self._gw.getWindowsWithTitle(title)
+                if windows: break
+        return windows[0] if windows else None
+
     def capture_current_position(self, point_name: str) -> Tuple[int, int]:
         """
-        Capture the current mouse position.
-        The user should move their mouse to the target element and press
-        a designated key (handled by the UI layer).
+        Capture the current mouse position relative to the browser window.
         """
         if not self._pyautogui:
             return (0, 0)
 
-        x, y = self._pyautogui.position()
-        self.manager.set_coordinate(point_name, x, y)
-        logger.info(f"Captured {point_name}: ({x}, {y})")
-        return (x, y)
+        abs_x, abs_y = self._pyautogui.position()
+        
+        # Try to find browser window to make coordinate relative
+        win = self._get_browser_window()
+        if win:
+            rel_x = abs_x - win.left
+            rel_y = abs_y - win.top
+            logger.info(f"Window found at ({win.left}, {win.top}). Relative: ({rel_x}, {rel_y})")
+            self.manager.set_coordinate(point_name, rel_x, rel_y)
+            return (rel_x, rel_y)
+        else:
+            logger.warning("No browser window found during calibration - using absolute coordinates")
+            self.manager.set_coordinate(point_name, abs_x, abs_y)
+            return (abs_x, abs_y)
 
     def run_full_calibration(self) -> bool:
         """

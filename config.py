@@ -49,8 +49,38 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")  # Fixed: Use actual 
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")  # Not needed for local, kept for compatibility
 VAST_API_TOKEN = None  # No longer using Vast.ai - running locally!
 
+# ===== GEMINI LIVE BRAIN =====
+GEMINI_ENABLED = os.getenv("GEMINI_ENABLED", "True").lower() == "true"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "20"))
+
+# ===== EXTERNAL BRAIN PROVIDERS =====
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEYS = [
+    key.strip()
+    for key in os.getenv("OPENROUTER_API_KEYS", "").split(",")
+    if key.strip()
+]
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "VcanTrade AI")
+BRAIN_PROVIDER = os.getenv(
+    "BRAIN_PROVIDER",
+    "openrouter" if (OPENROUTER_API_KEYS or OPENROUTER_API_KEY) else "gemini",
+).strip().lower()
+GROQ_API_KEYS = [
+    key.strip()
+    for key in os.getenv("GROQ_API_KEYS", "").split(",")
+    if key.strip()
+]
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+BRAINSTORM_API_KEY = os.getenv("BRAINSTORM_API_KEY", "")
+BRAINSTORM_BASE_URL = os.getenv("BRAINSTORM_BASE_URL", "/api/v1/google/search")
+
 # Local execution settings
-LLM_TIMEOUT = 15  # Reduced for speed over perfection
+LLM_TIMEOUT = 90  # Heavy local Qwen runs need more time to finish reliably
 JSON_OUTPUT = True
 
 # ===== VISION / VLM CONFIGURATION =====
@@ -71,22 +101,25 @@ SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "False").lower() ==
 SCAN_INTERVAL = 10  # Seconds between market scans
 WATCHLIST_INTERVAL = 60  # Seconds between watchlist scans (slower)
 
-# 10 Core Counters for Cloud Scanner (Mix of Crypto, Forex, Stocks - 24/7 coverage)
+# Optional sniper override. Leave empty to let the live dashboard watchlist drive the session.
+# Format from env: "BTC-USD,ES=F,NQ=F".
+_active_scan_raw = os.getenv("ACTIVE_SCAN_LIST", "").strip()
+ACTIVE_SCAN_LIST = [s.strip() for s in _active_scan_raw.split(",") if s.strip()]
+SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.5"))
+
+# RPA window control for TradingView auto-focus.
+TRADINGVIEW_WINDOW_X = int(os.getenv("TRADINGVIEW_WINDOW_X", "0"))
+TRADINGVIEW_WINDOW_Y = int(os.getenv("TRADINGVIEW_WINDOW_Y", "0"))
+
+# Starter watchlist shown on first launch only. The live dashboard watchlist becomes the session authority.
 CLOUD_TICKERS = [
-    "BTC-USD",  # Bitcoin (24/7 trading - ALWAYS OPEN)
-    "ETH-USD",  # Ethereum (24/7 trading)
-    "GC=F",  # Gold Futures
-    "EURUSD=X",  # Euro/USD (Forex - 24/5)
-    "GBPUSD=X",  # GBP/USD (Forex - 24/5)
-    "TSLA",  # Tesla
-    "SPY",  # S&P 500 ETF
-    "QQQ",  # NASDAQ ETF
-    "AAPL",  # Apple
-    "NVDA",  # NVIDIA
+    "BTC-USD",  # Bitcoin spot
+    "ES=F",  # S&P 500 futures
+    "NQ=F",  # NASDAQ futures
 ]
 
 # Local Watchlist (for local scanning when cloud unavailable)
-LOCAL_ASSETS = ["EURUSD", "GBPUSD", "XAUUSD", "BTCUSD", "ETHUSD"]
+LOCAL_ASSETS = ["BTC-USD", "ES=F", "NQ=F"]
 
 # Technical Signal Thresholds
 VOLUME_SPIKE_MULTIPLIER = 3.0  # Trigger if volume > 3x average
@@ -114,6 +147,7 @@ USE_HOTKEYS = True  # Prefer keyboard hotkeys over mouse clicks
 HOTKEY_BUY = "<ctrl>+b"  # Buy order hotkey
 HOTKEY_SELL = "<ctrl>+s"  # Sell order hotkey
 HOTKEY_CLOSE = "<ctrl>+x"  # Close position hotkey
+POSITION_OPEN_IMAGE = os.getenv("POSITION_OPEN_IMAGE", "assets/tv_position_open_label.png")
 
 # ===== SLIPPAGE GUARD (Execution Safety) =====
 # Relaxed for crypto volatility - was 0.50/0.10

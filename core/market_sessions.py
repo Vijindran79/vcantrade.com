@@ -35,6 +35,7 @@ class MarketSession(str, Enum):
     HOLIDAY = "Holiday"       # Market holiday
     SATURDAY_AUDIT = "Saturday Audit"  # Close positions only, no new trades
     EARLY_CLOSE = "Early Close"  # Market closes early
+    ALWAYS_OPEN = "Always Open"  # Dashboard override for manual/runtime watchlists
 
 
 @dataclass
@@ -124,8 +125,25 @@ class MarketSessionDetector:
         self._holiday_name = ""
         self._is_early_close = False
         self._early_close_reason = ""
+        self._runtime_mode = "AUTONOMOUS"
+        self._dashboard_tickers: List[str] = []
         
         logger.info("🕐 Market Session Detector initialized with Holiday Awareness")
+
+    def set_runtime_context(self, mode: str, dashboard_tickers: Optional[List[str]] = None) -> None:
+        """Store operator mode and active dashboard tickers for session overrides."""
+        self._runtime_mode = str(mode or "").upper().strip() or "AUTONOMOUS"
+        self._dashboard_tickers = [
+            str(ticker).strip().upper()
+            for ticker in (dashboard_tickers or [])
+            if str(ticker).strip()
+        ]
+        self._last_update = None
+        self._filtered_tickers = []
+
+    def _dashboard_override_active(self) -> bool:
+        """Teacher/Autonomous mode keeps dashboard tickers analyzable over weekend silence."""
+        return self.is_weekend() and self._runtime_mode in {"TEACHER", "AUTONOMOUS"} and bool(self._dashboard_tickers)
 
     def _check_holidays(self) -> Tuple[bool, bool, str]:
         """
@@ -221,6 +239,18 @@ class MarketSessionDetector:
         self._holiday_name = ""
         self._is_early_close = False
         self._early_close_reason = ""
+
+        if self._dashboard_override_active():
+            self._current_session = MarketSession.ALWAYS_OPEN
+            self._active_markets = ["Dashboard Watchlist"]
+            self._filtered_tickers = list(self._dashboard_tickers)
+            self._last_update = now
+            logger.info(
+                "🕐 DASHBOARD OVERRIDE: Treating %d dashboard tickers as always open for analysis in %s mode",
+                len(self._dashboard_tickers),
+                self._runtime_mode,
+            )
+            return ["Dashboard Watchlist"], MarketSession.ALWAYS_OPEN
         
         # Check Saturday first
         if now.weekday() == 5:  # Saturday
@@ -351,6 +381,18 @@ class MarketSessionDetector:
         
         # Detect active sessions
         active_markets, primary_session = self.detect_active_sessions()
+
+        if self._dashboard_override_active() and base_tickers:
+            filtered = [ticker for ticker in base_tickers if str(ticker).strip()]
+            self._filtered_tickers = filtered
+            self._current_session = MarketSession.ALWAYS_OPEN
+            self._active_markets = ["Dashboard Watchlist"]
+            self._last_update = now
+            logger.info(
+                "🕐 DASHBOARD OVERRIDE: Weekend session filter bypassed for dashboard tickers: %s",
+                ", ".join(filtered),
+            )
+            return filtered
         
         # Build filtered ticker list
         filtered = []
@@ -441,6 +483,9 @@ class MarketSessionDetector:
             "early_close_reason": self._early_close_reason,
             "primary_session": primary_session.value,
             "active_markets": active_markets,
+            "dashboard_override_active": self._dashboard_override_active(),
+            "dashboard_tickers": list(self._dashboard_tickers),
+            "runtime_mode": self._runtime_mode,
             "is_peak_volatility": is_peak,
             "session_note": self._generate_session_note(primary_session, is_peak, day_name),
         }
@@ -471,6 +516,12 @@ class MarketSessionDetector:
         # Saturday mode
         if session == MarketSession.SATURDAY_AUDIT:
             return f"{day_name} - Close-Only/Audit day. No new stock/forex trades. Review open positions."
+
+        if session == MarketSession.ALWAYS_OPEN:
+            return (
+                f"{day_name} - Dashboard override active. Watchlist tickers stay analyzable in "
+                f"{self._runtime_mode} mode even while broader markets are closed."
+            )
         
         # Sunday/Weekend mode
         if self.is_weekend():
@@ -500,6 +551,9 @@ class MarketSessionDetector:
         if primary_session == MarketSession.HOLIDAY:
             emoji = "🌴"
             tag = f"Holiday Mode ({'US' if self._is_holiday_us else 'HK'})"
+        elif primary_session == MarketSession.ALWAYS_OPEN:
+            emoji = "🟢"
+            tag = f"Always Open Override ({len(self._dashboard_tickers)} tickers)"
         elif primary_session == MarketSession.SATURDAY_AUDIT:
             emoji = "📋"
             tag = "Close-Only/Audit"
@@ -533,6 +587,9 @@ class MarketSessionDetector:
         - US/HK Holidays (for affected markets)
         """
         active_markets, primary_session = self.detect_active_sessions()
+
+        if primary_session == MarketSession.ALWAYS_OPEN:
+            return True
         
         # Saturday = Close only, no new trades
         if primary_session == MarketSession.SATURDAY_AUDIT:

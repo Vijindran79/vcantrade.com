@@ -21,6 +21,10 @@ class SettingsManager:
     DEFAULT_SETTINGS = {
         # Investment mode: "dollar" or "lots"
         "investment_mode": "dollar",
+
+        # Session watchlist preset loaded into the dashboard at startup.
+        # This is operator-controlled and can be replaced before each session.
+        "session_watchlist": [],
         
         # Dollar amount mode
         "investment_amount": 1000.0,  # $1000 per trade

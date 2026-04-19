@@ -4,7 +4,7 @@ Pydantic schemas for LLM output validation and trade tracking
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict
 from datetime import datetime
 from enum import Enum
 
@@ -88,15 +88,22 @@ class SafetyState(BaseModel):
 class MarketDataPoint(BaseModel):
     """Market data for analysis"""
 
+    def __init__(self, **data):
+        if data.get("volume") is None:
+            data["volume"] = 0.0
+        if data.get("indicators") is None:
+            data["indicators"] = {}
+        super().__init__(**data)
+
     asset: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     price: float
-    volume: float
+    volume: Optional[float] = Field(default=0.0)
     price_change_1h: float = 0.0
     price_change_24h: float = 0.0
     high_24h: Optional[float] = None
     low_24h: Optional[float] = None
-    indicators: dict = {}  # RSI, MACD, etc.
+    indicators: dict = Field(default_factory=dict)  # RSI, MACD, etc.
 
 
 class OverlaySignal(BaseModel):
@@ -154,8 +161,19 @@ class DebateTranscript(BaseModel):
     technical_sniper: SwarmAgentBrief
     macro_analyst: SwarmAgentBrief
     risk_manager: SwarmAgentBrief
+    vibe_agent: Optional[SwarmAgentBrief] = None
+    liquidity_agent: Optional[SwarmAgentBrief] = None
+    closer_agent: Optional[SwarmAgentBrief] = None
+    devils_advocate: Optional[Dict] = Field(
+        default_factory=dict,
+        description="Devil's Advocate rejection reasons and penalties"
+    )
     ceo_verdict: str = Field(..., description="CEO's final one-line verdict")
     ceo_full_statement: str = Field(..., description="CEO's full reasoning")
+    cto_full_statement: str = Field(default="", description="Vibe agent full reasoning")
+    cfo_full_statement: str = Field(default="", description="Liquidity agent full reasoning")
+    vibe_context: Dict = Field(default_factory=dict, description="Structured Vibe state for execution memory")
+    skip_reason: str = Field(default="", description="Reason debate agents were skipped")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
