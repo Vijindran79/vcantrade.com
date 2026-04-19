@@ -624,7 +624,7 @@ class RPAExecutor:
         logger.info(f"[AUTONOMOUS] Executing CLOSE on {trade.asset} via RPA Hand")
         if self.use_hotkeys:
             return self._send_hotkey(self.hotkey_close)
-        return self._mouse_click("close_button")
+        return self._mouse_click("close_button", ticker_hint=trade.asset)
 
     def _send_hotkey(self, hotkey: str) -> bool:
         """Send keyboard hotkey combination. Format: '<ctrl>+b'."""

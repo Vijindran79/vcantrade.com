@@ -231,10 +231,16 @@ class DataScoutListenerThread(QThread):
     def stop(self):
         self.running = False
         if self.loop and not self.loop.is_closed():
-            # Cancel all tasks gracefully
-            pending = asyncio.all_tasks(self.loop)
-            for task in pending:
+            # Schedule task cancellation on the event loop's own thread
+            self.loop.call_soon_threadsafe(self._cancel_all_tasks)
+
+    def _cancel_all_tasks(self):
+        """Cancel all tasks from within the event loop thread."""
+        try:
+            for task in asyncio.all_tasks(self.loop):
                 task.cancel()
+        except Exception:
+            pass
 
 
 class CloudScannerThread(QThread):
@@ -2110,25 +2116,27 @@ class VcaniTradeApp:
                 pos["pnl"] = pnl_usd
                 pos["pnl_pct"] = pnl_pct
 
-                # Check Take Profit
-                if pos["side"] == "BUY" and current_price >= pos["tp_price"]:
-                    self.cmd.log(f"🎯 TAKE PROFIT HIT: {pos['asset']} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
-                    self._close_position(pos, "Take Profit")
-                    continue
-                elif pos["side"] == "SELL" and current_price <= pos["tp_price"]:
-                    self.cmd.log(f"🎯 TAKE PROFIT HIT: {pos['asset']} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
-                    self._close_position(pos, "Take Profit")
-                    continue
+                # Check Take Profit (skip if tp_price is 0/unset)
+                if pos.get("tp_price", 0) > 0:
+                    if pos["side"] == "BUY" and current_price >= pos["tp_price"]:
+                        self.cmd.log(f"🎯 TAKE PROFIT HIT: {pos['asset']} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
+                        self._close_position(pos, "Take Profit")
+                        continue
+                    elif pos["side"] == "SELL" and current_price <= pos["tp_price"]:
+                        self.cmd.log(f"🎯 TAKE PROFIT HIT: {pos['asset']} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
+                        self._close_position(pos, "Take Profit")
+                        continue
 
-                # Check Stop Loss
-                if pos["side"] == "BUY" and current_price <= pos["sl_price"]:
-                    self.cmd.log(f"🛑 STOP LOSS HIT: {pos['asset']} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
-                    self._close_position(pos, "Stop Loss")
-                    continue
-                elif pos["side"] == "SELL" and current_price >= pos["sl_price"]:
-                    self.cmd.log(f"🛑 STOP LOSS HIT: {pos['asset']} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
-                    self._close_position(pos, "Stop Loss")
-                    continue
+                # Check Stop Loss (skip if sl_price is 0/unset)
+                if pos.get("sl_price", 0) > 0:
+                    if pos["side"] == "BUY" and current_price <= pos["sl_price"]:
+                        self.cmd.log(f"🛑 STOP LOSS HIT: {pos['asset']} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
+                        self._close_position(pos, "Stop Loss")
+                        continue
+                    elif pos["side"] == "SELL" and current_price >= pos["sl_price"]:
+                        self.cmd.log(f"🛑 STOP LOSS HIT: {pos['asset']} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
+                        self._close_position(pos, "Stop Loss")
+                        continue
 
                 updated_positions.append(pos)
 
@@ -2153,12 +2161,27 @@ class VcaniTradeApp:
         """Update financial safety controls and check news filter."""
         import asyncio
         
-        # Check news filter
+        # Check news filter - use the browser event loop if available
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.financial_safety.update_news_filter())
-            loop.close()
+            if hasattr(self, '_browser_loop') and self._browser_loop and not self._browser_loop.is_closed():
+                future = asyncio.run_coroutine_threadsafe(
+                    self.financial_safety.update_news_filter(),
+                    self._browser_loop,
+                )
+                # Add error logging callback so failures are not silently swallowed
+                def _on_news_done(fut):
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        logger.error(f"News filter async update failed: {exc}")
+                future.add_done_callback(_on_news_done)
+            else:
+                # Fallback: run synchronously via a temporary loop
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(self.financial_safety.update_news_filter())
+                finally:
+                    loop.close()
         except Exception as e:
             logger.error(f"News filter update failed: {e}")
         
@@ -2345,42 +2368,61 @@ class VcaniTradeApp:
         self.cmd.log(f"🌐 Browser agent checking {asset} price autonomously...")
         self.ai_narrator.set_status("analyzing", f"Browser checking {asset}")
         
-        # Run browser check in background thread
-        def browser_check():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                result = loop.run_until_complete(
-                    self._browser_price_check(asset)
-                )
-                loop.close()
-                return result
-            except Exception as e:
-                logger.error(f"Browser price check failed: {e}")
-                return None
-        
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(browser_check)
+        # Use the existing browser event loop if available
+        if hasattr(self, '_browser_loop') and self._browser_loop and not self._browser_loop.is_closed():
+            import concurrent.futures
+            future = asyncio.run_coroutine_threadsafe(
+                self._browser_price_check(asset),
+                self._browser_loop,
+            )
             try:
                 result = future.result(timeout=30)  # 30 second timeout
-                if result and "price" in result:
-                    self.cmd.log(f"✅ Browser found {asset} @ ${result['price']:.2f}")
-                    position["current"] = result["price"]
-                    if position.get("entry", 0) > 0:
-                        qty = position.get("quantity", 0)
-                        if position.get("side") == "BUY":
-                            position["pnl"] = (position["current"] - position["entry"]) * qty
-                        else:
-                            position["pnl"] = (position["entry"] - position["current"]) * qty
-                    self.ai_narrator.add_activity(
-                        "🌐",
-                        f"Browser verified {asset} @ ${result['price']:.2f}"
-                    )
-                else:
-                    self.cmd.log(f"⚠️ Browser couldn't find price for {asset}")
+                self._apply_browser_price_result(result, position, asset)
             except concurrent.futures.TimeoutError:
                 self.cmd.log(f"⚠️ Browser price check timeout for {asset}")
+            except Exception as e:
+                logger.error(f"Browser price check failed for {asset}: {e}")
+        else:
+            # Fallback: run in a thread with a temporary loop
+            def browser_check():
+                try:
+                    loop = asyncio.new_event_loop()
+                    try:
+                        return loop.run_until_complete(
+                            self._browser_price_check(asset)
+                        )
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    logger.error(f"Browser price check failed: {e}")
+                    return None
+
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(browser_check)
+                try:
+                    result = future.result(timeout=30)
+                    self._apply_browser_price_result(result, position, asset)
+                except concurrent.futures.TimeoutError:
+                    self.cmd.log(f"⚠️ Browser price check timeout for {asset}")
+
+    def _apply_browser_price_result(self, result, position: dict, asset: str):
+        """Apply browser price check result to position."""
+        if result and "price" in result:
+            self.cmd.log(f"✅ Browser found {asset} @ ${result['price']:.2f}")
+            position["current"] = result["price"]
+            if position.get("entry", 0) > 0:
+                qty = position.get("quantity", 0)
+                if position.get("side") == "BUY":
+                    position["pnl"] = (position["current"] - position["entry"]) * qty
+                else:
+                    position["pnl"] = (position["entry"] - position["current"]) * qty
+            self.ai_narrator.add_activity(
+                "🌐",
+                f"Browser verified {asset} @ ${result['price']:.2f}"
+            )
+        else:
+            self.cmd.log(f"⚠️ Browser couldn't find price for {asset}")
     
     async def _browser_price_check(self, asset: str):
         """Async browser price check using TradingView."""
@@ -3126,8 +3168,7 @@ class VcaniTradeApp:
         data_point = MarketDataPoint(
             asset=symbol,
             price=0.0, # Will be filled by vision/analysis if possible
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            source="CLOUD_SCOUT"
+            timestamp=datetime.now(timezone.utc),
         )
         self.analysis_worker.add_to_queue(data_point)
         self.cmd.log(f'<span style="color:#D29922">👁️ VISION</span>: Final confirmation triggered for {symbol}')
