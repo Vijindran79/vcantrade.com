@@ -2117,7 +2117,7 @@ class VcaniTradeApp:
                 pos["pnl_pct"] = pnl_pct
 
                 # Check Take Profit (skip if tp_price is 0/unset)
-                if pos["tp_price"] and pos["tp_price"] > 0:
+                if pos.get("tp_price", 0) > 0:
                     if pos["side"] == "BUY" and current_price >= pos["tp_price"]:
                         self.cmd.log(f"🎯 TAKE PROFIT HIT: {pos['asset']} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
                         self._close_position(pos, "Take Profit")
@@ -2128,7 +2128,7 @@ class VcaniTradeApp:
                         continue
 
                 # Check Stop Loss (skip if sl_price is 0/unset)
-                if pos["sl_price"] and pos["sl_price"] > 0:
+                if pos.get("sl_price", 0) > 0:
                     if pos["side"] == "BUY" and current_price <= pos["sl_price"]:
                         self.cmd.log(f"🛑 STOP LOSS HIT: {pos['asset']} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
                         self._close_position(pos, "Stop Loss")
@@ -2164,10 +2164,17 @@ class VcaniTradeApp:
         # Check news filter - use the browser event loop if available
         try:
             if hasattr(self, '_browser_loop') and self._browser_loop and not self._browser_loop.is_closed():
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     self.financial_safety.update_news_filter(),
                     self._browser_loop,
                 )
+                # Add error logging callback so failures are not silently swallowed
+                def _on_news_done(fut):
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        logger.error(f"News filter async update failed: {exc}")
+                future.add_done_callback(_on_news_done)
             else:
                 # Fallback: run synchronously via a temporary loop
                 loop = asyncio.new_event_loop()
