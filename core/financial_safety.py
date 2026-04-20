@@ -58,8 +58,42 @@ class FinancialSafetyManager:
         self.trading_paused = False
         self.pause_reason = ""
         self.interventions_count = 0
+        self.runtime_mode = "TEACHER"
+        self.last_news_scrape_failed = False
+        self.last_news_scrape_error = ""
         
         logger.info("💰 Financial Safety Manager initialized")
+
+    def set_runtime_mode(self, mode: str) -> None:
+        self.runtime_mode = str(mode or "TEACHER").upper().strip() or "TEACHER"
+
+    def _build_http_timeout(self):
+        import aiohttp
+
+        return aiohttp.ClientTimeout(
+            total=max(float(config.NEWS_REQUEST_TIMEOUT), 1.0),
+            connect=max(float(config.NEWS_CONNECT_TIMEOUT), 0.5),
+            sock_connect=max(float(config.NEWS_CONNECT_TIMEOUT), 0.5),
+            sock_read=max(float(config.NEWS_REQUEST_TIMEOUT), 1.0),
+        )
+
+    def _build_http_session(self, headers: Optional[Dict[str, str]] = None):
+        import aiohttp
+
+        timeout = self._build_http_timeout()
+        connector = None
+        try:
+            from aiohttp.resolver import AsyncResolver
+
+            connector = aiohttp.TCPConnector(
+                resolver=AsyncResolver(nameservers=list(config.NEWS_DNS_FALLBACK)),
+                ttl_dns_cache=300,
+                ssl=False,
+            )
+        except Exception as exc:
+            logger.debug(f"News scraper DNS fallback unavailable, using system resolver: {exc}")
+
+        return aiohttp.ClientSession(timeout=timeout, headers=headers, connector=connector)
 
     # ===================================================================
     # MICRO-LOT AUTO-SWITCH
@@ -179,6 +213,8 @@ class FinancialSafetyManager:
                 return self.upcoming_news
             
             self.last_news_check = datetime.now()
+            self.last_news_scrape_failed = False
+            self.last_news_scrape_error = ""
             
             # Scrape Forex Factory economic calendar
             news_events = await self._scrape_economic_calendar()
@@ -199,6 +235,17 @@ class FinancialSafetyManager:
             return self.upcoming_news
             
         except Exception as e:
+            self.last_news_scrape_failed = True
+            self.last_news_scrape_error = str(e)
+            if self.runtime_mode == "AUTONOMOUS":
+                logger.warning(
+                    "News scrape failed in AUTONOMOUS mode - failing open so execution can continue: %s",
+                    e,
+                )
+                self.upcoming_news = []
+                self.trading_paused = False
+                self.pause_reason = ""
+                return []
             logger.error(f"Failed to check economic calendar: {e}")
             return []
 
@@ -208,11 +255,25 @@ class FinancialSafetyManager:
         
         try:
             # Source 1: Forex Factory (most reliable for forex)
-            forex_events = await self._scrape_forex_factory()
+            try:
+                forex_events = await asyncio.wait_for(
+                    self._scrape_forex_factory(),
+                    timeout=max(float(config.NEWS_REQUEST_TIMEOUT) + 1.0, 2.0),
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Forex Factory scrape timed out after %.1fs", float(config.NEWS_REQUEST_TIMEOUT))
+                forex_events = []
             news_events.extend(forex_events)
             
             # Source 2: Investing.com (broader coverage)
-            investing_events = await self._scrape_investing_com()
+            try:
+                investing_events = await asyncio.wait_for(
+                    self._scrape_investing_com(),
+                    timeout=max(float(config.NEWS_REQUEST_TIMEOUT) + 1.0, 2.0),
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Investing.com scrape timed out after %.1fs", float(config.NEWS_REQUEST_TIMEOUT))
+                investing_events = []
             news_events.extend(investing_events)
             
             # Deduplicate events
@@ -221,6 +282,14 @@ class FinancialSafetyManager:
             return unique_events
             
         except Exception as e:
+            self.last_news_scrape_failed = True
+            self.last_news_scrape_error = str(e)
+            if self.runtime_mode == "AUTONOMOUS":
+                logger.warning(
+                    "Economic calendar scraping failed in AUTONOMOUS mode - failing open: %s",
+                    e,
+                )
+                return []
             logger.error(f"Economic calendar scraping failed: {e}")
             return []
 
@@ -228,12 +297,9 @@ class FinancialSafetyManager:
         """Scrape Forex Factory economic calendar."""
         try:
             url = "https://www.forexfactory.com/calendar"
-            
-            # Use async requests
-            import aiohttp
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as response:
+
+            async with self._build_http_session() as session:
+                async with session.get(url) as response:
                     if response.status != 200:
                         return []
                     
@@ -294,6 +360,8 @@ class FinancialSafetyManager:
                     return events
                     
         except Exception as e:
+            self.last_news_scrape_failed = True
+            self.last_news_scrape_error = str(e)
             logger.error(f"Forex Factory scrape failed: {e}")
             return []
 
@@ -301,15 +369,13 @@ class FinancialSafetyManager:
         """Scrape Investing.com economic calendar."""
         try:
             url = "https://www.investing.com/economic-calendar/"
-            
-            import aiohttp
-            
+
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=10) as response:
+
+            async with self._build_http_session(headers=headers) as session:
+                async with session.get(url) as response:
                     if response.status != 200:
                         return []
                     
@@ -319,6 +385,8 @@ class FinancialSafetyManager:
                     return []
                     
         except Exception as e:
+            self.last_news_scrape_failed = True
+            self.last_news_scrape_error = str(e)
             logger.error(f"Investing.com scrape failed: {e}")
             return []
 
@@ -387,6 +455,16 @@ class FinancialSafetyManager:
     async def update_news_filter(self):
         """Update the news filter with latest events."""
         await self.check_upcoming_news()
+
+        if self.runtime_mode == "AUTONOMOUS" and self.last_news_scrape_failed and not self.upcoming_news:
+            if self.trading_paused:
+                logger.warning(
+                    "News filter fail-open in AUTONOMOUS mode - clearing pause after scraper error: %s",
+                    self.last_news_scrape_error or "unknown error",
+                )
+            self.trading_paused = False
+            self.pause_reason = ""
+            return
         
         # Check if we need to pause/resume
         should_pause, reason = self.should_pause_trading()

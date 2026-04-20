@@ -89,6 +89,20 @@ class CloudScanner:
             except Exception as e:
                 logger.debug(f"Status callback failed for {ticker}/{status}: {e}")
 
+    def _canonical_market_ticker(self, ticker: str) -> str:
+        """Map common watchlist aliases to yfinance-compatible symbols."""
+        normalized = str(ticker or "").strip().upper()
+        alias_map = {
+            "NQ": "NQ=F",
+            "ES": "ES=F",
+            "YM": "YM=F",
+            "RTY": "RTY=F",
+            "CL": "CL=F",
+            "GC": "GC=F",
+            "SI": "SI=F",
+        }
+        return alias_map.get(normalized, normalized)
+
     def get_scan_interval(self) -> float:
         """Scale scan cadence based on active watchlist size."""
         count = max(0, len(self._get_active_scan_list()))
@@ -131,8 +145,6 @@ class CloudScanner:
             )
 
         for ticker in active_tickers:
-            radar_symbol = ticker.replace("=F", "")
-            logger.info(f"📡 Radar sweep: Scanning {radar_symbol}")
             self._emit_status(ticker, "scanning")
             try:
                 detected = await self._scan_single_ticker(ticker)
@@ -153,6 +165,15 @@ class CloudScanner:
         
         # Calculate technical indicators
         df = self._calculate_indicators(df)
+        direction, price_change_pct = self._compute_directional_bias(df)
+        latest_rsi = self._extract_latest_rsi(df)
+        logger.info(
+            "[SCANNER] %s Direction: %s (%+.2f%%) | RSI: %.0f",
+            ticker,
+            direction,
+            price_change_pct,
+            latest_rsi,
+        )
         liquidity_zone = self._detect_liquidity_zone(df, ticker)
         brain_package = self._build_brain_package(df, liquidity_zone)
         if liquidity_zone:
@@ -184,6 +205,39 @@ class CloudScanner:
             signals.append(sma_signal)
         
         return signals
+
+    def _compute_directional_bias(self, df: pd.DataFrame) -> Tuple[str, float]:
+        """Measure directional strength from the last 10 closes."""
+        if df is None or df.empty or "Close" not in df:
+            return "FLAT", 0.0
+
+        recent_closes = df["Close"].dropna().tail(10)
+        if recent_closes.empty:
+            return "FLAT", 0.0
+
+        start_price = float(recent_closes.iloc[0] or 0.0)
+        end_price = float(recent_closes.iloc[-1] or 0.0)
+        if start_price <= 0:
+            return "FLAT", 0.0
+
+        price_change_pct = ((end_price - start_price) / start_price) * 100.0
+        if price_change_pct > 0.01:
+            direction = "UP"
+        elif price_change_pct < -0.01:
+            direction = "DOWN"
+        else:
+            direction = "FLAT"
+        return direction, price_change_pct
+
+    def _extract_latest_rsi(self, df: pd.DataFrame) -> float:
+        """Return the latest RSI value or a neutral fallback."""
+        if df is None or df.empty or "RSI" not in df:
+            return 50.0
+
+        recent_rsi = df["RSI"].dropna()
+        if recent_rsi.empty:
+            return 50.0
+        return float(recent_rsi.iloc[-1])
 
     def _detect_liquidity_zone(self, df: pd.DataFrame, ticker: str) -> Optional[dict]:
         """Find nearest equal highs or swing lows from the last 50 candles."""
@@ -354,14 +408,15 @@ class CloudScanner:
         import concurrent.futures
         import time
 
-        cache_key = (ticker, period, interval)
+        market_ticker = self._canonical_market_ticker(ticker)
+        cache_key = (market_ticker, period, interval)
         
         max_retries = 3
         retry_delay = 2  # seconds
         
         for attempt in range(max_retries):
             try:
-                symbol = yf.Ticker(ticker)
+                symbol = yf.Ticker(market_ticker)
                 
                 def fetch_data():
                     return symbol.history(period=period, interval=interval)
@@ -374,11 +429,11 @@ class CloudScanner:
                 # Validate data quality
                 if df is None or df.empty or df['Close'].iloc[-1] is None:
                     if attempt < max_retries - 1:
-                        logger.warning(f"Empty data for {ticker} (attempt {attempt+1}/{max_retries}) - retrying...")
+                        logger.warning(f"Empty data for {ticker} via {market_ticker} (attempt {attempt+1}/{max_retries}) - retrying...")
                         time.sleep(retry_delay)
                         continue
                     else:
-                        fallback = self._fallback_market_data(ticker, period, interval, cache_key)
+                        fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                         if fallback is not None:
                             return fallback
                         logger.error(f"⚠️ Market Data Timeout - Skipping Cycle for {ticker}")
@@ -388,7 +443,7 @@ class CloudScanner:
                 self.market_data_cache[cache_key] = sanitized
                 last_close = sanitized['Close'].dropna().iloc[-1] if 'Close' in sanitized and not sanitized['Close'].dropna().empty else None
                 if last_close is not None:
-                    self.last_close_cache[ticker] = float(last_close)
+                    self.last_close_cache[market_ticker] = float(last_close)
 
                 return sanitized
                 
@@ -398,7 +453,7 @@ class CloudScanner:
                     time.sleep(retry_delay)
                     continue
                 else:
-                    fallback = self._fallback_market_data(ticker, period, interval, cache_key)
+                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                     if fallback is not None:
                         return fallback
                     logger.error(f"⚠️ Market Data Timeout - Skipping Cycle for {ticker}")
@@ -409,7 +464,7 @@ class CloudScanner:
                     time.sleep(retry_delay)
                     continue
                 else:
-                    fallback = self._fallback_market_data(ticker, period, interval, cache_key)
+                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                     if fallback is not None:
                         logger.warning("Using fallback market data for %s after fetch failure: %s", ticker, e)
                         return fallback
@@ -421,6 +476,7 @@ class CloudScanner:
     def _fallback_market_data(
         self,
         ticker: str,
+        market_ticker: str,
         period: str,
         interval: str,
         cache_key: Tuple[str, str, str],
@@ -432,7 +488,7 @@ class CloudScanner:
             return cached.copy()
 
         try:
-            daily_history = yf.Ticker(ticker).history(period="5d", interval="1d")
+            daily_history = yf.Ticker(market_ticker).history(period="5d", interval="1d")
         except Exception as e:
             daily_history = None
             logger.debug("Daily fallback fetch failed for %s: %s", ticker, e)
@@ -441,8 +497,8 @@ class CloudScanner:
         if daily_history is not None and not daily_history.empty and "Close" in daily_history:
             close_values = [float(value) for value in daily_history["Close"].dropna().tolist()]
 
-        if not close_values and ticker in self.last_close_cache:
-            close_values = [self.last_close_cache[ticker]]
+        if not close_values and market_ticker in self.last_close_cache:
+            close_values = [self.last_close_cache[market_ticker]]
 
         if not close_values:
             return None
@@ -452,7 +508,7 @@ class CloudScanner:
             return None
 
         self.market_data_cache[cache_key] = fallback.copy()
-        self.last_close_cache[ticker] = float(fallback["Close"].iloc[-1])
+        self.last_close_cache[market_ticker] = float(fallback["Close"].iloc[-1])
         logger.warning("Synthesized fallback bars for %s from last known close data", ticker)
         return fallback
 
@@ -504,7 +560,7 @@ class CloudScanner:
         return pd.DataFrame(rows, index=index, columns=["Open", "High", "Low", "Close", "Volume"])
 
     async def _evaluate_timeframe_alignment(self, ticker: str, action: str) -> Tuple[bool, Dict[str, str]]:
-        """5m/3m/1m triple-check. All three timeframes must align with action."""
+        """Evaluate 5m/3m/1m alignment with a more aggressive autonomous-mode sniper gate."""
         action = str(action or "").upper()
         if action not in {"BUY", "SELL"}:
             return False, {}
@@ -569,7 +625,29 @@ class CloudScanner:
             else:
                 votes[label] = "WAIT"
 
-        aligned = all(votes.get(tf) == action for tf in ["5m", "3m", "1m"])
+        runtime_mode = str(self.session_detector.get_session_context().get("runtime_mode", "AUTONOMOUS") or "AUTONOMOUS").upper()
+        one_min_match = votes.get("1m") == action
+        aligned_helpers = sum(1 for tf in ["5m", "3m"] if votes.get(tf) == action)
+
+        if runtime_mode == "AUTONOMOUS":
+            aligned = one_min_match
+            if aligned and aligned_helpers == 0:
+                logger.warning(
+                    "🎯 AUTONOMOUS SNIPER OVERRIDE: %s %s triggered from 1m alone | votes=%s",
+                    action,
+                    ticker,
+                    votes,
+                )
+            elif aligned:
+                logger.info(
+                    "🎯 AUTONOMOUS SNIPER: %s %s confirmed by 1m + %s helper timeframe(s) | votes=%s",
+                    action,
+                    ticker,
+                    aligned_helpers,
+                    votes,
+                )
+        else:
+            aligned = all(votes.get(tf) == action for tf in ["5m", "3m", "1m"])
         return aligned, votes
     
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -924,6 +1002,9 @@ class CloudScanner:
         """Build MarketDataPoint from technical signal."""
         price = signal.metadata.get("price", 0.0)
         volume = signal.metadata.get("last_volume", 0.0)
+        runtime_mode = str(
+            self.session_detector.get_session_context().get("runtime_mode", "AUTONOMOUS") or "AUTONOMOUS"
+        ).upper()
         
         return MarketDataPoint(
             asset=signal.ticker,
@@ -937,6 +1018,8 @@ class CloudScanner:
                 "SIGNAL_TYPE": signal.signal_type,
                 "SIGNAL_STRENGTH": signal.strength,
                 "LIQUIDITY_ZONE": signal.metadata.get("liquidity_zone_label", self._format_liquidity_zone_label(signal.metadata.get("liquidity_zone"))),
+                "LIQUIDITY_SWEEP": signal.metadata.get("liquidity_sweep") or {},
+                "RUNTIME_MODE": runtime_mode,
                 "RECENT_CANDLES": signal.metadata.get("recent_candle_lines", []),
                 "RECENT_OHLCV": signal.metadata.get("recent_ohlcv", []),
                 "LIQUIDITY_ZONES": signal.metadata.get("liquidity_zones", []),

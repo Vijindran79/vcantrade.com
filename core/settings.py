@@ -45,11 +45,50 @@ class SettingsManager:
         "prop_firm_name": "TopStep",
         "prop_account_size": 50000.0,
     }
+
+    FUTURES_ALIASES = {
+        "ES1": "ES=F",
+        "ES": "ES=F",
+        "NQ1": "NQ=F",
+        "NQ": "NQ=F",
+        "GC1": "GC=F",
+        "GC": "GC=F",
+        "CL1": "CL=F",
+        "CL": "CL=F",
+        "YM1": "YM=F",
+        "YM": "YM=F",
+        "RTY1": "RTY=F",
+        "RTY": "RTY=F",
+        "SI1": "SI=F",
+        "SI": "SI=F",
+        "HG1": "HG=F",
+        "HG": "HG=F",
+    }
     
     def __init__(self):
         self.settings = self.DEFAULT_SETTINGS.copy()
         self.settings_file = Path(self.SETTINGS_FILE)
         self.load()
+
+    def normalize_ticker(self, ticker: str) -> str:
+        normalized = str(ticker or "").strip().upper()
+        return self.FUTURES_ALIASES.get(normalized, normalized)
+
+    def normalize_watchlist(self, watchlist) -> list[str]:
+        normalized = []
+        seen = set()
+        for ticker in watchlist or []:
+            value = self.normalize_ticker(ticker)
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    def _normalize_settings(self):
+        self.settings["session_watchlist"] = self.normalize_watchlist(
+            self.settings.get("session_watchlist", [])
+        )
     
     def load(self):
         """Load settings from file or create with defaults."""
@@ -60,6 +99,7 @@ class SettingsManager:
                 
                 # Merge with defaults (in case new settings were added)
                 self.settings.update(saved_settings)
+                self._normalize_settings()
                 logger.info(f"✅ Settings loaded from {self.SETTINGS_FILE}")
             except Exception as e:
                 logger.error(f"Failed to load settings: {e}")
@@ -84,6 +124,8 @@ class SettingsManager:
     def set(self, key: str, value):
         """Update a setting and auto-save."""
         if key in self.settings:
+            if key == "session_watchlist":
+                value = self.normalize_watchlist(value)
             self.settings[key] = value
             self.save()
             logger.info(f"⚙️ Setting updated: {key} = {value}")
@@ -94,6 +136,8 @@ class SettingsManager:
         """Update multiple settings at once."""
         for key, value in updates.items():
             if key in self.settings:
+                if key == "session_watchlist":
+                    value = self.normalize_watchlist(value)
                 self.settings[key] = value
         self.save()
         logger.info(f"⚙️ Settings batch updated: {list(updates.keys())}")

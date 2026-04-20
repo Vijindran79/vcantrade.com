@@ -100,7 +100,7 @@ class CommandCenter(QWidget):
         saved_watchlist = settings_manager.get("session_watchlist", [])
         if not isinstance(saved_watchlist, list):
             saved_watchlist = []
-        self.watchlist = [str(ticker).strip().upper() for ticker in saved_watchlist if str(ticker).strip()]
+        self.watchlist = settings_manager.normalize_watchlist(saved_watchlist)
         if not self.watchlist:
             self.watchlist = config.CLOUD_TICKERS.copy()
         self.watchlist_slots: List[QLineEdit] = []
@@ -1746,7 +1746,7 @@ class CommandCenter(QWidget):
         self.log("🤖 Switched to AUTONOMOUS MODE - Auto-execution enabled")
 
     def _add_ticker(self):
-        ticker = self.ticker_input.text().strip().upper()
+        ticker = settings_manager.normalize_ticker(self.ticker_input.text())
         
         # Validate ticker is not empty
         if not ticker:
@@ -1803,7 +1803,7 @@ class CommandCenter(QWidget):
         watchlist = []
         seen = set()
         for slot in self.watchlist_slots:
-            ticker = slot.text().strip().upper()
+            ticker = settings_manager.normalize_ticker(slot.text())
             if not ticker or ticker in seen:
                 continue
             seen.add(ticker)

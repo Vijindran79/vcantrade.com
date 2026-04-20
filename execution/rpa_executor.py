@@ -12,7 +12,8 @@ import math
 import os
 import random
 import time
-from typing import Callable, List, Optional, Tuple
+import ctypes
+from typing import Callable, Dict, List, Optional, Tuple
 
 import config
 from core.models import TradeRecord, SignalAction
@@ -191,6 +192,7 @@ class RPAExecutor:
         self.hotkey_sell = config.HOTKEY_SELL
         self.hotkey_close = config.HOTKEY_CLOSE
         self.on_blind_error = on_blind_error  # Safety interlock callback
+        self.last_failure_reason = ""
 
         # Load calibrated coordinates
         self.calibration_manager = CalibrationManager()
@@ -211,35 +213,136 @@ class RPAExecutor:
         except ImportError:
             logger.warning("RPA Hand: Required libraries missing - mouse execution disabled")
 
+    def get_permission_status(self) -> dict:
+        """Return a best-effort snapshot of OS privileges required for mouse control."""
+        status = {
+            "is_admin": False,
+            "pyautogui_loaded": bool(self.pyautogui),
+            "pygetwindow_loaded": bool(self._gw),
+            "mouse_accessible": False,
+            "mouse_control_ready": False,
+            "mouse_error": "",
+        }
+
+        try:
+            status["is_admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception as e:
+            status["mouse_error"] = str(e)
+
+        if self.pyautogui:
+            try:
+                self.pyautogui.position()
+                status["mouse_accessible"] = True
+            except Exception as e:
+                status["mouse_error"] = str(e)
+
+        status["mouse_control_ready"] = bool(
+            status["pyautogui_loaded"] and status["pygetwindow_loaded"] and status["mouse_accessible"]
+        )
+        return status
+
+    def assert_permissions_or_die(self):
+        """Check all permissions at startup. Log FATAL and raise if the Hand cannot operate."""
+        status = self.get_permission_status()
+        problems = []
+
+        if not status["is_admin"]:
+            problems.append("NOT running as Administrator — mouse may be blocked by UAC-elevated windows")
+
+        if not status["pyautogui_loaded"]:
+            problems.append("PyAutoGUI failed to load — mouse movement impossible")
+
+        if not status["pygetwindow_loaded"]:
+            problems.append("PyGetWindow failed to load — window detection impossible")
+
+        if not status["mouse_accessible"]:
+            problems.append(f"Mouse inaccessible — {status['mouse_error'] or 'unknown error'}")
+
+        if problems:
+            banner = (
+                "\n"
+                "╔══════════════════════════════════════════════════════════════╗\n"
+                "║          ⚠  RPA HAND PERMISSION CHECK FAILED  ⚠            ║\n"
+                "╠══════════════════════════════════════════════════════════════╣\n"
+            )
+            for p in problems:
+                banner += f"║  • {p:<57}║\n"
+            banner += (
+                "╠══════════════════════════════════════════════════════════════╣\n"
+                "║  FIX: Right-click → 'Run as administrator'                  ║\n"
+                "╚══════════════════════════════════════════════════════════════╝\n"
+            )
+            logger.fatal(banner)
+            print(banner)
+
+            # Fatal if mouse literally cannot move — no point continuing
+            if not status["mouse_control_ready"]:
+                raise RuntimeError(
+                    f"RPA Hand cannot operate: {'; '.join(problems)}"
+                )
+        else:
+            logger.info("RPA Hand permission check PASSED (admin=%s)", status["is_admin"])
+
+    # Fuzzy fallback keywords — if TradingView/ticker not found, match any
+    # browser window whose title contains one of these trading-related terms.
+    _FUZZY_KEYWORDS = [
+        "BTC", "ETH", "NQ", "ES", "CHART", "TRADE", "TRADING",
+        "FOREX", "FUTURES", "CRYPTO", "BINANCE", "BYBIT", "COINBASE",
+        "METATRADER", "MT4", "MT5", "OANDA", "EXNESS",
+    ]
+    # Known browser process title fragments used as a last-resort match
+    _BROWSER_HINTS = ["CHROME", "EDGE", "FIREFOX", "BRAVE", "OPERA"]
+
     def _get_browser_window(self, ticker_hint: Optional[str] = None):
-        """Find chart window by partial title match (TradingView or ticker hint)."""
+        """Find chart window with aggressive fuzzy matching.
+
+        Search priority:
+          1. Window title contains 'TradingView'
+          2. Window title contains the ticker symbol
+          3. Window title contains ANY trading keyword (BTC, Chart, Trade …)
+          4. Any visible browser window (Chrome, Edge, Brave …)
+        """
         if not self._gw:
             return None
 
         ticker_hint = (ticker_hint or "").replace("=F", "").split("-")[0].strip().upper()
-        candidates = []
+
+        tier1 = []  # TradingView exact
+        tier2 = []  # Ticker match
+        tier3 = []  # Fuzzy keyword
+        tier4 = []  # Any browser
+
         for w in self._gw.getAllWindows():
             title = (w.title or "").strip()
             if not title:
                 continue
             title_u = title.upper()
+
             if "TRADINGVIEW" in title_u:
-                candidates.append(w)
+                tier1.append(w)
+            elif ticker_hint and ticker_hint in title_u:
+                tier2.append(w)
+            elif any(kw in title_u for kw in self._FUZZY_KEYWORDS):
+                tier3.append(w)
+            elif any(br in title_u for br in self._BROWSER_HINTS):
+                tier4.append(w)
+
+        # Pick first non-minimized window from the highest-priority tier
+        for candidates in (tier1, tier2, tier3, tier4):
+            if not candidates:
                 continue
-            if ticker_hint and ticker_hint in title_u:
-                candidates.append(w)
-
-        windows = candidates
-        if not windows:
-            return None
-
-        for win in windows:
-            try:
-                if not win.isMinimized:
+            for win in candidates:
+                try:
+                    if not win.isMinimized:
+                        logger.debug("Window matched (tier): '%s'", win.title)
+                        return win
+                except Exception:
                     return win
-            except Exception:
-                return win
-        return windows[0]
+            # All minimized — return first anyway so we can restore it
+            logger.debug("All candidates minimized, returning '%s'", candidates[0].title)
+            return candidates[0]
+
+        return None
 
     def _active_window_title(self) -> str:
         if not self._gw:
@@ -253,7 +356,16 @@ class RPAExecutor:
     def _title_matches_target(self, title: str, ticker_hint: Optional[str] = None) -> bool:
         title_u = (title or "").upper()
         ticker_hint_u = (ticker_hint or "").replace("=F", "").split("-")[0].strip().upper()
-        return "TRADINGVIEW" in title_u or (ticker_hint_u and ticker_hint_u in title_u)
+        if "TRADINGVIEW" in title_u:
+            return True
+        if ticker_hint_u and ticker_hint_u in title_u:
+            return True
+        # Fuzzy: accept any trading-related or browser window
+        if any(kw in title_u for kw in self._FUZZY_KEYWORDS):
+            return True
+        if any(br in title_u for br in self._BROWSER_HINTS):
+            return True
+        return False
 
     def _cycle_tabs_until_match(self, ticker_hint: Optional[str] = None, attempts: int = 8) -> bool:
         """Cycle browser tabs until TradingView or ticker title becomes active."""
@@ -267,50 +379,123 @@ class RPAExecutor:
             time.sleep(0.3)
         return self._title_matches_target(self._active_window_title(), ticker_hint=ticker_hint)
 
+    def _alt_tab_into_view(self, ticker_hint: Optional[str] = None, attempts: int = 2) -> bool:
+        """Physically cycle top-level windows until TradingView is foreground."""
+        if not self.pyautogui:
+            return False
+
+        for _ in range(max(1, attempts)):
+            if self._title_matches_target(self._active_window_title(), ticker_hint=ticker_hint):
+                return True
+            self.pyautogui.hotkey("alt", "tab")
+            time.sleep(0.35)
+
+        return self._title_matches_target(self._active_window_title(), ticker_hint=ticker_hint)
+
+    def _resolve_window_title(self, ticker_hint: Optional[str] = None) -> str:
+        win = self._get_browser_window(ticker_hint=ticker_hint)
+        if win and getattr(win, "title", ""):
+            return str(win.title)
+        return self._active_window_title() or "UNKNOWN"
+
+    def _log_move_attempt(self, x: int, y: int, ticker_hint: Optional[str] = None, window_title: Optional[str] = None) -> None:
+        resolved_title = window_title or self._resolve_window_title(ticker_hint=ticker_hint)
+        logger.info("[RPA] Moving to X: %s, Y: %s on Window: %s", x, y, resolved_title)
+
+    def _ensure_window_frontmost(self, ticker_hint: Optional[str] = None) -> bool:
+        """Force TradingView to the absolute front before any physical click."""
+        if self._title_matches_target(self._active_window_title(), ticker_hint=ticker_hint):
+            return True
+        return self.bring_tradingview_to_front(ticker_hint=ticker_hint)
+
+    def _move_cursor_logged(self, x: int, y: int, ticker_hint: Optional[str] = None, ensure_focus: bool = False) -> bool:
+        if not self.pyautogui:
+            logger.error("Mouse execution not available")
+            return False
+        if ensure_focus and not self._ensure_window_frontmost(ticker_hint=ticker_hint):
+            return False
+        self._log_move_attempt(int(x), int(y), ticker_hint=ticker_hint)
+        _human_move(self.pyautogui, int(x), int(y))
+        return True
+
+    def _click_cursor_logged(self, x: int, y: int, ticker_hint: Optional[str] = None) -> bool:
+        if not self.pyautogui:
+            logger.error("Mouse execution not available")
+            return False
+        if not self._ensure_window_frontmost(ticker_hint=ticker_hint):
+            return False
+        self._log_move_attempt(int(x), int(y), ticker_hint=ticker_hint)
+        _human_click(self.pyautogui, int(x), int(y))
+        return True
+
     def _force_focus_tradingview(self, win, ticker_hint: Optional[str] = None) -> bool:
-        """Restore, maximize, activate, move window, and verify chart is foreground."""
+        """Hard-Focus routine: restore → maximize → activate → Alt-Tab fallback.
+
+        Three escalation stages before giving up:
+          Stage 1: restore + maximize + activate (standard pygetwindow)
+          Stage 2: Alt-Tab cycling to bring window forward
+          Stage 3: Win32 SetForegroundWindow via ctypes
+        """
+        # ── Stage 1: standard pygetwindow focus ──────────────────────────
         try:
             if win.isMinimized:
                 win.restore()
-            time.sleep(0.08)
+                time.sleep(0.15)
             try:
                 win.maximize()
             except Exception:
                 pass
-            time.sleep(0.08)
-            win.activate()
-            time.sleep(0.08)
+            time.sleep(0.10)
+            try:
+                win.activate()
+            except Exception:
+                pass
+            time.sleep(0.15)
             try:
                 win.moveTo(config.TRADINGVIEW_WINDOW_X, config.TRADINGVIEW_WINDOW_Y)
             except Exception:
                 pass
-            if not self._cycle_tabs_until_match(ticker_hint=ticker_hint):
-                self._fire_blind_error(f"unable to find TradingView tab for {ticker_hint or 'current symbol'}")
-                return False
-            time.sleep(0.12)
         except Exception as e:
-            self._fire_blind_error(f"failed to activate TradingView window: {e}")
-            return False
+            logger.warning("Stage-1 focus failed: %s — escalating", e)
 
+        # Check after Stage 1
+        if self._title_matches_target(self._active_window_title(), ticker_hint=ticker_hint):
+            logger.info("Hard-Focus locked (stage 1) for %s", ticker_hint or "current symbol")
+            return True
+
+        # ── Stage 2: Alt-Tab + Ctrl-Tab cycling ──────────────────────────
+        self._alt_tab_into_view(ticker_hint=ticker_hint, attempts=3)
+        time.sleep(0.15)
         try:
-            import ctypes
-            fg_hwnd = ctypes.windll.user32.GetForegroundWindow()
-            fg_title = self._active_window_title()
-            ticker_hint_u = (ticker_hint or "").replace("=F", "").split("-")[0].strip().upper()
-            fg_title_u = fg_title.upper()
-            if "TRADINGVIEW" not in fg_title_u and (not ticker_hint_u or ticker_hint_u not in fg_title_u):
-                self._fire_blind_error(f"foreground window is '{fg_title}', not TradingView/{ticker_hint_u or 'ticker'}")
-                return False
-            try:
-                if not win.isActive:
-                    self._fire_blind_error(f"window not active after focus for {ticker_hint or 'current symbol'}")
-                    return False
-            except Exception:
-                pass
-        except Exception as e:
-            logger.debug(f"Foreground check skipped: {e}")
+            win.activate()
+        except Exception:
+            pass
+        if not self._cycle_tabs_until_match(ticker_hint=ticker_hint, attempts=10):
+            logger.warning("Stage-2 tab cycling could not match — escalating")
+        else:
+            logger.info("Hard-Focus locked (stage 2) for %s", ticker_hint or "current symbol")
+            return True
 
-        return True
+        # ── Stage 3: Win32 SetForegroundWindow ───────────────────────────
+        try:
+            hwnd = getattr(win, '_hWnd', None)
+            if hwnd:
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                time.sleep(0.20)
+                if self._title_matches_target(self._active_window_title(), ticker_hint=ticker_hint):
+                    logger.info("Hard-Focus locked (stage 3 / SetForegroundWindow) for %s", ticker_hint or "current symbol")
+                    return True
+        except Exception as e:
+            logger.debug("Stage-3 SetForegroundWindow failed: %s", e)
+
+        # ── Final check — accept any fuzzy match ─────────────────────────
+        fg_title = self._active_window_title()
+        if self._title_matches_target(fg_title, ticker_hint=ticker_hint):
+            logger.info("Hard-Focus locked (final fuzzy) for %s: '%s'", ticker_hint or "current symbol", fg_title)
+            return True
+
+        self._fire_blind_error(f"Hard-Focus FAILED after 3 stages for {ticker_hint or 'current symbol'} (fg='{fg_title}')")
+        return False
 
     def _verify_window_visible(self, ticker_hint: Optional[str] = None) -> bool:
         """
@@ -355,6 +540,7 @@ class RPAExecutor:
 
     def _fire_blind_error(self, reason: str):
         """Log and notify that the Professor cannot see the chart."""
+        self.last_failure_reason = f"Visibility gate | {reason}"
         logger.error(f"[SAFETY INTERLOCK] Professor is blind: {reason}")
         if self.on_blind_error:
             try:
@@ -394,6 +580,7 @@ class RPAExecutor:
 
     def execute_trade(self, trade: TradeRecord) -> bool:
         """Execute a trade via RPA. Returns True if successful."""
+        self.last_failure_reason = ""
         if config.DRY_RUN:
             logger.info(f"[DRY RUN] Would execute {trade.action.value} {trade.asset}")
             return True
@@ -412,9 +599,11 @@ class RPAExecutor:
             elif trade.action == SignalAction.CLOSE:
                 return self._execute_close(trade)
             else:
+                self.last_failure_reason = f"Unsupported action | {trade.action}"
                 logger.warning(f"Unknown action: {trade.action}")
                 return False
         except Exception as e:
+            self.last_failure_reason = f"RPA execution error | {e}"
             logger.error(f"RPA execution failed: {e}")
             return False
 
@@ -455,8 +644,10 @@ class RPAExecutor:
             top_y = max(chart_tl[1], y - 16)
             bottom_y = min(chart_br[1], y + 16)
 
-            _human_click(self.pyautogui, rect[0], rect[1])
+            if not self._click_cursor_logged(rect[0], rect[1], ticker_hint=ticker):
+                return False
             time.sleep(0.2)
+            self._log_move_attempt(start_x, top_y, ticker_hint=ticker)
             self.pyautogui.moveTo(start_x, top_y)
             self.pyautogui.dragTo(end_x, bottom_y, duration=0.5, button="left")
             time.sleep(0.2)
@@ -524,7 +715,8 @@ class RPAExecutor:
 
         x, y = target
 
-        _human_click(self.pyautogui, x, y)
+        if not self._click_cursor_logged(x, y, ticker_hint=ticker_hint):
+            return False
         logger.info("Neutral chart focus click at (%s, %s)", x, y)
         return True
 
@@ -592,7 +784,8 @@ class RPAExecutor:
         if not self.pyautogui:
             logger.error("Human-move diagnostic unavailable: PyAutoGUI not loaded")
             return False
-        _human_move(self.pyautogui, int(x), int(y))
+        if not self._move_cursor_logged(int(x), int(y)):
+            return False
         logger.info("Human-move diagnostic completed to (%s, %s)", x, y)
         return True
 
@@ -643,20 +836,55 @@ class RPAExecutor:
             logger.error(f"Failed to send hotkey {hotkey}: {e}")
             return False
 
+    # Screen-percentage fallback offsets for common broker UI elements.
+    # These are used ONLY when calibration.json is missing/empty.
+    # Based on standard TradingView paper-trading panel layout.
+    _FALLBACK_OFFSETS: Dict[str, Tuple[float, float]] = {
+        "buy_button":     (0.85, 0.40),   # 85% width, 40% height
+        "sell_button":    (0.85, 0.52),   # 85% width, 52% height
+        "close_button":   (0.85, 0.64),   # 85% width, 64% height
+        "sl_input":       (0.82, 0.46),   # 82% width, 46% height
+        "tp_input":       (0.82, 0.54),   # 82% width, 54% height
+        "lot_size_input": (0.82, 0.38),   # 82% width, 38% height
+        "confirm_button": (0.50, 0.62),   # 50% width, 62% height (center dialog)
+    }
+
     def _get_abs_coord(self, point_name: str, ticker_hint: Optional[str] = None) -> Tuple[int, int]:
-        """Convert relative calibrated coordinate to absolute screen coordinate."""
+        """Convert relative calibrated coordinate to absolute screen coordinate.
+
+        Falls back to screen-percentage offsets when calibration is missing
+        so the Hand never returns (0, 0) for essential buttons.
+        """
         rel_x, rel_y = self.calibration_manager.get_coordinate(point_name)
-        if (rel_x, rel_y) == (0, 0):
-            return (0, 0)
-        
         win = self._get_browser_window(ticker_hint=ticker_hint)
-        if win:
-            abs_x = win.left + rel_x
-            abs_y = win.top + rel_y
+
+        if (rel_x, rel_y) != (0, 0):
+            # Normal calibrated path
+            if win:
+                return (win.left + rel_x, win.top + rel_y)
+            return (rel_x, rel_y)
+
+        # ── Calibration bypass: screen-percentage fallback ────────────────
+        if point_name in self._FALLBACK_OFFSETS:
+            pct_x, pct_y = self._FALLBACK_OFFSETS[point_name]
+            if win:
+                abs_x = win.left + int(win.width * pct_x)
+                abs_y = win.top + int(win.height * pct_y)
+            else:
+                # Last resort: use full screen dimensions
+                try:
+                    screen_w, screen_h = self.pyautogui.size()
+                except Exception:
+                    screen_w, screen_h = 1920, 1080
+                abs_x = int(screen_w * pct_x)
+                abs_y = int(screen_h * pct_y)
+            logger.warning(
+                "[CALIBRATION BYPASS] Using fallback %%offset for '%s' → (%s, %s)",
+                point_name, abs_x, abs_y,
+            )
             return (abs_x, abs_y)
-        
-        # Fallback to coordinate as absolute if window not found
-        return (rel_x, rel_y)
+
+        return (0, 0)
 
     def _mouse_click(self, point_name: str, ticker_hint: Optional[str] = None) -> bool:
         """Humanized click at a calibrated position relative to browser."""
@@ -669,9 +897,33 @@ class RPAExecutor:
             logger.error(f"No calibration for '{point_name}' — cannot click")
             return False
 
-        _human_click(self.pyautogui, x, y)
+        if not self._click_cursor_logged(x, y, ticker_hint=ticker_hint):
+            return False
         logger.info(f"Clicked {point_name} at absolute ({x}, {y})")
         _jitter()
+        return True
+
+    def force_strike_test(self, action: str = "BUY", ticker_hint: Optional[str] = None) -> bool:
+        """Immediate calibrated left-click for live RPA strike diagnostics."""
+        action_upper = str(action or "BUY").upper()
+        if action_upper not in {"BUY", "SELL"}:
+            self.last_failure_reason = f"Force strike unsupported action | {action_upper}"
+            logger.error("Force strike test aborted: unsupported action %s", action_upper)
+            return False
+
+        point_name = "buy_button" if action_upper == "BUY" else "sell_button"
+        x, y = self._get_abs_coord(point_name, ticker_hint=ticker_hint)
+        if (x, y) == (0, 0):
+            self.last_failure_reason = f"Force strike missing calibration | {point_name}"
+            logger.error("Force strike test aborted: no calibration for %s", point_name)
+            return False
+
+        if not self._click_cursor_logged(x, y, ticker_hint=ticker_hint):
+            if not self.last_failure_reason:
+                self.last_failure_reason = f"Force strike failed | unable to click {point_name}"
+            return False
+
+        logger.warning("FORCE STRIKE TEST: clicked %s at absolute (%s, %s) for %s", point_name, x, y, ticker_hint or "current chart")
         return True
 
     def _mouse_click_with_input(
@@ -702,7 +954,8 @@ class RPAExecutor:
         if fill_sl and trade.stop_loss:
             sl_x, sl_y = self._get_abs_coord("sl_input", ticker_hint=trade.asset)
             if (sl_x, sl_y) != (0, 0):
-                _human_click(self.pyautogui, sl_x, sl_y)
+                if not self._click_cursor_logged(sl_x, sl_y, ticker_hint=trade.asset):
+                    return False
                 time.sleep(random.uniform(0.15, 0.35))
                 self.pyautogui.hotkey("ctrl", "a")
                 time.sleep(random.uniform(0.05, 0.15))
@@ -720,7 +973,8 @@ class RPAExecutor:
         if fill_tp and trade.take_profit:
             tp_x, tp_y = self._get_abs_coord("tp_input", ticker_hint=trade.asset)
             if (tp_x, tp_y) != (0, 0):
-                _human_click(self.pyautogui, tp_x, tp_y)
+                if not self._click_cursor_logged(tp_x, tp_y, ticker_hint=trade.asset):
+                    return False
                 time.sleep(random.uniform(0.15, 0.35))
                 self.pyautogui.hotkey("ctrl", "a")
                 time.sleep(random.uniform(0.05, 0.15))
@@ -731,7 +985,8 @@ class RPAExecutor:
         # Step 4: Fill Lot Size if calibrated
         lot_x, lot_y = self._get_abs_coord("lot_size_input", ticker_hint=trade.asset)
         if (lot_x, lot_y) != (0, 0):
-            _human_click(self.pyautogui, lot_x, lot_y)
+            if not self._click_cursor_logged(lot_x, lot_y, ticker_hint=trade.asset):
+                return False
             time.sleep(random.uniform(0.15, 0.35))
             self.pyautogui.hotkey("ctrl", "a")
             time.sleep(random.uniform(0.05, 0.15))
@@ -744,10 +999,12 @@ class RPAExecutor:
         if confirm_pos:
             cx, cy = confirm_pos
             logger.info(f"Visual Confirm: clicking matched button at ({cx}, {cy})")
-            _human_click(self.pyautogui, cx, cy)
+            if not self._click_cursor_logged(cx, cy, ticker_hint=trade.asset):
+                return False
         else:
             logger.debug("No visual match for Confirm — using calibrated coordinate")
-            self._mouse_click("confirm_button", ticker_hint=trade.asset)
+            if not self._mouse_click("confirm_button", ticker_hint=trade.asset):
+                return False
 
         logger.info(f"Trade executed: {trade.action.value} {trade.asset}")
         return True

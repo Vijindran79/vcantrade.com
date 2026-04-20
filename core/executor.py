@@ -626,7 +626,8 @@ class UnifiedTradeExecutor:
                 )
             else:
                 self.consecutive_failures += 1
-                msg = f"❌ FAILURE: RPA hand failed to execute {action} for {ticker}"
+                failure_reason = self.rpa_executor.last_failure_reason or f"RPA hand failed to execute {action} for {ticker}"
+                msg = f"❌ FAILURE: {failure_reason}"
                 self._log(msg)
                 self._check_safety_stop()
                 return ExecutionResult(

@@ -32,6 +32,7 @@ import asyncio
 import logging
 import threading
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -69,7 +70,7 @@ from core.signal_dispatcher import SignalDispatcher
 from core.browser_agent import BrowserAgent
 from core.settings import settings_manager
 from core.financial_safety import FinancialSafetyManager
-from core.executor import UnifiedTradeExecutor, ExchangeLimitExecutor, ExchangeInterface
+from core.executor import UnifiedTradeExecutor, ExchangeLimitExecutor, ExchangeInterface, SlippageGuard
 from core.risk import calculate_position_size, build_hard_stop_plan
 from core.journal import TradeJournalDB
 from core.risk_manager import RiskManager, PositionSizer
@@ -551,9 +552,12 @@ class VcaniTradeApp:
         self.vibe_adapter = VibeTradingAdapter()
         self._vibe_strategy_worker = None
         self.session_detector = MarketSessionDetector()
+        self.slippage_guard = SlippageGuard()
         self.support_resistance_levels = {}
         self.latest_confidence_score = 0.0
         self.analysis_mode_status = "READY"
+        self.gatekeeper_block_stats = Counter()
+        self._gatekeeper_summary_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
         # Load persistent trading settings before deriving any session state from them.
         self.settings = settings_manager
@@ -684,6 +688,172 @@ class VcaniTradeApp:
 
     def _log_ui(self, message: str):
         self._run_on_ui_thread(lambda: self.cmd.log(message))
+
+    def _normalize_gatekeeper_category(self, category: str) -> str:
+        mapping = {
+            "confidence": "Confidence",
+            "news": "News",
+            "risk": "Risk",
+            "mtf": "MTF",
+            "visibility": "Visibility",
+            "watchlist": "Watchlist",
+            "price validation": "Price Validation",
+            "spread/slippage": "Spread/Slippage",
+            "other": "Other",
+        }
+        key = str(category or "other").strip().lower()
+        return mapping.get(key, str(category or "Other").strip() or "Other")
+
+    def _log_gatekeeper_abort(self, category: str, reason: str):
+        normalized_category = self._normalize_gatekeeper_category(category)
+        reason_text = str(reason or "Unknown execution gate").strip()
+        self.gatekeeper_block_stats[normalized_category] += 1
+        message = f"[GATEKEEPER] TRADE ABORTED: {reason_text}"
+        logger.error(message)
+        self._log_ui(
+            f'<span style="color:#F85149;font-weight:bold;font-size:14px">🛑 {message}</span>'
+        )
+
+    def _emit_gatekeeper_summary_if_due(self):
+        current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        if current_hour <= self._gatekeeper_summary_hour:
+            return
+
+        total_blocked = sum(self.gatekeeper_block_stats.values())
+        ordered_categories = [
+            "News",
+            "Risk",
+            "MTF",
+            "Visibility",
+            "Confidence",
+            "Watchlist",
+            "Price Validation",
+            "Spread/Slippage",
+            "Other",
+        ]
+        parts = [
+            f"{self.gatekeeper_block_stats[category]} {category}"
+            for category in ordered_categories
+            if self.gatekeeper_block_stats.get(category, 0) > 0
+        ]
+        detail = f" ({', '.join(parts)})" if parts else ""
+        message = f"[GATEKEEPER] Stats: {total_blocked} Trades Blocked{detail}"
+        logger.info(message)
+        self._log_ui(
+            f'<span style="color:#D29922;font-weight:bold">⚠️ {message}</span>'
+        )
+        self.gatekeeper_block_stats.clear()
+        self._gatekeeper_summary_hour = current_hour
+
+    def _canonical_market_ticker(self, ticker: str) -> str:
+        normalized = str(ticker or "").strip().upper()
+        alias_map = {
+            "NQ": "NQ=F",
+            "ES": "ES=F",
+            "YM": "YM=F",
+            "RTY": "RTY=F",
+            "CL": "CL=F",
+            "GC": "GC=F",
+            "SI": "SI=F",
+        }
+        return alias_map.get(normalized, normalized)
+
+    def _run_pretrade_market_audit(self, ticker: str, entry_price: float, force_execute: bool = False) -> bool:
+        if force_execute:
+            return True
+
+        if entry_price <= 0:
+            self._log_gatekeeper_abort(
+                "Price Validation",
+                f"{ticker} | invalid setup entry price ${entry_price:.2f}",
+            )
+            return False
+
+        try:
+            import concurrent.futures
+            import yfinance as yf
+
+            market_ticker = self._canonical_market_ticker(ticker)
+
+            def fetch_price():
+                symbol = yf.Ticker(market_ticker)
+                history = symbol.history(period="1d", interval="1m")
+                if history.empty or "Close" not in history or history["Close"].dropna().empty:
+                    return None
+                return float(history["Close"].dropna().iloc[-1])
+
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(fetch_price)
+                current_market_price = future.result(timeout=5.0)
+
+            if current_market_price is None or current_market_price <= 0:
+                self._log_gatekeeper_abort(
+                    "Price Validation",
+                    f"{ticker} | unable to fetch live market price via {market_ticker}",
+                )
+                return False
+
+            bid = current_market_price * 0.9995
+            ask = current_market_price * 1.0005
+            slippage_ok, slippage_pct = self.slippage_guard.check_slippage(entry_price, current_market_price)
+            spread_ok, spread_pct = self.slippage_guard.check_spread(bid, ask)
+
+            self.cmd.log(
+                f'<span style="color:#8B949E">📊 PRE-STRIKE AUDIT</span>: '
+                f'{ticker} live=${current_market_price:.2f} | setup=${entry_price:.2f} | '
+                f'slippage={slippage_pct:.3f}% | spread={spread_pct:.3f}%'
+            )
+
+            if not slippage_ok:
+                self._log_gatekeeper_abort(
+                    "Price Validation",
+                    f"{ticker} | market moved {slippage_pct:.2f}% from setup (${entry_price:.2f} -> ${current_market_price:.2f}) | limit {config.MAX_SLIPPAGE_PERCENT:.2f}%",
+                )
+                return False
+
+            if not spread_ok:
+                self._log_gatekeeper_abort(
+                    "Spread/Slippage",
+                    f"{ticker} | spread {spread_pct:.2f}% exceeds limit {config.MAX_SPREAD_PERCENT:.2f}%",
+                )
+                return False
+
+            return True
+
+        except Exception as exc:
+            self._log_gatekeeper_abort(
+                "Price Validation",
+                f"{ticker} | live price audit failed: {exc}",
+            )
+            return False
+
+    def _gatekeeper_abort_from_execution_result(self, result) -> tuple[str, str]:
+        status_value = getattr(result.status, "value", str(result.status or "OTHER"))
+        ticker = getattr(result, "ticker", "UNKNOWN")
+        if status_value == "ABORTED_SLIPPAGE":
+            slippage_pct = float(getattr(result, "slippage_pct", 0.0) or 0.0)
+            signal_price = float(getattr(result, "signal_price", 0.0) or 0.0)
+            execution_price = float(getattr(result, "execution_price", 0.0) or 0.0)
+            return (
+                "Price Validation",
+                f"{ticker} | market moved {slippage_pct:.2f}% from setup (${signal_price:.2f} -> ${execution_price:.2f}) | limit {config.MAX_SLIPPAGE_PERCENT:.2f}%",
+            )
+        if status_value == "ABORTED_SPREAD":
+            spread_pct = float(getattr(result, "spread_pct", 0.0) or 0.0)
+            return (
+                "Spread/Slippage",
+                f"{ticker} | spread {spread_pct:.2f}% exceeds limit {config.MAX_SPREAD_PERCENT:.2f}%",
+            )
+        if status_value == "FAILED_PRICE_FETCH":
+            return ("Price Validation", f"{ticker} | {getattr(result, 'error_message', 'price audit failed')}")
+
+        detail = str(getattr(result, "error_message", "") or status_value)
+        lowered = detail.lower()
+        if "visibility gate" in lowered or "professor is blind" in lowered:
+            return ("Visibility", f"{ticker} | {detail}")
+        if "confidence" in lowered:
+            return ("Confidence", f"{ticker} | {detail}")
+        return ("Other", f"{ticker} | {detail}")
 
     def _initialize_vibe_status(self):
         """Reflect shielded Vibe availability on the dashboard."""
@@ -863,6 +1033,7 @@ class VcaniTradeApp:
         watchlist = [ticker for ticker in self.current_watchlist if str(ticker).strip()]
         self.session_detector.set_runtime_context(self.current_mode, watchlist)
         self.cloud_scanner.scanner.set_runtime_context(self.current_mode, watchlist)
+        self.financial_safety.set_runtime_mode(self.current_mode)
 
         # News filter & safety timer
         if not hasattr(self, "safety_timer"):
@@ -995,6 +1166,10 @@ class VcaniTradeApp:
         
         # Parse command intent
         command_lower = command.lower()
+
+        if "force strike test" in command_lower:
+            self._handle_force_strike_test_command(command)
+            return
         
         # Store current command for AI analysis
         self._current_copilot_command = command
@@ -1470,6 +1645,35 @@ class VcaniTradeApp:
         # Trigger AI analysis
         self._trigger_ai_analysis(command)
 
+    def _handle_force_strike_test_command(self, command: str):
+        """Bypass analysis and physically click the calibrated BUY button immediately."""
+        ticker_hint = self.current_watchlist[0] if self.current_watchlist else self.ticker_selector
+        self.cmd.log(f"⚡ FORCE STRIKE TEST: immediate calibrated BUY click requested on {ticker_hint}")
+        self.ai_narrator.add_activity("⚡", f"Force strike test armed on {ticker_hint}")
+
+        def run_force_strike_in_thread():
+            try:
+                success = self.rpa_hand.force_strike_test(action="BUY", ticker_hint=ticker_hint)
+                if success:
+                    self.cmd.log(
+                        f'<span style="color:#3FB950;font-weight:bold">⚡ FORCE STRIKE TEST PASSED</span>: '
+                        f'clicked BUY on {ticker_hint}'
+                    )
+                    self.ai_narrator.add_activity("✅", f"Force strike BUY click fired on {ticker_hint}")
+                else:
+                    failure_reason = self.rpa_hand.last_failure_reason or "unable to click calibrated BUY button"
+                    self.cmd.log(
+                        f'<span style="color:#F85149;font-weight:bold">⚠️ FORCE STRIKE TEST FAILED</span>: '
+                        f'{failure_reason}'
+                    )
+                    self.ai_narrator.add_activity("⚠️", f"Force strike test failed for {ticker_hint}")
+            except Exception as e:
+                self.cmd.log(f'<span style="color:#F85149">❌ FORCE STRIKE TEST ERROR</span>: {e}')
+
+        strike_thread = threading.Thread(target=run_force_strike_in_thread, daemon=True)
+        strike_thread.start()
+        self.cmd.log("⚡ Force strike test dispatched directly to RPA executor")
+
     def _trigger_ai_analysis(self, user_suggestion: str):
         """Trigger Swarm Consensus analysis with user suggestion"""
         try:
@@ -1677,8 +1881,8 @@ class VcaniTradeApp:
             return raw_action
         return "HOLD"
 
-    def _passes_mtf_sniper_gate(self, ticker: str, action: str) -> tuple[bool, dict]:
-        """5m/3m/1m sniper gate. All timeframes must align with action."""
+    def _passes_mtf_sniper_gate(self, ticker: str, action: str, signal_data: Optional[dict] = None) -> tuple[bool, dict]:
+        """5m/3m/1m sniper gate with oversold reversal override for BUY conflicts."""
         action = str(action or "").upper()
         if action not in {"BUY", "SELL"}:
             return False, {}
@@ -1697,6 +1901,13 @@ class VcaniTradeApp:
             ("1m", "1d", "1m"),
         ]
         votes = {}
+        timeframe_rsi = {}
+
+        transcript = dict((signal_data or {}).get("transcript") or {})
+        technical_sniper = dict(transcript.get("technical_sniper") or {})
+        scanner_action = str(technical_sniper.get("action", "") or "").upper()
+        brain_verdict = str((signal_data or {}).get("brain_verdict", "") or "").upper()
+        ai_scanner_agree = action == "BUY" and scanner_action == "BUY" and "BUY" in brain_verdict
 
         def _resample_to_3m(df_1m):
             if df_1m is None or df_1m.empty:
@@ -1753,8 +1964,32 @@ class VcaniTradeApp:
                 votes[label] = "SELL"
             else:
                 votes[label] = "WAIT"
+            timeframe_rsi[label] = float(r) if not pd.isna(r) else None
 
         passed = all(votes.get(tf) == action for tf in ["5m", "3m", "1m"])
+        buy_votes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == "BUY")
+        sell_votes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == "SELL")
+        one_min_rsi = timeframe_rsi.get("1m")
+        mtf_bias = "SELL" if sell_votes > buy_votes else "BUY" if buy_votes > sell_votes else "MIXED"
+        votes["1m_rsi"] = round(one_min_rsi, 2) if isinstance(one_min_rsi, (int, float)) else None
+        votes["mtf_bias"] = mtf_bias
+
+        if (
+            not passed
+            and action == "BUY"
+            and ai_scanner_agree
+            and mtf_bias == "SELL"
+            and isinstance(one_min_rsi, (int, float))
+            and one_min_rsi < 30.0
+        ):
+            votes["override"] = "REVERSAL_BUY_1M_RSI_OVERSOLD"
+            logger.warning(
+                "🎯 REVERSAL OVERRIDE: BUY %s allowed against SELL-biased MTF because AI+Scanner agree and 1m RSI is oversold (%.2f)",
+                ticker,
+                one_min_rsi,
+            )
+            return True, votes
+
         return passed, votes
 
     def _parse_confidence_line(self, text: str) -> Optional[float]:
@@ -2033,6 +2268,7 @@ class VcaniTradeApp:
         msg = "CHART HIDDEN - CANNOT EXECUTE"
         reason_txt = reason or "window visibility interlock triggered"
         logger.error(f"[RPA INTERLOCK] {msg} | {reason_txt}")
+        self._log_gatekeeper_abort("Visibility", reason_txt)
 
         try:
             screen = self.app.primaryScreen()
@@ -2329,6 +2565,8 @@ class VcaniTradeApp:
         Heartbeat Monitor - Logs system health every 60 seconds.
         Now includes Market Session context.
         """
+        self._emit_gatekeeper_summary_if_due()
+
         # Get system stats
         active_trades = len(self.positions)
         daily_pnl = self.daily_pnl
@@ -2575,6 +2813,10 @@ class VcaniTradeApp:
 
         if self.current_watchlist and ticker not in self.current_watchlist:
             logger.info("APP_SIGNAL_HANDLER: ignoring inactive ticker %s", ticker)
+            self._log_gatekeeper_abort(
+                "Watchlist",
+                f"{ticker} | ticker is not armed in the dashboard watchlist",
+            )
             self.cmd.log(f"⚠️ Ignoring inactive dashboard ticker: {ticker}")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
@@ -2599,6 +2841,10 @@ class VcaniTradeApp:
                 required_confidence_score,
                 action,
                 ticker,
+            )
+            self._log_gatekeeper_abort(
+                "Confidence",
+                f"{action} {ticker} | confidence {confidence_score:.0f}% below listener threshold {required_confidence_score:.0f}%",
             )
             self.analysis_mode_status = "REJECTED - Low Confidence"
             self.cmd.update_copilot_status(self.analysis_mode_status)
@@ -2633,6 +2879,10 @@ class VcaniTradeApp:
             return
 
         if entry_price <= 0:
+            self._log_gatekeeper_abort(
+                "Price Validation",
+                f"{ticker} | no valid detected setup price for {action}",
+            )
             self.cmd.log(
                 f'<span style="color:#D29922">⚠️ SIGNAL BLOCKED</span>: '
                 f'{ticker} has no valid entry price for {action}'
@@ -2722,6 +2972,10 @@ class VcaniTradeApp:
 
         if self.current_watchlist and ticker not in self.current_watchlist:
             logger.info("EXEC_CLOUD: blocked inactive dashboard ticker %s", ticker)
+            self._log_gatekeeper_abort(
+                "Watchlist",
+                f"{ticker} | ticker is not armed in the dashboard watchlist",
+            )
             self.cmd.log(f"⚠️ Trade blocked: {ticker} is not active on dashboard")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
@@ -2757,18 +3011,22 @@ class VcaniTradeApp:
             return
 
         # ── Confidence Gate ───────────────────────────────────────────────
-        if confidence_score < 70 and not force_execute:
+        if confidence_score < config.MIN_CONFIDENCE_THRESHOLD and not force_execute:
             logger.info("EXEC_CLOUD: rejected by confidence gate for %s %s", action, ticker)
+            self._log_gatekeeper_abort(
+                "Confidence",
+                f"{action} {ticker} | confidence {confidence_score:.0f}% below execution threshold {config.MIN_CONFIDENCE_THRESHOLD:.0f}%",
+            )
             self.analysis_mode_status = "REJECTED - Low Confidence"
             self.cmd.update_copilot_status("TRADE SKIPPED: Criteria not met")
             self.ai_narrator.set_status("error", "TRADE SKIPPED: Criteria not met")
             self.cmd.log(
                 f'<span style="color:#D29922;font-weight:bold">⚠️ TRADE SKIPPED: Criteria not met</span> '
-                f'- Confidence {confidence_score:.0f}% < 70% required'
+                f'- Confidence {confidence_score:.0f}% < {config.MIN_CONFIDENCE_THRESHOLD:.0f}% required'
             )
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
-        elif confidence_score < 70 and force_execute:
+        elif confidence_score < config.MIN_CONFIDENCE_THRESHOLD and force_execute:
             logger.info("EXEC_CLOUD: force_execute bypassed confidence gate for %s %s", action, ticker)
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">🎲 FORCE EXECUTE</span>: '
@@ -2782,13 +3040,25 @@ class VcaniTradeApp:
 
         if entry_price <= 0:
             logger.info("EXEC_CLOUD: invalid entry price for %s (%s)", ticker, entry_price)
+            self._log_gatekeeper_abort(
+                "Price Validation",
+                f"{ticker} | no valid detected setup price for {action}",
+            )
             self.cmd.log(f"⚠️ No valid entry price for {ticker} - cannot execute trade")
             self.ai_narrator.notify_error(f"No entry price for {ticker}")
+            return
+
+        if not self._run_pretrade_market_audit(ticker, entry_price, force_execute=force_execute):
+            self._on_ticker_status_update(ticker, "trade_rejected")
             return
 
         # Check if trading is paused due to news
         if self.financial_safety.trading_paused and not force_execute:
             logger.info("EXEC_CLOUD: blocked by financial_safety pause for %s", ticker)
+            self._log_gatekeeper_abort(
+                "News",
+                f"{ticker} | {self.financial_safety.pause_reason}"
+            )
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">🛑 NEWS FILTER BLOCKED</span>: '
                 f'{ticker} - {self.financial_safety.pause_reason}'
@@ -2812,6 +3082,10 @@ class VcaniTradeApp:
 
         if (not risk_eval["ok"] or risk_eval["risk_score"] != "Low") and not force_execute:
             logger.info("EXEC_CLOUD: rejected by risk gate for %s - %s", ticker, risk_eval.get("reason", "n/a"))
+            self._log_gatekeeper_abort(
+                "Risk",
+                f"{ticker} | {risk_eval.get('reason', 'risk criteria not met')}"
+            )
             self.analysis_mode_status = "REJECTED - Too Risky"
             self.cmd.update_copilot_status("TRADE SKIPPED: Criteria not met")
             self.ai_narrator.set_status("error", "TRADE SKIPPED: Criteria not met")
@@ -2849,6 +3123,10 @@ class VcaniTradeApp:
             )
         elif quantity <= 0:
             logger.info("EXEC_CLOUD: invalid quantity after sizing for %s (%s)", ticker, quantity)
+            self._log_gatekeeper_abort(
+                "Risk",
+                f"{ticker} | invalid quantity after sizing"
+            )
             self.cmd.log(f"⚠️ Invalid risk sizing for {ticker}; aborting trade")
             return
 
@@ -2869,6 +3147,10 @@ class VcaniTradeApp:
 
         if self.daily_pnl <= -self.max_daily_loss and not force_execute:
             logger.info("EXEC_CLOUD: blocked by max daily loss for %s", ticker)
+            self._log_gatekeeper_abort(
+                "Risk",
+                f"{ticker} | max daily loss reached (${self.daily_pnl:.2f} / -${self.max_daily_loss:.2f})"
+            )
             self.cmd.log(f"🛑 MAX DAILY LOSS REACHED (${self.daily_pnl:.2f} / -${self.max_daily_loss:.2f}) - Trading halted")
             self.ai_narrator.notify_error("Max daily loss reached")
             return
@@ -2884,6 +3166,10 @@ class VcaniTradeApp:
             can_trade, violations = self.prop_engine.check_before_trade(ticker, potential_loss)
             if not can_trade and not force_execute:
                 logger.info("EXEC_CLOUD: blocked by prop rules for %s: %s", ticker, violations)
+                self._log_gatekeeper_abort(
+                    "Risk",
+                    f"{ticker} | {'; '.join(violations) if violations else 'prop firm rule violation'}"
+                )
                 self.cmd.log(f'<span style="color:#F85149;font-weight:bold">🛑 PROP FIRM BLOCKED</span>: {ticker}')
                 for v in violations:
                     self.cmd.log(f'<span style="color:#F85149">   {v}</span>')
@@ -2896,9 +3182,13 @@ class VcaniTradeApp:
                 )
 
         # ── RPA Hand: move mouse and click on TradingView paper trading ──
-        mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action)
+        mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data)
         if not mtf_passed and not force_execute:
             logger.info("EXEC_CLOUD: blocked by MTF sniper gate for %s %s: %s", action, ticker, mtf_votes)
+            self._log_gatekeeper_abort(
+                "MTF",
+                f"{action} {ticker} | votes={mtf_votes}"
+            )
             self.cmd.log(
                 f'<span style="color:#D29922;font-weight:bold">🎯 SNIPER GATE BLOCKED</span>: '
                 f'{action} {ticker} rejected by 5m/3m/1m alignment {mtf_votes}'
@@ -2906,6 +3196,12 @@ class VcaniTradeApp:
             self.ai_narrator.add_activity("🎯", f"MTF gate blocked {action} {ticker}")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
+        elif mtf_votes.get("override") == "REVERSAL_BUY_1M_RSI_OVERSOLD":
+            self.cmd.log(
+                f'<span style="color:#3FB950;font-weight:bold">🔄 REVERSAL OVERRIDE</span>: '
+                f'BUY {ticker} allowed against SELL-biased MTF because 1m RSI is oversold ({mtf_votes.get("1m_rsi")})'
+            )
+            self.ai_narrator.add_activity("🔄", f"Reversal override armed for BUY {ticker}")
         elif not mtf_passed:
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
@@ -3115,9 +3411,10 @@ class VcaniTradeApp:
 
         # Execute via unified executor (includes Slippage Guard)
         try:
+            auto_execute = self.current_mode == "AUTONOMOUS" and not config.DRY_RUN
             result = await self.executor.execute_signal(
                 signal_data=signal_data,
-                auto_execute=not config.TEACHER_MODE,  # Auto-execute in autonomous mode
+                auto_execute=auto_execute,
                 force_execute=force_execute,  # Bypass guards if requested
             )
 
@@ -3134,6 +3431,8 @@ class VcaniTradeApp:
             else:
                 # Execution failed or skipped
                 color = "#F85149" if "ABORT" in result.status.value or "FAIL" in result.status.value else "#D29922"
+                category, reason = self._gatekeeper_abort_from_execution_result(result)
+                self._log_gatekeeper_abort(category, reason)
                 self._log_ui(
                     f'<span style="color:{color};font-weight:bold">⚠️ {result.status.value}</span>: '
                     f'{result.ticker} | {result.error_message}'
@@ -3380,7 +3679,12 @@ class VcaniTradeApp:
         self.cmd.log(f"Signal Listener: Port {config.LOCAL_LISTENER_PORT}")
         self.cmd.log(f"Data Scout: Port 5000")
         self.cmd.log(f"Monitoring: {len(config.CLOUD_TICKERS)} tickers")
-        self.cmd.log("Mode: TEACHER - RPA disarmed")
+        if config.DRY_RUN:
+            self.cmd.log("Mode: DRY RUN - orders simulated only")
+        elif self.current_mode == "AUTONOMOUS":
+            self.cmd.log("Mode: AUTONOMOUS - RPA armed")
+        else:
+            self.cmd.log("Mode: TEACHER - RPA disarmed")
 
         logger.info("Application running")
         sys.exit(self.app.exec())
@@ -3417,6 +3721,16 @@ def main():
     print("=" * 60)
 
     app = VcaniTradeApp()
+
+    # ── RPA Permission Gate ──────────────────────────────────────────────
+    # Fatal-check: if the Hand literally cannot move the mouse, crash now
+    # rather than silently failing every trade execution later.
+    try:
+        app.rpa_hand.assert_permissions_or_die()
+    except RuntimeError as perm_err:
+        print(f"\nFATAL: {perm_err}")
+        print("Relaunch with: Right-click → 'Run as administrator'")
+        sys.exit(1)
 
     def signal_handler(sig, frame):
         print("\nShutdown signal received...")

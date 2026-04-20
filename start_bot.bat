@@ -2,6 +2,9 @@
 REM VcaniTrade AI - Clean Launcher
 REM Kills old processes, starts Ollama, runs the bot
 
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+
 echo ============================================
 echo VcaniTrade AI - Starting...
 echo ============================================
@@ -23,7 +26,12 @@ echo Starting VcaniTrade AI...
 echo.
 
 REM Run the bot
-cd /d C:\Users\vijin\vcantrade.com-2
+cd /d "%SCRIPT_DIR%"
 python main.py
+set "EXIT_CODE=%ERRORLEVEL%"
+
+echo.
+echo VcaniTrade exited with code %EXIT_CODE%
 
 pause
+exit /b %EXIT_CODE%

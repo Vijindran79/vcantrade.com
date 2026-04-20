@@ -127,7 +127,8 @@ RSI_OVERBOUGHT = 70  # RSI > 70 = potential sell
 RSI_OVERSOLD = 30  # RSI < 30 = potential buy
 SMA_FAST = 20  # Fast SMA period
 SMA_SLOW = 50  # Slow SMA period
-SWARM_CONFIDENCE_THRESHOLD = 0.55  # Minimum confidence to trigger trade (0.0-1.0) - Nuclear mode for active trading
+SWARM_CONFIDENCE_THRESHOLD = 0.50  # Minimum confidence to trigger trade (0.0-1.0) for testing the live execution path
+MIN_CONFIDENCE_THRESHOLD = 50.0  # Minimum execution confidence score (0-100) before the RPA hand is allowed to click
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_ENABLED = True  # Enable local market scanning
@@ -141,6 +142,15 @@ SIGNAL_DISPATCH_METHOD = os.getenv(
     "SIGNAL_DISPATCH_METHOD", "http"
 )  # http or websocket
 LOCAL_EXECUTION_TIMEOUT = 30  # Max seconds to wait for local execution
+
+# ===== NEWS SCRAPER SAFETY =====
+NEWS_REQUEST_TIMEOUT = float(os.getenv("NEWS_REQUEST_TIMEOUT", "5.0"))
+NEWS_CONNECT_TIMEOUT = float(os.getenv("NEWS_CONNECT_TIMEOUT", "3.0"))
+NEWS_DNS_FALLBACK = tuple(
+    server.strip()
+    for server in os.getenv("NEWS_DNS_FALLBACK", "8.8.8.8,1.1.1.1").split(",")
+    if server.strip()
+)
 
 # ===== RPA EXECUTION =====
 USE_HOTKEYS = True  # Prefer keyboard hotkeys over mouse clicks
