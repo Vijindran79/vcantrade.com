@@ -48,6 +48,9 @@ TYPE_DELAY_MAX = 0.08
 # Bezier curve control point offset — adds natural arc to mouse path
 BEZIER_CONTROL_OFFSET = 80
 
+# Window focus settle delay — gives Windows time to foreground the browser
+WINDOW_SETTLE_DELAY = 1.5
+
 
 # ---------------------------------------------------------------------------
 # Bezier curve mouse movement
@@ -290,17 +293,43 @@ class RPAExecutor:
         "FOREX", "FUTURES", "CRYPTO", "BINANCE", "BYBIT", "COINBASE",
         "METATRADER", "MT4", "MT5", "OANDA", "EXNESS",
     ]
-    # Known browser process title fragments used as a last-resort match
-    _BROWSER_HINTS = ["CHROME", "EDGE", "FIREFOX", "BRAVE", "OPERA"]
+    _WINDOW_TITLE_BLACKLIST = [
+        "POWERSHELL",
+        "PWSH",
+        "COMMAND PROMPT",
+        "CMD.EXE",
+        "TERMINAL",
+        "VISUAL STUDIO CODE",
+    ]
+    _PREFERRED_BROWSER_HINTS = ["GOOGLE CHROME", "MICROSOFT EDGE", "BRAVE"]
+    # Allowed browser titles when TradingView itself is not present
+    _BROWSER_HINTS = ["GOOGLE CHROME", "MICROSOFT EDGE", "BRAVE"]
+
+    def _is_blacklisted_window_title(self, title: str) -> bool:
+        """Return True when a title belongs to a terminal/editor window we must ignore."""
+        title_u = (title or "").strip().upper()
+        return bool(title_u) and any(fragment in title_u for fragment in self._WINDOW_TITLE_BLACKLIST)
+
+    def _is_browser_window_title(self, title: str) -> bool:
+        """Return True when the title appears to belong to a supported browser."""
+        title_u = (title or "").strip().upper()
+        return any(fragment in title_u for fragment in self._BROWSER_HINTS)
+
+    def _is_preferred_browser_title(self, title: str) -> bool:
+        """Return True for the preferred browser engines when TradingView is absent."""
+        title_u = (title or "").strip().upper()
+        return any(fragment in title_u for fragment in self._PREFERRED_BROWSER_HINTS)
 
     def _get_browser_window(self, ticker_hint: Optional[str] = None):
         """Find chart window with aggressive fuzzy matching.
 
         Search priority:
           1. Window title contains 'TradingView'
-          2. Window title contains the ticker symbol
-          3. Window title contains ANY trading keyword (BTC, Chart, Trade …)
-          4. Any visible browser window (Chrome, Edge, Brave …)
+          2. Allowed browser window with the ticker symbol
+          3. Allowed browser window with a trading keyword
+          4. Any allowed browser window (Chrome/Edge/Brave)
+
+        If none of the allowed browser targets are present, abort by returning None.
         """
         if not self._gw:
             return None
@@ -308,23 +337,31 @@ class RPAExecutor:
         ticker_hint = (ticker_hint or "").replace("=F", "").split("-")[0].strip().upper()
 
         tier1 = []  # TradingView exact
-        tier2 = []  # Ticker match
-        tier3 = []  # Fuzzy keyword
-        tier4 = []  # Any browser
+        tier2 = []  # Allowed browser + ticker
+        tier3 = []  # Allowed browser + fuzzy keyword
+        tier4 = []  # Any allowed browser
 
         for w in self._gw.getAllWindows():
             title = (w.title or "").strip()
             if not title:
                 continue
             title_u = title.upper()
+            if self._is_blacklisted_window_title(title_u):
+                logger.debug("Skipping blacklisted window title: '%s'", title)
+                continue
+
+            is_preferred_browser = self._is_preferred_browser_title(title_u)
+            is_browser = self._is_browser_window_title(title_u)
+            has_ticker = bool(ticker_hint and ticker_hint in title_u)
+            has_fuzzy_keyword = any(kw in title_u for kw in self._FUZZY_KEYWORDS)
 
             if "TRADINGVIEW" in title_u:
                 tier1.append(w)
-            elif ticker_hint and ticker_hint in title_u:
+            elif is_browser and has_ticker:
                 tier2.append(w)
-            elif any(kw in title_u for kw in self._FUZZY_KEYWORDS):
+            elif is_browser and has_fuzzy_keyword:
                 tier3.append(w)
-            elif any(br in title_u for br in self._BROWSER_HINTS):
+            elif is_browser:
                 tier4.append(w)
 
         # Pick first non-minimized window from the highest-priority tier
@@ -356,14 +393,19 @@ class RPAExecutor:
     def _title_matches_target(self, title: str, ticker_hint: Optional[str] = None) -> bool:
         title_u = (title or "").upper()
         ticker_hint_u = (ticker_hint or "").replace("=F", "").split("-")[0].strip().upper()
+        if self._is_blacklisted_window_title(title_u):
+            return False
         if "TRADINGVIEW" in title_u:
             return True
-        if ticker_hint_u and ticker_hint_u in title_u:
+        is_browser = self._is_browser_window_title(title_u)
+        if ticker_hint_u and ticker_hint_u in title_u and is_browser:
             return True
-        # Fuzzy: accept any trading-related or browser window
-        if any(kw in title_u for kw in self._FUZZY_KEYWORDS):
+        # Fuzzy: accept trading-related titles only when they are inside a browser window
+        if is_browser and any(kw in title_u for kw in self._FUZZY_KEYWORDS):
             return True
-        if any(br in title_u for br in self._BROWSER_HINTS):
+        if self._is_preferred_browser_title(title_u):
+            return True
+        if is_browser:
             return True
         return False
 
@@ -436,6 +478,11 @@ class RPAExecutor:
           Stage 2: Alt-Tab cycling to bring window forward
           Stage 3: Win32 SetForegroundWindow via ctypes
         """
+        candidate_title = getattr(win, "title", "") or ""
+        if self._is_blacklisted_window_title(candidate_title):
+            self._fire_blind_error(f"blocked blacklisted focus target '{candidate_title}'")
+            return False
+
         # ── Stage 1: standard pygetwindow focus ──────────────────────────
         try:
             if win.isMinimized:
@@ -443,14 +490,14 @@ class RPAExecutor:
                 time.sleep(0.15)
             try:
                 win.maximize()
+                time.sleep(WINDOW_SETTLE_DELAY)
             except Exception:
                 pass
-            time.sleep(0.10)
             try:
                 win.activate()
+                time.sleep(WINDOW_SETTLE_DELAY)
             except Exception:
                 pass
-            time.sleep(0.15)
             try:
                 win.moveTo(config.TRADINGVIEW_WINDOW_X, config.TRADINGVIEW_WINDOW_Y)
             except Exception:
@@ -468,6 +515,7 @@ class RPAExecutor:
         time.sleep(0.15)
         try:
             win.activate()
+            time.sleep(WINDOW_SETTLE_DELAY)
         except Exception:
             pass
         if not self._cycle_tabs_until_match(ticker_hint=ticker_hint, attempts=10):
