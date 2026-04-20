@@ -7,6 +7,7 @@ Loads automatically on startup so user doesn't have to re-enter every time.
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any
 
@@ -49,16 +50,28 @@ class SettingsManager:
     FUTURES_ALIASES = {
         "ES1": "ES=F",
         "ES": "ES=F",
+        "MES1": "ES=F",
+        "MES": "ES=F",
         "NQ1": "NQ=F",
         "NQ": "NQ=F",
+        "MNQ1": "NQ=F",
+        "MNQ": "NQ=F",
         "GC1": "GC=F",
         "GC": "GC=F",
+        "MGC1": "GC=F",
+        "MGC": "GC=F",
         "CL1": "CL=F",
         "CL": "CL=F",
+        "MCL1": "CL=F",
+        "MCL": "CL=F",
         "YM1": "YM=F",
         "YM": "YM=F",
+        "MYM1": "YM=F",
+        "MYM": "YM=F",
         "RTY1": "RTY=F",
         "RTY": "RTY=F",
+        "M2K1": "RTY=F",
+        "M2K": "RTY=F",
         "SI1": "SI=F",
         "SI": "SI=F",
         "HG1": "HG=F",
@@ -72,6 +85,12 @@ class SettingsManager:
 
     def normalize_ticker(self, ticker: str) -> str:
         normalized = str(ticker or "").strip().upper()
+        if not normalized:
+            return ""
+        # Reject accidental numeric values such as stop-loss / take-profit prices
+        # before they can poison the persisted watchlist.
+        if not re.search(r"[A-Z]", normalized):
+            return ""
         return self.FUTURES_ALIASES.get(normalized, normalized)
 
     def normalize_watchlist(self, watchlist) -> list[str]:
@@ -99,7 +118,11 @@ class SettingsManager:
                 
                 # Merge with defaults (in case new settings were added)
                 self.settings.update(saved_settings)
+                normalized_snapshot = dict(self.settings)
                 self._normalize_settings()
+                if self.settings != normalized_snapshot:
+                    self.save()
+                    logger.info("🧹 Settings normalized and re-saved to remove invalid watchlist entries")
                 logger.info(f"✅ Settings loaded from {self.SETTINGS_FILE}")
             except Exception as e:
                 logger.error(f"Failed to load settings: {e}")

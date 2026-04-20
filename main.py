@@ -566,9 +566,9 @@ class VcaniTradeApp:
         saved_watchlist = self.settings.get("session_watchlist", [])
         if not isinstance(saved_watchlist, list):
             saved_watchlist = []
-        self.current_watchlist = [str(ticker).strip().upper() for ticker in saved_watchlist if str(ticker).strip()]
+        self.current_watchlist = self.settings.normalize_watchlist(saved_watchlist)
         if not self.current_watchlist:
-            self.current_watchlist = [ticker for ticker in config.CLOUD_TICKERS if str(ticker).strip()]
+            self.current_watchlist = self.settings.normalize_watchlist(config.CLOUD_TICKERS)
         self.force_action_armed = False
         
         # STAGE 2: AI Strategist & Dynamic Architect
@@ -746,17 +746,7 @@ class VcaniTradeApp:
         self._gatekeeper_summary_hour = current_hour
 
     def _canonical_market_ticker(self, ticker: str) -> str:
-        normalized = str(ticker or "").strip().upper()
-        alias_map = {
-            "NQ": "NQ=F",
-            "ES": "ES=F",
-            "YM": "YM=F",
-            "RTY": "RTY=F",
-            "CL": "CL=F",
-            "GC": "GC=F",
-            "SI": "SI=F",
-        }
-        return alias_map.get(normalized, normalized)
+        return self.settings.normalize_ticker(ticker)
 
     def _run_pretrade_market_audit(self, ticker: str, entry_price: float, force_execute: bool = False) -> bool:
         if force_execute:
@@ -1074,7 +1064,7 @@ class VcaniTradeApp:
 
     def _on_watchlist_updated(self, watchlist: list):
         """Handle watchlist update from dashboard."""
-        self.current_watchlist = [ticker for ticker in watchlist if str(ticker).strip()]
+        self.current_watchlist = self.settings.normalize_watchlist(watchlist)
         config.CLOUD_TICKERS = list(self.current_watchlist)
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
         self.cloud_scanner.scanner.priority_scan_list = []

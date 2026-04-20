@@ -25,6 +25,7 @@ import requests
 import config
 from core.brain import GeminiBrain
 from core.code_architect import CodeArchitect
+from core.settings import settings_manager
 from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
 from core.swarm_consensus import OllamaSwarmConsensus as SwarmConsensus
 from core.market_sessions import MarketSessionDetector
@@ -91,17 +92,7 @@ class CloudScanner:
 
     def _canonical_market_ticker(self, ticker: str) -> str:
         """Map common watchlist aliases to yfinance-compatible symbols."""
-        normalized = str(ticker or "").strip().upper()
-        alias_map = {
-            "NQ": "NQ=F",
-            "ES": "ES=F",
-            "YM": "YM=F",
-            "RTY": "RTY=F",
-            "CL": "CL=F",
-            "GC": "GC=F",
-            "SI": "SI=F",
-        }
-        return alias_map.get(normalized, normalized)
+        return settings_manager.normalize_ticker(ticker)
 
     def get_scan_interval(self) -> float:
         """Scale scan cadence based on active watchlist size."""
