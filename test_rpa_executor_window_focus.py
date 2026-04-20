@@ -79,10 +79,13 @@ class _FakeGW:
 
 
 class TestRPAWindowFocusGuards(unittest.TestCase):
+    MIN_ACTIVATION_ATTEMPTS = 2
+
     def setUp(self):
         self.executor = rpa_executor.RPAExecutor()
 
     def test_title_matches_rejects_blacklisted_titles(self):
+        self.assertTrue(self.executor._title_matches_target("TradingView - Google Chrome"))
         self.assertFalse(self.executor._title_matches_target("TradingView - pwsh"))
         self.assertFalse(self.executor._title_matches_target("Visual Studio Code - Terminal"))
 
@@ -124,7 +127,7 @@ class TestRPAWindowFocusGuards(unittest.TestCase):
             self.executor._force_focus_tradingview(win)
 
         activate_indices = [i for i, event in enumerate(sequence) if event[0] == "activate"]
-        self.assertGreaterEqual(len(activate_indices), 2)
+        self.assertGreaterEqual(len(activate_indices), self.MIN_ACTIVATION_ATTEMPTS)
         for idx in activate_indices:
             self.assertLess(idx + 1, len(sequence))
             self.assertEqual(sequence[idx + 1], ("sleep", 1.5))
