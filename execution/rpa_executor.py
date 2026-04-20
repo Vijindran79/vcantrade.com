@@ -480,7 +480,7 @@ class RPAExecutor:
         """
         candidate_title = getattr(win, "title", "") or ""
         if self._is_blacklisted_window_title(candidate_title):
-            self._fire_blind_error(f"blocked blacklisted focus target '{candidate_title}'")
+            logger.warning("Rejected blacklisted focus target: '%s'", candidate_title)
             return False
 
         # ── Stage 1: standard pygetwindow focus ──────────────────────────
