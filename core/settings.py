@@ -33,9 +33,10 @@ class SettingsManager:
         # Lots/Units mode
         "lot_size": 2.0,  # 2 lots/units per trade
         
-        # Risk settings
-        "take_profit_pct": 2.0,  # 2% take profit
-        "stop_loss_pct": 1.0,  # 1% stop loss
+        # Legacy fixed-target settings (kept for backwards compatibility only).
+        # Autonomous risk mode ignores these values at runtime.
+        "take_profit_pct": 0.0,
+        "stop_loss_pct": 0.0,
         "max_daily_loss": 500.0,  # $500 max loss per day
         
         # Trading mode

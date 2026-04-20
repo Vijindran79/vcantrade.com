@@ -661,8 +661,6 @@ class VcaniTradeApp:
 
         # Trading settings
         self.default_investment = 10.0
-        self.take_profit_pct = 2.0
-        self.stop_loss_pct = 1.0
         self.max_daily_loss = 500.0
         self.trade_ledger = []  # List of executed trades
 
@@ -1121,16 +1119,14 @@ class VcaniTradeApp:
 
         # Update local variables
         self.default_investment = settings.get("investment", 1000.0)
-        self.take_profit_pct = settings.get("take_profit_pct", 2.0)
-        self.stop_loss_pct = settings.get("stop_loss_pct", 1.0)
         self.max_daily_loss = settings.get("max_daily_loss", 500.0)
 
         mode = self.settings.get("investment_mode", "dollar")
         if mode == "lots":
             lot_size = self.settings.get("lot_size", 2.0)
-            self.cmd.log(f"⚙️ Settings updated: {lot_size} lots/trade, TP={self.take_profit_pct}%, SL={self.stop_loss_pct}%")
+            self.cmd.log(f"⚙️ Settings updated: {lot_size} lots/trade, autonomous stop management active")
         else:
-            self.cmd.log(f"⚙️ Settings updated: ${self.default_investment}/trade, TP={self.take_profit_pct}%, SL={self.stop_loss_pct}%")
+            self.cmd.log(f"⚙️ Settings updated: ${self.default_investment}/trade, autonomous stop management active")
 
         # Notify AI Narrator
         self.ai_narrator.add_activity(
@@ -2292,6 +2288,103 @@ class VcaniTradeApp:
             daily_success_rate=rate,
         )
 
+    def _derive_structure_stop_loss(
+        self,
+        action: str,
+        entry_price: float,
+        signal_data: dict,
+        risk_eval: dict,
+    ) -> float:
+        """Prefer the scanner's liquidity boundary over any fixed-percentage fallback."""
+        if entry_price <= 0:
+            return 0.0
+
+        liquidity_zone = signal_data.get("liquidity_zone") or {}
+        zone_low = float(liquidity_zone.get("low", 0.0) or 0.0)
+        zone_high = float(liquidity_zone.get("high", 0.0) or 0.0)
+        zone_level = float(liquidity_zone.get("level", 0.0) or 0.0)
+        side = str(action or "").upper()
+
+        if side == "BUY":
+            for candidate in (zone_low, zone_level):
+                if 0 < candidate < entry_price:
+                    return candidate
+        elif side == "SELL":
+            for candidate in (zone_high, zone_level):
+                if candidate > entry_price:
+                    return candidate
+
+        return float(risk_eval.get("stop_loss") or 0.0)
+
+    def _pick_more_protective_stop(self, position: dict, updates: list[dict]) -> Optional[dict]:
+        """Choose the stop update that protects more profit for the current side."""
+        if not updates:
+            return None
+        side = str(position.get("side", "") or "").upper()
+        if side == "SELL":
+            return min(updates, key=lambda item: float(item.get("new_stop", 0.0) or 0.0))
+        return max(updates, key=lambda item: float(item.get("new_stop", 0.0) or 0.0))
+
+    def _apply_managed_stop_update(self, position: dict, stop_update: dict) -> bool:
+        """Push an autonomous stop adjustment into TradingView and local state."""
+        new_stop = float(stop_update.get("new_stop", 0.0) or 0.0)
+        reason = str(stop_update.get("reason", "Managed stop update") or "Managed stop update")
+        if new_stop <= 0:
+            return False
+
+        if not self.rpa_hand.update_stop_loss(new_stop, ticker_hint=position["asset"]):
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">⚠️ STOP UPDATE FAILED</span>: '
+                f'{position["asset"]} {reason} -> ${new_stop:.4f}'
+            )
+            return False
+
+        position["sl_price"] = new_stop
+        if stop_update.get("break_even_locked"):
+            position["break_even_locked"] = True
+        position["last_stop_update_reason"] = reason
+        position["last_stop_update_ts"] = time.time()
+        self.profit_lock.update_position_stop(
+            asset=position["asset"],
+            new_stop=new_stop,
+            reason=reason,
+            stop_locked=bool(stop_update.get("stop_locked")),
+            break_even_locked=bool(stop_update.get("break_even_locked")),
+        )
+        self.cmd.log(
+            f'<span style="color:#58A6FF;font-weight:bold">🛡️ STOP UPDATED</span>: '
+            f'{position["asset"]} {reason} -> ${new_stop:.4f}'
+        )
+        return True
+
+    def _manage_position_stop(self, position: dict, hist) -> None:
+        """Run break-even shield and 3-bar trailing logic for one open position."""
+        current_price = float(position.get("current", 0.0) or 0.0)
+        if current_price <= 0:
+            return
+
+        stop_updates = []
+        break_even_update = self.profit_lock.check_break_even(position, current_price)
+        if break_even_update:
+            stop_updates.append(break_even_update)
+
+        now_ts = time.time()
+        last_trailing_check_ts = float(position.get("last_trailing_check_ts", 0.0) or 0.0)
+        if now_ts - last_trailing_check_ts >= config.AUTONOMOUS_TRAILING_UPDATE_SECONDS:
+            position["last_trailing_check_ts"] = now_ts
+            trail_update = self.profit_lock.calculate_three_bar_trailing_stop(
+                position=position,
+                recent_candles=hist,
+                current_price=current_price,
+                lookback_bars=config.AUTONOMOUS_TRAILING_LOOKBACK_BARS,
+            )
+            if trail_update:
+                stop_updates.append(trail_update)
+
+        chosen_update = self._pick_more_protective_stop(position, stop_updates)
+        if chosen_update:
+            self._apply_managed_stop_update(position, chosen_update)
+
     def _update_positions(self):
         """Update live positions with current prices and check TP/SL."""
         import yfinance as yf
@@ -2302,7 +2395,8 @@ class VcaniTradeApp:
             try:
                 # Get current price with timeout protection
                 try:
-                    ticker = yf.Ticker(pos["asset"])
+                    market_ticker = self._canonical_market_ticker(pos["asset"])
+                    ticker = yf.Ticker(market_ticker)
                     
                     # Run yfinance in thread with timeout
                     def fetch_price():
@@ -2341,6 +2435,7 @@ class VcaniTradeApp:
 
                 pos["pnl"] = pnl_usd
                 pos["pnl_pct"] = pnl_pct
+                self._manage_position_stop(pos, hist)
 
                 # Check Take Profit (skip if tp_price is 0/unset)
                 if pos.get("tp_price", 0) > 0:
@@ -2373,6 +2468,7 @@ class VcaniTradeApp:
         self.positions = updated_positions
         self.cmd.update_positions(self.positions)
         live_positions_pnl = sum(p.get("pnl", 0.0) for p in self.positions)
+        self.profit_lock.update_balance(self.balance + live_positions_pnl)
         self.ai_narrator.update_live_pnl(self.total_pnl + live_positions_pnl, len(self.positions))
         self._refresh_live_ledger()
         
@@ -2710,6 +2806,7 @@ class VcaniTradeApp:
             outcome = f"{reason} | PnL={pnl:.2f}"
             self.sql_journal.update_outcome(journal_id, outcome)
             self.sql_journal.update_trade_vibe_outcome(journal_id, outcome, pnl=pnl)
+        self.profit_lock.remove_position(position["asset"])
         if pnl > 0:
             self.daily_wins += 1
         self.ai_narrator.update_live_pnl(self.total_pnl, len(self.positions))
@@ -3069,39 +3166,43 @@ class VcaniTradeApp:
         # ── PositionSizer Risk Gate ───────────────────────────────────────
         sizer = PositionSizer(balance=self.balance, risk_pct=1.0)
         risk_eval = sizer.evaluate(entry_price=entry_price, side=action, levels=levels)
+        sl_price = self._derive_structure_stop_loss(action, entry_price, signal_data, risk_eval)
+        stop_distance_pct = (
+            (abs(entry_price - sl_price) / entry_price) * 100.0
+            if entry_price > 0 and sl_price > 0
+            else 0.0
+        )
+        actual_risk_reason = (
+            f"Structure stop @ ${sl_price:.4f} ({stop_distance_pct:.2f}% distance)"
+            if sl_price > 0
+            else "No valid liquidity-structure stop available"
+        )
 
-        if (not risk_eval["ok"] or risk_eval["risk_score"] != "Low") and not force_execute:
-            logger.info("EXEC_CLOUD: rejected by risk gate for %s - %s", ticker, risk_eval.get("reason", "n/a"))
+        if (sl_price <= 0 or stop_distance_pct > PositionSizer.MAX_STOP_DISTANCE_PCT) and not force_execute:
+            logger.info("EXEC_CLOUD: rejected by risk gate for %s - %s", ticker, actual_risk_reason)
             self._log_gatekeeper_abort(
                 "Risk",
-                f"{ticker} | {risk_eval.get('reason', 'risk criteria not met')}"
+                f"{ticker} | {actual_risk_reason}"
             )
             self.analysis_mode_status = "REJECTED - Too Risky"
             self.cmd.update_copilot_status("TRADE SKIPPED: Criteria not met")
             self.ai_narrator.set_status("error", "TRADE SKIPPED: Criteria not met")
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">🛑 TRADE SKIPPED: Criteria not met</span> '
-                f'- RiskScore=High | {risk_eval["reason"]}'
+                f'- RiskScore=High | {actual_risk_reason}'
             )
-            self.ai_narrator.add_activity("🛑", f"TRADE SKIPPED - {risk_eval['reason'][:80]}")
+            self.ai_narrator.add_activity("🛑", f"TRADE SKIPPED - {actual_risk_reason[:80]}")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
-        elif not risk_eval["ok"] or risk_eval["risk_score"] != "Low":
+        elif sl_price <= 0 or stop_distance_pct > PositionSizer.MAX_STOP_DISTANCE_PCT:
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">🧠 OPENROUTER OVERRIDE</span>: '
-                f'bypassing risk gate for {action} {ticker} | {risk_eval.get("reason", "risk sizing fallback")}'
+                f'bypassing risk gate for {action} {ticker} | {actual_risk_reason}'
             )
 
-        sl_price = float(
-            risk_eval.get("stop_loss")
-            or (
-                entry_price * (1 - self.stop_loss_pct / 100)
-                if action == "BUY"
-                else entry_price * (1 + self.stop_loss_pct / 100)
-            )
-        )
-        quantity = float(risk_eval.get("quantity") or 0.0)
-        risk_dollar = float(risk_eval.get("risk_amount") or 0.0)
+        per_unit_risk = abs(entry_price - sl_price)
+        risk_dollar = max(float(risk_eval.get("risk_amount") or 0.0), self.balance * 0.01)
+        quantity = (risk_dollar / per_unit_risk) if per_unit_risk > 0 else 0.0
 
         if quantity <= 0 and force_execute:
             fallback_amount = float(signal_data.get("investment_amount", self.default_investment) or self.default_investment or 1000.0)
@@ -3198,11 +3299,7 @@ class VcaniTradeApp:
                 f'bypassing MTF gate for {action} {ticker} {mtf_votes}'
             )
 
-        tp_price = (
-            entry_price * (1 + self.take_profit_pct / 100)
-            if action == "BUY"
-            else entry_price * (1 - self.take_profit_pct / 100)
-        )
+        tp_price = 0.0
         signal_data["stop_loss"] = sl_price
         signal_data["take_profit"] = tp_price
         signal_data["liquidity_label"] = self._format_liquidity_label(signal_data)
@@ -3213,7 +3310,7 @@ class VcaniTradeApp:
             action=SignalAction.BUY if action == "BUY" else SignalAction.SELL,
             entry_price=entry_price,
             stop_loss=sl_price,
-            take_profit=tp_price,
+            take_profit=None,
             confidence=ConfidenceLevel.HIGH if confidence_score >= 80 else ConfidenceLevel.MEDIUM,
             ai_reason=signal_data.get("reason", ""),
             mode="AUTONOMOUS",
@@ -3323,14 +3420,25 @@ class VcaniTradeApp:
             "quantity": quantity,
             "tp_price": tp_price,
             "sl_price": sl_price,
+            "initial_risk_amount": abs(entry_price - sl_price) * quantity,
+            "break_even_locked": False,
+            "last_trailing_check_ts": 0.0,
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "order_id": f"rpa_{ticker}_{int(datetime.now().timestamp())}",
             "journal_id": journal_id,
+            "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
         }
 
+        self.profit_lock.add_position(
+            asset=ticker,
+            entry_price=entry_price,
+            stop_loss=sl_price,
+            take_profit=None,
+            position_size=quantity,
+        )
         self.positions.append(position)
         self.trades_today += 1
 
@@ -3340,7 +3448,7 @@ class VcaniTradeApp:
         self.cmd.log(
             f'<span style="color:#3FB950;font-weight:bold">✅ POSITION OPENED</span>: '
             f'{action} {ticker} @ ${entry_price:.2f} | Amount: ${amount:.2f} | '
-            f'Qty: {quantity:.4f} | TP: ${tp_price:.2f} | SL: ${sl_price:.2f}'
+            f'Qty: {quantity:.4f} | Managed SL: ${sl_price:.2f}'
         )
         self.cmd.log(
             f'<span style="color:#8B949E">🧾 JOURNAL</span>: SAVING TO DB... '

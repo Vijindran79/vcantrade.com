@@ -12,9 +12,11 @@ Features:
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 import json
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -190,10 +192,11 @@ class ProfitLock:
         asset: str,
         entry_price: float,
         stop_loss: float,
-        take_profit: float,
+        take_profit: Optional[float],
         position_size: float,
     ):
         """Add a position to tracking."""
+        initial_risk_amount = abs(entry_price - stop_loss) * max(position_size, 0.0)
         self.open_positions.append({
             "asset": asset,
             "entry_price": entry_price,
@@ -201,7 +204,9 @@ class ProfitLock:
             "current_stop": stop_loss,
             "take_profit": take_profit,
             "position_size": position_size,
+            "initial_risk_amount": initial_risk_amount,
             "stop_locked": False,
+            "break_even_locked": False,
             "timestamp": datetime.now().isoformat()
         })
         
@@ -209,6 +214,121 @@ class ProfitLock:
             f"📊 Position added to Profit Lock: "
             f"{asset} @ ${entry_price:.2f}, SL=${stop_loss:.2f}"
         )
+
+    def remove_position(self, asset: str):
+        """Remove a position from tracking after it closes."""
+        self.open_positions = [pos for pos in self.open_positions if pos.get("asset") != asset]
+
+    def update_position_stop(
+        self,
+        asset: str,
+        new_stop: float,
+        reason: str = "",
+        stop_locked: bool = False,
+        break_even_locked: bool = False,
+    ) -> bool:
+        """Persist the latest managed stop for a tracked position."""
+        for pos in self.open_positions:
+            if pos.get("asset") != asset:
+                continue
+            pos["current_stop"] = new_stop
+            pos["stop_locked"] = pos.get("stop_locked", False) or stop_locked
+            pos["break_even_locked"] = pos.get("break_even_locked", False) or break_even_locked
+            if reason:
+                pos["last_update_reason"] = reason
+                pos["last_update_time"] = datetime.now().isoformat()
+            if stop_locked or break_even_locked:
+                self.stops_adjusted = True
+            return True
+        return False
+
+    def _current_profit_amount(self, position: Dict, current_price: float) -> float:
+        """Return open profit in account currency for the given position."""
+        entry_price = float(position.get("entry", position.get("entry_price", 0.0)) or 0.0)
+        quantity = float(position.get("quantity", position.get("position_size", 0.0)) or 0.0)
+        side = str(position.get("side", "") or "").upper()
+        if entry_price <= 0 or quantity <= 0 or current_price <= 0:
+            return 0.0
+        if side == "SELL":
+            return (entry_price - current_price) * quantity
+        return (current_price - entry_price) * quantity
+
+    def check_break_even(self, position: Dict, current_price: float) -> Optional[Dict]:
+        """Raise the stop to entry plus a 0.5% buffer once 1R is achieved."""
+        entry_price = float(position.get("entry", position.get("entry_price", 0.0)) or 0.0)
+        current_stop = float(position.get("sl_price", position.get("current_stop", 0.0)) or 0.0)
+        side = str(position.get("side", "") or "").upper()
+        initial_risk_amount = float(position.get("initial_risk_amount", 0.0) or 0.0)
+        break_even_locked = bool(position.get("break_even_locked"))
+
+        if break_even_locked or entry_price <= 0 or initial_risk_amount <= 0 or side not in {"BUY", "SELL"}:
+            return None
+
+        current_profit = self._current_profit_amount(position, current_price)
+        if current_profit < initial_risk_amount:
+            return None
+
+        buffer_pct = max(0.0, float(config.AUTONOMOUS_BREAK_EVEN_BUFFER_PCT))
+        if side == "SELL":
+            new_stop = entry_price * (1.0 - (buffer_pct / 100.0))
+            if current_stop > 0 and new_stop >= current_stop:
+                return None
+        else:
+            new_stop = entry_price * (1.0 + (buffer_pct / 100.0))
+            if current_stop > 0 and new_stop <= current_stop:
+                return None
+
+        return {
+            "new_stop": float(new_stop),
+            "reason": "Shield break-even lock",
+            "break_even_locked": True,
+            "stop_locked": True,
+        }
+
+    def calculate_three_bar_trailing_stop(
+        self,
+        position: Dict,
+        recent_candles: Any,
+        current_price: float,
+        lookback_bars: int = 3,
+    ) -> Optional[Dict]:
+        """Return a tighter stop based on the last N candles once the trade is in profit."""
+        if recent_candles is None or lookback_bars <= 0:
+            return None
+
+        side = str(position.get("side", "") or "").upper()
+        current_stop = float(position.get("sl_price", position.get("current_stop", 0.0)) or 0.0)
+        current_profit = self._current_profit_amount(position, current_price)
+        if current_profit <= 0 or side not in {"BUY", "SELL"}:
+            return None
+
+        tail = recent_candles.tail(max(lookback_bars, 1))
+        if tail.empty:
+            return None
+
+        if side == "SELL":
+            if "High" not in tail or tail["High"].dropna().empty:
+                return None
+            new_stop = float(tail["High"].dropna().max())
+            if new_stop <= 0 or new_stop <= current_price:
+                return None
+            if current_stop > 0 and new_stop >= current_stop:
+                return None
+        else:
+            if "Low" not in tail or tail["Low"].dropna().empty:
+                return None
+            new_stop = float(tail["Low"].dropna().min())
+            if new_stop <= 0 or new_stop >= current_price:
+                return None
+            if current_stop > 0 and new_stop <= current_stop:
+                return None
+
+        return {
+            "new_stop": new_stop,
+            "reason": f"{lookback_bars}-bar vacuum trail",
+            "break_even_locked": False,
+            "stop_locked": True,
+        }
 
     def check_profit_locks(self) -> Dict:
         """

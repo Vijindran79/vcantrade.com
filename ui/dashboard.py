@@ -597,6 +597,8 @@ class CommandCenter(QWidget):
         self.tp_input.setRange(0.1, 50.0)
         self.tp_input.setValue(2.0)
         self.tp_input.setSuffix("%")
+        self.tp_input.setEnabled(False)
+        self.tp_input.setToolTip("Autonomous mode manages exits automatically.")
         self.tp_input.setStyleSheet(f"""
             QDoubleSpinBox {{ background: {BG_INPUT}; color: {GREEN}; border: 1px solid {BORDER};
                            border-radius: 6px; padding: 6px; font-size: 13px; font-weight: bold;
@@ -615,6 +617,8 @@ class CommandCenter(QWidget):
         self.sl_input.setRange(0.1, 20.0)
         self.sl_input.setValue(1.0)
         self.sl_input.setSuffix("%")
+        self.sl_input.setEnabled(False)
+        self.sl_input.setToolTip("Autonomous mode manages structure-based stops automatically.")
         self.sl_input.setStyleSheet(f"""
             QDoubleSpinBox {{ background: {BG_INPUT}; color: {RED}; border: 1px solid {BORDER};
                            border-radius: 6px; padding: 6px; font-size: 13px; font-weight: bold;
@@ -1881,12 +1885,10 @@ class CommandCenter(QWidget):
     def _save_settings(self):
         settings = {
             "investment": float(self.investment_input.text() or 10),
-            "take_profit_pct": self.tp_input.value(),
-            "stop_loss_pct": self.sl_input.value(),
             "max_daily_loss": self.max_loss_input.value(),
         }
         self.settings_changed.emit(settings)
-        self.log(f"💾 Settings saved: ${settings['investment']}/trade, TP={settings['take_profit_pct']}%, SL={settings['stop_loss_pct']}%")
+        self.log(f"💾 Settings saved: ${settings['investment']}/trade, autonomous stop management active")
 
     def _on_kill_switch(self):
         self._killed = True

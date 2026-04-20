@@ -951,6 +951,42 @@ class RPAExecutor:
         _jitter()
         return True
 
+    def _format_price_input(self, price: float) -> str:
+        """Format a price for TradingView input fields without trailing zero noise."""
+        return f"{float(price):.4f}".rstrip("0").rstrip(".")
+
+    def update_stop_loss(self, stop_loss: float, ticker_hint: Optional[str] = None) -> bool:
+        """Edit the visible TradingView stop-loss field for an open position."""
+        if not self.pyautogui:
+            logger.error("Mouse execution not available")
+            return False
+        if stop_loss <= 0:
+            logger.error("Invalid stop loss update requested: %s", stop_loss)
+            return False
+        if not self._verify_window_visible(ticker_hint=ticker_hint):
+            return False
+
+        sl_x, sl_y = self._get_abs_coord("sl_input", ticker_hint=ticker_hint)
+        if (sl_x, sl_y) == (0, 0):
+            logger.error("No calibration for 'sl_input' — cannot update stop loss")
+            return False
+
+        try:
+            if not self._click_cursor_logged(sl_x, sl_y, ticker_hint=ticker_hint):
+                return False
+            time.sleep(random.uniform(0.15, 0.35))
+            self.pyautogui.hotkey("ctrl", "a")
+            time.sleep(random.uniform(0.05, 0.15))
+            _human_type(self.pyautogui, self._format_price_input(stop_loss))
+            time.sleep(random.uniform(0.05, 0.15))
+            self.pyautogui.press("enter")
+            logger.info("Updated Stop Loss to %s for %s", stop_loss, ticker_hint or "current chart")
+            _jitter()
+            return True
+        except Exception as e:
+            logger.error("Failed to update Stop Loss for %s: %s", ticker_hint or "current chart", e)
+            return False
+
     def force_strike_test(self, action: str = "BUY", ticker_hint: Optional[str] = None) -> bool:
         """Immediate calibrated left-click for live RPA strike diagnostics."""
         action_upper = str(action or "BUY").upper()

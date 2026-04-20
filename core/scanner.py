@@ -262,9 +262,13 @@ class CloudScanner:
                     continue
                 zone_level = round((level + level_2) / 2.0, 4)
                 distance = abs(zone_level - current_price)
+                zone_width = max(abs(zone_level) * 0.0015, tolerance, 0.5)
                 zone = {
                     "type": zone_type,
                     "level": zone_level,
+                    "low": round(zone_level - zone_width, 4),
+                    "high": round(zone_level + zone_width, 4),
+                    "zone_width": float(zone_width),
                     "start_index": min(index, index_2),
                     "end_index": max(index, index_2),
                     "current_price": float(current_price),
@@ -291,6 +295,32 @@ class CloudScanner:
         zone_type = str(liquidity_zone.get("type", "zone")).strip() or "zone"
         level = float(liquidity_zone.get("level", 0.0) or 0.0)
         return f"{zone_type} @ {level:.4f}"
+
+    def _liquidity_zone_stop_boundary(
+        self,
+        action: str,
+        entry_price: float,
+        liquidity_zone: Optional[dict],
+    ) -> float:
+        """Derive a structure-based stop from the detected liquidity boundary."""
+        if not liquidity_zone or entry_price <= 0:
+            return 0.0
+
+        action_up = str(action or "").upper()
+        low = float(liquidity_zone.get("low", 0.0) or 0.0)
+        high = float(liquidity_zone.get("high", 0.0) or 0.0)
+        level = float(liquidity_zone.get("level", 0.0) or 0.0)
+
+        if action_up == "BUY":
+            for candidate in (low, level):
+                if 0 < candidate < entry_price:
+                    return candidate
+        elif action_up == "SELL":
+            for candidate in (high, level):
+                if candidate > entry_price:
+                    return candidate
+
+        return 0.0
 
     def _detect_liquidity_reversal(
         self,
@@ -934,10 +964,15 @@ class CloudScanner:
                 signal_price = signal.metadata.get("price", market_data.price)
                 if analysis.entry_price == 0.0 or analysis.entry_price is None:
                     analysis.entry_price = signal_price
+                liquidity_zone = signal.metadata.get("liquidity_zone")
                 if analysis.stop_loss == 0.0 or analysis.stop_loss is None:
-                    analysis.stop_loss = signal_price * 0.99  # 1% SL default
+                    analysis.stop_loss = self._liquidity_zone_stop_boundary(
+                        analysis.action.value,
+                        float(analysis.entry_price or signal_price),
+                        liquidity_zone,
+                    )
                 if analysis.take_profit == 0.0 or analysis.take_profit is None:
-                    analysis.take_profit = signal_price * 1.01  # 1% TP default
+                    analysis.take_profit = 0.0
 
                 # Build clean signal data - NO datetime objects!
                 return {
@@ -956,7 +991,7 @@ class CloudScanner:
                     "brain_used": brain_used,
                     "fallback_mode": fallback_mode,
                     "force_execute": brain_verdict in {"[SIGNAL] BUY", "[SIGNAL] SELL"},
-                    "liquidity_zone": signal.metadata.get("liquidity_zone"),
+                    "liquidity_zone": liquidity_zone,
                     "investment_amount": 1000.0,  # Default $1000 per trade
                     "transcript": {
                         "technical_sniper": {

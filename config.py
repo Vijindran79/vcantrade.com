@@ -168,6 +168,19 @@ MAX_SPREAD_PERCENT = float(
     os.getenv("MAX_SPREAD_PERCENT", "0.30")
 )  # Max 0.3% bid-ask spread allowed (thin market tolerant)
 
+# ===== AUTONOMOUS RISK MANAGEMENT =====
+# Fixed TP/SL percent targets are intentionally disabled. Entries now rely on
+# structure-based stops, a break-even shield, and a 3-bar trailing stop.
+AUTONOMOUS_BREAK_EVEN_BUFFER_PCT = float(
+    os.getenv("AUTONOMOUS_BREAK_EVEN_BUFFER_PCT", "0.5")
+)
+AUTONOMOUS_TRAILING_LOOKBACK_BARS = int(
+    os.getenv("AUTONOMOUS_TRAILING_LOOKBACK_BARS", "3")
+)
+AUTONOMOUS_TRAILING_UPDATE_SECONDS = int(
+    os.getenv("AUTONOMOUS_TRAILING_UPDATE_SECONDS", "60")
+)
+
 # ===== UI CONFIGURATION =====
 OVERLAY_ALPHA = float(
     os.getenv("OVERLAY_ALPHA", "0.15")
