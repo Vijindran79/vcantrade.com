@@ -55,6 +55,7 @@ GRAY = "#8B949E"
 WHITE = "#E6EDF3"
 DIM = "#6E7681"
 YELLOW = "#F0E68C"
+BRIDGE_RED = "#FF4D4F"
 
 # HIGH-CONTRAST TRADING COLORS (Neon for visibility across room)
 NEON_GREEN = "#00FF41"  # Bright neon green for BUY signals
@@ -227,6 +228,27 @@ class CommandCenter(QWidget):
         )
         layout.addWidget(self.mode_badge)
 
+        self.bridge_status_widget = QFrame()
+        self.bridge_status_widget.setStyleSheet(
+            f"background: {BG_INPUT}; border: 1px solid {BORDER}; border-radius: 6px;"
+        )
+        bridge_layout = QHBoxLayout(self.bridge_status_widget)
+        bridge_layout.setContentsMargins(10, 6, 10, 6)
+        bridge_layout.setSpacing(8)
+
+        self.bridge_status_dot = QLabel()
+        self.bridge_status_dot.setFixedSize(10, 10)
+        bridge_layout.addWidget(self.bridge_status_dot)
+
+        self.bridge_status_label = QLabel()
+        self.bridge_status_label.setStyleSheet(
+            f"font-size: 11px; font-weight: bold; font-family: 'Consolas'; border: none;"
+        )
+        bridge_layout.addWidget(self.bridge_status_label)
+
+        layout.addWidget(self.bridge_status_widget)
+        self.set_bridge_status("disconnected")
+
         return container
 
     def _toggle_always_on_top(self):
@@ -258,6 +280,41 @@ class CommandCenter(QWidget):
         self.setWindowOpacity(opacity)
         if value < 80:
             self.log(f"🔍 Transparency: {100 - value}% (you can see through the dashboard)")
+
+    def set_bridge_status(self, status: str):
+        """Update external brain bridge indicator in the header."""
+        normalized = str(status or "disconnected").strip().lower()
+
+        if normalized == "online":
+            dot_color = NEON_GREEN
+            border_color = NEON_GREEN
+            text_color = NEON_GREEN
+            text = "🟢 BRIDGE ONLINE"
+            shadow = "0 0 12px rgba(0,255,65,0.35)"
+        elif normalized in {"lost", "heartbeat_lost", "warning"}:
+            dot_color = BRIDGE_RED
+            border_color = BRIDGE_RED
+            text_color = BRIDGE_RED
+            text = "🔴 BRIDGE HEARTBEAT LOST"
+            shadow = "0 0 10px rgba(255,77,79,0.20)"
+        else:
+            dot_color = GRAY
+            border_color = BORDER
+            text_color = GRAY
+            text = "BRIDGE DISCONNECTED"
+            shadow = "none"
+
+        self.bridge_status_dot.setStyleSheet(
+            f"background: {dot_color}; border-radius: 5px; border: 1px solid {dot_color};"
+        )
+        self.bridge_status_label.setText(text)
+        self.bridge_status_label.setStyleSheet(
+            f"color: {text_color}; font-size: 11px; font-weight: bold; font-family: 'Consolas'; border: none;"
+        )
+        self.bridge_status_widget.setStyleSheet(
+            f"background: {BG_INPUT}; border: 1px solid {border_color}; border-radius: 6px;"
+            f" box-shadow: {shadow};"
+        )
 
     # =================== ACCOUNT PANEL ===================
     def _build_account_panel(self) -> QWidget:

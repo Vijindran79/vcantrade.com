@@ -265,7 +265,8 @@ class CloudScannerThread(QThread):
         
         # WATCHDOG HEARTBEAT TRACKING
         self.last_scan_time = time.time()
-        self.heartbeat_timeout = 10.0  # Force reinit if no scan for >10 seconds
+        # Allow room for a full scan plus local LLM analysis before declaring the scanner stale.
+        self.heartbeat_timeout = max(float(getattr(config, "SCAN_INTERVAL", 10)) * 6.0, 60.0)
         self.consecutive_failures = 0
         self.max_failures_before_reinit = 3
 
@@ -302,7 +303,8 @@ class CloudScannerThread(QThread):
                 elapsed = time.time() - self.last_scan_time
                 if elapsed > self.heartbeat_timeout and self.last_scan_time > 0:
                     logger.warning(
-                        f"🐕 WATCHDOG: Scanner idle for {elapsed:.1f}s (>10s threshold). "
+                        f"🐕 WATCHDOG: Scanner idle for {elapsed:.1f}s "
+                        f"(>{self.heartbeat_timeout:.0f}s threshold). "
                         f"Forcing reinitialization..."
                     )
                     self.consecutive_failures += 1
@@ -327,7 +329,7 @@ class CloudScannerThread(QThread):
                 # Scan all tickers
                 signals = await self.scanner.scan_all_tickers()
                 
-                # Update heartbeat timestamp on successful scan
+                # Update heartbeat timestamp on successful market sweep
                 self.last_scan_time = time.time()
                 self.consecutive_failures = 0
                 
@@ -337,16 +339,29 @@ class CloudScannerThread(QThread):
                 # Process through Swarm
                 if signals:
                     trade_signal = await self.scanner.process_signals(signals)
+                    self.last_scan_time = time.time()
 
                     if trade_signal:
                         # Dispatch to local executor
                         success = await self.scanner.dispatch_to_local(trade_signal)
+                        self.last_scan_time = time.time()
 
                         if success:
                             self.signal_detected.emit(trade_signal)
                             logger.info(f"Signal dispatched: {trade_signal}")
                         else:
-                            self.scanner_error.emit("Signal dispatch failed")
+                            streak = int(getattr(self.scanner, "dispatch_failure_streak", 0) or 0)
+                            if streak >= 3 and not bool(getattr(self.scanner, "dispatch_alert_emitted", False)):
+                                dispatch_error = str(
+                                    getattr(self.scanner, "last_dispatch_error_message", "") or "Signal dispatch failed"
+                                )
+                                self.scanner_error.emit(
+                                    f"Signal dispatch failed after {streak} consecutive attempts: {dispatch_error}"
+                                )
+                                self.scanner.dispatch_alert_emitted = True
+
+                # Mark the loop healthy before sleeping between scans.
+                self.last_scan_time = time.time()
 
                 # Wait before next scan
                 await asyncio.sleep(config.SCAN_INTERVAL)
@@ -372,6 +387,7 @@ class SignalListenerThread(QThread):
     """
 
     signal_received = pyqtSignal(object)  # Emits received signal data
+    handshake_received = pyqtSignal(object)  # Emits handshake metadata
     listener_error = pyqtSignal(str)  # Emits error message
 
     def __init__(self):
@@ -380,10 +396,15 @@ class SignalListenerThread(QThread):
         self.dispatcher = SignalDispatcher()
 
     def run(self):
-        logger.info(f"Signal Listener started on port {config.LOCAL_LISTENER_PORT}")
+        logger.info(
+            "Signal Listener started on %s:%s",
+            config.LOCAL_LISTENER_HOST,
+            config.LOCAL_LISTENER_PORT,
+        )
         try:
             # Set callback
             self.dispatcher.set_signal_callback(self._on_signal_received)
+            self.dispatcher.set_handshake_callback(self._on_handshake_received)
 
             # Run async HTTP server
             asyncio.run(self._run_server())
@@ -395,12 +416,22 @@ class SignalListenerThread(QThread):
         """Run the HTTP server loop."""
         try:
             runner = await self.dispatcher.start_server()
-            logger.info(f"✅ Signal Dispatcher listening on port {config.LOCAL_LISTENER_PORT}")
+            logger.info(
+                "✅ Signal Dispatcher listening on %s:%s",
+                config.LOCAL_LISTENER_HOST,
+                config.LOCAL_LISTENER_PORT,
+            )
+            if config.PUBLIC_SIGNAL_URL:
+                logger.info("🌐 Public signal URL armed: %s", config.PUBLIC_SIGNAL_URL)
+            logger.info(
+                "🔐 Signal listener auth: %s",
+                "ENABLED" if config.SIGNAL_API_KEY else "DISABLED",
+            )
             
             # Verify server is accessible
             from aiohttp import ClientSession
             try:
-                health_url = f"http://localhost:{config.LOCAL_LISTENER_PORT}/api/health"
+                health_url = f"http://{config.LOCAL_LISTENER_HEALTH_HOST}:{config.LOCAL_LISTENER_PORT}/api/health"
                 async with ClientSession() as session:
                     async with session.get(health_url, timeout=3) as response:
                         if response.status == 200:
@@ -427,6 +458,11 @@ class SignalListenerThread(QThread):
         """Handle incoming signal from cloud."""
         self.signal_received.emit(signal_data)
         logger.info(f"Signal received from cloud: {signal_data}")
+
+    def _on_handshake_received(self, handshake_data: dict):
+        """Handle authenticated bridge handshake."""
+        self.handshake_received.emit(handshake_data)
+        logger.info(f"Handshake received from external brain: {handshake_data}")
 
     def stop(self):
         self.running = False
@@ -568,9 +604,14 @@ class VcaniTradeApp:
         self.locked_tickers = {}
         self.rpa_execution_enabled = True
         self.command_posture = "SCANNING"
+        self.bridge_last_seen_ts = 0.0
+        self.bridge_status = "disconnected"
+        self.bridge_warning_emitted = False
+        self.bridge_timeout_seconds = 120.0
 
         # UI - Command Center (main dashboard)
         self.cmd = CommandCenter()
+        self.cmd.set_bridge_status("disconnected")
         
         # AI Narrator Overlay (glassmorphic assistant)
         self.ai_narrator = AINarratorOverlay()
@@ -1043,6 +1084,7 @@ class VcaniTradeApp:
 
         # Signal Listener → UI + Narrator
         self.signal_listener.signal_received.connect(self._on_signal_received)
+        self.signal_listener.handshake_received.connect(self._on_bridge_handshake_received)
         self.signal_listener.listener_error.connect(self._on_listener_error)
 
         # Data Scout Listener → UI + TV Flip + Narrator
@@ -1089,6 +1131,11 @@ class VcaniTradeApp:
             self.heartbeat_timer = QTimer()
             self.heartbeat_timer.timeout.connect(self._heartbeat_check)
             self.heartbeat_timer.start(60000)  # 60 seconds
+
+        if not hasattr(self, "bridge_status_timer"):
+            self.bridge_status_timer = QTimer()
+            self.bridge_status_timer.timeout.connect(self._check_bridge_heartbeat)
+            self.bridge_status_timer.start(5000)
         
         # STAGE 3: Institutional Governor update timer (every 30 seconds)
         if not hasattr(self, "governor_timer"):
@@ -3071,6 +3118,7 @@ class VcaniTradeApp:
 
     def _on_signal_received(self, signal_data: dict):
         """Handle signal received from cloud via HTTP."""
+        self._mark_bridge_alive()
         brain_override_action = self._brain_override_action(signal_data)
         action = brain_override_action if brain_override_action in {"BUY", "SELL"} else self._resolve_directional_action(signal_data)
         signal_data["action"] = action
@@ -3220,6 +3268,53 @@ class VcaniTradeApp:
             f'{error}'
         )
         self.ai_narrator.notify_error(f"Listener: {error}")
+
+    def _mark_bridge_alive(self):
+        """Record a healthy external-brain handshake or signal."""
+        self.bridge_last_seen_ts = time.time()
+        self.bridge_warning_emitted = False
+        if self.bridge_status != "online":
+            self.bridge_status = "online"
+            self.cmd.set_bridge_status("online")
+
+    def _check_bridge_heartbeat(self):
+        """Flip the bridge indicator red when the external heartbeat goes stale."""
+        if self.bridge_last_seen_ts <= 0:
+            if self.bridge_status != "disconnected":
+                self.bridge_status = "disconnected"
+                self.cmd.set_bridge_status("disconnected")
+            return
+
+        elapsed = time.time() - self.bridge_last_seen_ts
+        if elapsed > self.bridge_timeout_seconds:
+            if self.bridge_status != "lost":
+                self.bridge_status = "lost"
+                self.cmd.set_bridge_status("lost")
+            if not self.bridge_warning_emitted:
+                logger.warning("[SYSTEM] Warning: External Brain heartbeat lost.")
+                self.cmd.log(
+                    '<span style="color:#F85149;font-weight:bold">[SYSTEM] Warning: External Brain heartbeat lost.</span>'
+                )
+                self.bridge_warning_emitted = True
+        elif self.bridge_status == "lost":
+            self.bridge_status = "online"
+            self.bridge_warning_emitted = False
+            self.cmd.set_bridge_status("online")
+
+    def _on_bridge_handshake_received(self, handshake_data: dict):
+        """Show a high-visibility confirmation when the external brain connects."""
+        self._mark_bridge_alive()
+        logger.info("[BRIDGE] 🟢 External Brain Connected & Authenticated")
+        self.cmd.log(
+            '<span style="color:#00FF41;font-weight:bold">[BRIDGE] 🟢 External Brain Connected & Authenticated</span>'
+        )
+        source_ip = handshake_data.get("source_ip", "unknown")
+        brain_name = handshake_data.get("brain", "external")
+        self.cmd.log(
+            f'<span style="color:#8B949E">📡 HANDSHAKE</span>: {brain_name} @ {source_ip}'
+        )
+        self.ai_narrator.set_status("standby", "External Brain Connected")
+        self.ai_narrator.add_activity("🌉", "External Brain handshake confirmed")
 
     def _execute_cloud_signal(self, signal_data: dict):
         """Execute a cloud-generated signal locally with Professor Mode controls."""
@@ -4056,7 +4151,10 @@ class VcaniTradeApp:
         # Startup messages
         self.cmd.log("VcaniTrade AI started - Hybrid Architecture")
         self.cmd.log(f"Cloud Scanner: {'ENABLED' if config.CLOUD_SCANNER_ENABLED else 'DISABLED'}")
-        self.cmd.log(f"Signal Listener: Port {config.LOCAL_LISTENER_PORT}")
+        self.cmd.log(f"Signal Listener: {config.LOCAL_LISTENER_HOST}:{config.LOCAL_LISTENER_PORT}")
+        if config.PUBLIC_SIGNAL_URL:
+            self.cmd.log(f"Public Signal URL: {config.PUBLIC_SIGNAL_URL}")
+        self.cmd.log(f"Signal Auth: {'ENABLED' if config.SIGNAL_API_KEY else 'DISABLED'}")
         self.cmd.log(f"Data Scout: Port 5000")
         self.cmd.log(f"Monitoring: {len(config.CLOUD_TICKERS)} tickers")
         if config.DRY_RUN:
@@ -4096,7 +4194,10 @@ def main():
         f"Vision:    {config.VLM_MODEL}" if config.USE_VISION else "Vision:    Disabled"
     )
     print(f"Cloud:     {'ENABLED' if config.CLOUD_SCANNER_ENABLED else 'DISABLED'}")
-    print(f"Listener:  Port {config.LOCAL_LISTENER_PORT}")
+    print(f"Listener:  {config.LOCAL_LISTENER_HOST}:{config.LOCAL_LISTENER_PORT}")
+    print(f"SignalKey: {'SET' if config.SIGNAL_API_KEY else 'NOT SET'}")
+    if config.PUBLIC_SIGNAL_URL:
+        print(f"Public:    {config.PUBLIC_SIGNAL_URL}")
     print(f"Kill:      OFF")
     print("=" * 60)
 

@@ -16,6 +16,7 @@ import time
 import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import yfinance as yf
 import pandas as pd
@@ -72,6 +73,12 @@ class CloudScanner:
         self.max_consecutive_errors = 20  # ~10 minutes of errors before alert
         self.last_successful_scan = None
         self.error_alert_threshold = 10  # Alert user after this many errors
+        self.dispatch_failure_streak = 0
+        self.dispatch_alert_emitted = False
+        self.last_dispatch_error_message = ""
+        self.last_dispatch_status_code: Optional[int] = None
+        self.last_dispatch_target = ""
+        self.public_dispatch_retry_after_ts = 0.0
 
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
@@ -111,6 +118,63 @@ class CloudScanner:
         if count >= 10:
             return 30.0
         return round(2.0 + ((count - 2) * (28.0 / 8.0)), 1)
+
+    def _build_signal_endpoint(self, base_or_full_url: str) -> str:
+        """Normalize a configured base URL into the /api/signal endpoint."""
+        raw = str(base_or_full_url or "").strip().rstrip("/")
+        if not raw:
+            return ""
+        if raw.endswith("/api/signal"):
+            return raw
+        parts = urlsplit(raw)
+        path = parts.path.rstrip("/")
+        if path.endswith("/api"):
+            path = f"{path}/signal"
+        else:
+            path = f"{path}/api/signal"
+        return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+    def _urls_equivalent(self, left: str, right: str) -> bool:
+        """Treat localhost aliases on the same port/path as the same dispatch endpoint."""
+        if left == right:
+            return True
+        left_parts = urlsplit(left)
+        right_parts = urlsplit(right)
+        left_port = left_parts.port or (443 if left_parts.scheme == "https" else 80)
+        right_port = right_parts.port or (443 if right_parts.scheme == "https" else 80)
+        left_host = (left_parts.hostname or "").lower()
+        right_host = (right_parts.hostname or "").lower()
+        localhost_aliases = {"localhost", "127.0.0.1", "::1"}
+        hosts_match = (
+            left_host == right_host
+            or (left_host in localhost_aliases and right_host in localhost_aliases)
+        )
+        return (
+            left_parts.scheme == right_parts.scheme
+            and hosts_match
+            and left_port == right_port
+            and left_parts.path.rstrip("/") == right_parts.path.rstrip("/")
+        )
+
+    def _get_dispatch_targets(self) -> List[Tuple[str, str]]:
+        """Return ordered dispatch targets with bridge priority and localhost fallback."""
+        targets: List[Tuple[str, str]] = []
+        public_url = self._build_signal_endpoint(getattr(config, "PUBLIC_SIGNAL_URL", ""))
+        local_host = getattr(config, "LOCAL_LISTENER_HEALTH_HOST", "127.0.0.1")
+        local_url = self._build_signal_endpoint(f"http://{local_host}:{config.LOCAL_LISTENER_PORT}")
+        now = time.time()
+
+        if public_url and now >= self.public_dispatch_retry_after_ts:
+            targets.append(("bridge", public_url))
+
+        if local_url and not any(self._urls_equivalent(local_url, url) for _, url in targets):
+            targets.append(("local", local_url))
+
+        legacy_url = self._build_signal_endpoint(getattr(config, "CLOUD_SCANNER_URL", ""))
+        if legacy_url and not any(self._urls_equivalent(legacy_url, url) for _, url in targets):
+            targets.append(("legacy", legacy_url))
+
+        return targets
         
     async def scan_all_tickers(self) -> List[TechnicalSignal]:
         """Scan all tickers and return detected signals."""
@@ -1171,36 +1235,143 @@ class CloudScanner:
         Dispatch trade signal to local laptop executor via HTTP.
         Returns True if successfully received.
         """
-        try:
-            local_url = f"{config.CLOUD_SCANNER_URL}/api/signal"
-            
-            logger.info(f"📡 Attempting to dispatch signal to: {local_url}")
-            logger.info(f"   Signal: {signal_data.get('action')} {signal_data.get('ticker')} (confidence: {signal_data.get('confidence', 0):.2f})")
+        timeout = float(getattr(config, "LOCAL_EXECUTION_TIMEOUT", 30.0) or 30.0)
+        headers = {"Content-Type": "application/json"}
+        if getattr(config, "SIGNAL_API_KEY", ""):
+            headers[getattr(config, "SIGNAL_API_HEADER", "X-Signal-Key")] = config.SIGNAL_API_KEY
 
-            response = requests.post(
-                local_url,
-                json=signal_data,
-                timeout=config.LOCAL_EXECUTION_TIMEOUT,
-                headers={"Content-Type": "application/json"}
-            )
+        payload = dict(signal_data)
+        if getattr(config, "SIGNAL_API_KEY", ""):
+            payload.setdefault("api_key", config.SIGNAL_API_KEY)
 
-            if response.status_code == 200:
-                logger.info(f"✅ Signal dispatched successfully to local executor")
-                return True
-            else:
-                logger.error(f"❌ Failed to dispatch signal: HTTP {response.status_code} - {response.text}")
+        targets = self._get_dispatch_targets()
+        if not targets:
+            self.dispatch_failure_streak += 1
+            self.last_dispatch_status_code = None
+            self.last_dispatch_target = "none"
+            self.last_dispatch_error_message = "Signal dispatch failed: no configured dispatch targets"
+            logger.error("❌ %s", self.last_dispatch_error_message)
+            return False
+
+        bridge_failure: Optional[str] = None
+        bridge_retry_seconds = max(30.0, float(getattr(config, "SCAN_INTERVAL", 10)) * 12.0)
+
+        for target_name, target_url in targets:
+            try:
+                logger.info(
+                    "📡 Dispatch attempt via %s -> %s | %s %s (confidence: %.2f)",
+                    target_name,
+                    target_url,
+                    signal_data.get("action"),
+                    signal_data.get("ticker"),
+                    float(signal_data.get("confidence", 0.0) or 0.0),
+                )
+
+                response = requests.post(
+                    target_url,
+                    json=payload,
+                    timeout=timeout,
+                    headers=headers,
+                )
+                status_code = int(response.status_code)
+                body_preview = (response.text or "").strip().replace("\n", " ")[:240]
+
+                if status_code == 200:
+                    self.dispatch_failure_streak = 0
+                    self.dispatch_alert_emitted = False
+                    self.last_dispatch_status_code = status_code
+                    self.last_dispatch_target = target_name
+                    self.last_dispatch_error_message = ""
+                    if target_name == "bridge":
+                        self.public_dispatch_retry_after_ts = 0.0
+                    logger.info("✅ Signal dispatched successfully via %s", target_name)
+                    return True
+
+                failure_message = (
+                    f"Signal dispatch failed via {target_name}: HTTP {status_code}"
+                    + (f" - {body_preview}" if body_preview else "")
+                )
+                self.last_dispatch_status_code = status_code
+                self.last_dispatch_target = target_name
+
+                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                    bridge_failure = failure_message
+                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    logger.warning(
+                        "🌉 Bridge dispatch unavailable (%s). Falling back to localhost for %.0fs.",
+                        f"HTTP {status_code}",
+                        bridge_retry_seconds,
+                    )
+                    continue
+
+                self.dispatch_failure_streak += 1
+                self.last_dispatch_error_message = failure_message
+                logger.error("❌ %s", failure_message)
                 return False
 
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"❌ Connection refused - Signal Listener not running at {config.CLOUD_SCANNER_URL}")
-            logger.error(f"   Make sure the Signal Listener thread is started")
-            return False
-        except requests.exceptions.Timeout as e:
-            logger.error(f"❌ Request timeout - Signal Listener didn't respond within {config.LOCAL_EXECUTION_TIMEOUT}s")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Signal dispatch failed: {type(e).__name__}: {e}")
-            return False
+            except requests.exceptions.ConnectionError:
+                failure_message = f"Signal dispatch failed via {target_name}: connection refused"
+                self.last_dispatch_status_code = None
+                self.last_dispatch_target = target_name
+
+                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                    bridge_failure = failure_message
+                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    logger.info(
+                        "🌉 Bridge offline. Falling back to localhost for %.0fs.",
+                        bridge_retry_seconds,
+                    )
+                    continue
+
+                self.dispatch_failure_streak += 1
+                self.last_dispatch_error_message = failure_message
+                logger.error("❌ %s", failure_message)
+                return False
+
+            except requests.exceptions.Timeout:
+                failure_message = f"Signal dispatch failed via {target_name}: timeout after {timeout:.1f}s"
+                self.last_dispatch_status_code = None
+                self.last_dispatch_target = target_name
+
+                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                    bridge_failure = failure_message
+                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    logger.warning(
+                        "🌉 Bridge timed out. Falling back to localhost for %.0fs.",
+                        bridge_retry_seconds,
+                    )
+                    continue
+
+                self.dispatch_failure_streak += 1
+                self.last_dispatch_error_message = failure_message
+                logger.error("❌ %s", failure_message)
+                return False
+
+            except Exception as e:
+                failure_message = f"Signal dispatch failed via {target_name}: {type(e).__name__}: {e}"
+                self.last_dispatch_status_code = None
+                self.last_dispatch_target = target_name
+
+                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                    bridge_failure = failure_message
+                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    logger.warning(
+                        "🌉 Bridge dispatch raised %s. Falling back to localhost for %.0fs.",
+                        type(e).__name__,
+                        bridge_retry_seconds,
+                    )
+                    continue
+
+                self.dispatch_failure_streak += 1
+                self.last_dispatch_error_message = failure_message
+                logger.error("❌ %s", failure_message)
+                return False
+
+        self.dispatch_failure_streak += 1
+        self.last_dispatch_status_code = self.last_dispatch_status_code
+        self.last_dispatch_error_message = bridge_failure or "Signal dispatch failed after exhausting all targets"
+        logger.error("❌ %s", self.last_dispatch_error_message)
+        return False
     
     async def run_scanner(self):
         """Main scanner loop - continuous scanning with circuit breaker."""
@@ -1258,9 +1429,6 @@ class CloudScanner:
                     await asyncio.sleep(10)  # Longer wait when in error state
                 else:
                     await asyncio.sleep(5)  # Normal retry delay
-
-
-def run_cloud_scanner():
 
 def run_cloud_scanner():
     """Entry point for cloud scanner (runs on Vast.ai server)."""

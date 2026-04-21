@@ -23,7 +23,7 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 # Import from core modules
-from core.swarm_consensus import GeneralSwarmConsensus, AgentResponse
+from core.swarm_consensus import OllamaSwarmConsensus
 import config
 
 # Configure logging
@@ -83,7 +83,7 @@ async def run_test_pipeline():
     # Initialize Swarm Consensus (no arguments needed - uses config directly)
     console.print("\n[bold]Initializing Swarm Consensus...[/bold]")
     try:
-        swarm = GeneralSwarmConsensus()
+        swarm = OllamaSwarmConsensus()
         console.print(
             "[green]✓ Swarm initialized successfully with Groq client[/green]"
         )

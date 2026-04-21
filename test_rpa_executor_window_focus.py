@@ -109,6 +109,7 @@ class TestRPAWindowFocusGuards(unittest.TestCase):
         win = _FakeWindow("Random App - Google Chrome")
         self.executor._active_window_title = lambda: "Unrelated Foreground"
         self.executor._cycle_tabs_until_match = lambda **_kwargs: False
+        self.executor.pyautogui = mock.Mock()
 
         sequence = []
 
@@ -131,6 +132,24 @@ class TestRPAWindowFocusGuards(unittest.TestCase):
         for idx in activate_indices:
             self.assertLess(idx + 1, len(sequence))
             self.assertEqual(sequence[idx + 1], ("sleep", 1.5))
+
+    def test_resolve_click_point_avoids_reusing_exact_same_pixel(self):
+        with mock.patch.object(rpa_executor.random, "choice", side_effect=[-1, -1, -1, -1]):
+            first = self.executor._resolve_click_point(100, 200)
+            second = self.executor._resolve_click_point(100, 200)
+
+        self.assertEqual(first, (99, 199))
+        self.assertEqual(second, (100, 199))
+        self.assertNotEqual(first, second)
+
+    def test_pause_before_click_uses_human_latency_delay(self):
+        self.executor.human_latency_enabled = True
+
+        with mock.patch.object(rpa_executor.random, "uniform", return_value=1.1), \
+             mock.patch.object(rpa_executor.time, "sleep") as sleep_mock:
+            self.executor._pause_before_click()
+
+        sleep_mock.assert_called_once_with(1.1)
 
 
 if __name__ == "__main__":

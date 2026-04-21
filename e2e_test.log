@@ -1,87 +1,33 @@
-2026-04-09 16:52:22,269 [INFO] ======================================================================
-2026-04-09 16:52:22,269 [INFO] VCANITRADE AI - END-TO-END SYSTEM TEST
-2026-04-09 16:52:22,269 [INFO] ======================================================================
-2026-04-09 16:52:22,269 [INFO] 
-2026-04-09 16:52:22,269 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:22,269 [INFO] TEST 1: Configuration
-2026-04-09 16:52:22,269 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:22,282 [INFO] ✅ Config loaded
-2026-04-09 16:52:22,282 [INFO] ✅ PROP_FIRM: TopStep
-2026-04-09 16:52:22,282 [INFO] ✅ OLLAMA_URL: http://localhost:11434
-2026-04-09 16:52:22,282 [INFO] ✅ MODEL: qwen2.5-coder:1.5b
-2026-04-09 16:52:22,282 [INFO] ✅ SCANNER: ENABLED
-2026-04-09 16:52:22,282 [INFO] ✅ Tickers: 10
-2026-04-09 16:52:22,282 [INFO]    → ['BTC-USD', 'ETH-USD', 'GC=F', 'EURUSD=X', 'GBPUSD=X', 'TSLA', 'SPY', 'QQQ', 'AAPL', 'NVDA']
-2026-04-09 16:52:22,282 [INFO] 
-2026-04-09 16:52:22,282 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:22,282 [INFO] TEST 2: Ollama AI Connection
-2026-04-09 16:52:22,282 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:23,201 [INFO] ✅ Ollama responds
-2026-04-09 16:52:23,201 [INFO]    → Reply: Trading ready
-2026-04-09 16:52:23,201 [INFO] 
-2026-04-09 16:52:23,201 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:23,201 [INFO] TEST 3: Market Scanner (Live Data)
-2026-04-09 16:52:23,202 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:26,615 [INFO] ✅ Scanned 10 tickers
-2026-04-09 16:52:26,615 [INFO] ✅ Signals found: 2
-2026-04-09 16:52:26,615 [INFO]    → BTC-USD:VOLUME_SPIKE, ETH-USD:RSI_OVERBOUGHT
-2026-04-09 16:52:26,615 [INFO] 
-2026-04-09 16:52:26,615 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:26,615 [INFO] TEST 4: AI Analysis (Swarm Consensus)
-2026-04-09 16:52:26,615 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:27,020 [INFO] 🔥 Signal detected: VOLUME_SPIKE on BTC-USD (strength: 0.30)
-2026-04-09 16:52:27,020 [INFO] Swarm Consensus: Analyzing BTC-USD (qwen2.5-coder:1.5b)
-2026-04-09 16:52:28,420 [INFO] Ollama responded: SELL BTC-USD
-2026-04-09 16:52:28,421 [INFO] Swarm consensus: 0.80 confidence
-2026-04-09 16:52:28,422 [INFO] ✅ AI analysis complete
-2026-04-09 16:52:28,422 [INFO] ✅ Action: SELL
-2026-04-09 16:52:28,422 [INFO] ✅ Confidence: 0.80
-2026-04-09 16:52:28,422 [INFO] ✅ Entry: $72302.23
-2026-04-09 16:52:28,423 [INFO] ✅ TP: $72800.00
-2026-04-09 16:52:28,423 [INFO] ✅ SL: $71800.00
-2026-04-09 16:52:28,423 [INFO] ✅ Reason: RSI is above 70, and the signal strength is high, indicating...
-2026-04-09 16:52:28,423 [INFO] 
-2026-04-09 16:52:28,423 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:28,423 [INFO] TEST 5: Prop Firm Rule Engine (The Professor)
-2026-04-09 16:52:28,423 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:28,426 [INFO] Prop Firm Rule Engine initialized: TopStep
-2026-04-09 16:52:28,427 [INFO] Rules: Daily Loss=$150.0, Drawdown=$3000.0, Target=$3000.0
-2026-04-09 16:52:28,427 [INFO] ✅ Prop firm allows trade
-2026-04-09 16:52:28,427 [INFO]    → Violations: []
-2026-04-09 16:52:28,427 [INFO] ✅ Prop firm blocks after daily loss
-2026-04-09 16:52:28,427 [INFO]    → Violations: ['❌ DAILY LOSS LIMIT: $200.00 / $150.00', '❌ TRADE WOULD EXCEED DAILY LIMIT: -$10.00 would put you at $-210.00']
-2026-04-09 16:52:28,427 [INFO] ✅ Dashboard data works
-2026-04-09 16:52:28,427 [INFO]    → Balance: $50,000.00
-2026-04-09 16:52:28,427 [INFO] 
-2026-04-09 16:52:28,427 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:28,428 [INFO] TEST 6: Position Lifecycle
-2026-04-09 16:52:28,428 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:28,428 [INFO] ✅ Position created
-2026-04-09 16:52:28,428 [INFO]    → BUY BTC-USD @ $85,000.00
-2026-04-09 16:52:28,428 [INFO] ✅ TP set above entry
-2026-04-09 16:52:28,428 [INFO]    → TP: $86,700.00
-2026-04-09 16:52:28,428 [INFO] ✅ SL set below entry
-2026-04-09 16:52:28,428 [INFO]    → SL: $84,150.00
-2026-04-09 16:52:28,428 [INFO] ✅ TP would trigger
-2026-04-09 16:52:28,428 [INFO]    → Current: $87,000.00 >= TP: $86,700.00
-2026-04-09 16:52:28,428 [INFO] ✅ SL would trigger
-2026-04-09 16:52:28,428 [INFO]    → Current: $84,000.00 <= SL: $84,150.00
-2026-04-09 16:52:28,428 [INFO] 
-2026-04-09 16:52:28,428 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:28,429 [INFO] TEST 7: UI Components
-2026-04-09 16:52:28,429 [INFO] ──────────────────────────────────────────────────
-2026-04-09 16:52:28,502 [INFO] ✅ Qt initialized
-2026-04-09 16:52:29,323 [INFO] Command Center initialized - Professional Trading Mode
-2026-04-09 16:52:29,323 [INFO] ✅ Dashboard created
-2026-04-09 16:52:29,323 [INFO] ✅ Balance update works
-2026-04-09 16:52:29,323 [INFO] ✅ Trade log entry works
-2026-04-09 16:52:29,323 [INFO] ✅ Signal dialog imports
-2026-04-09 16:52:29,323 [INFO] 
-2026-04-09 16:52:29,323 [INFO] ======================================================================
-2026-04-09 16:52:29,326 [INFO] FINAL RESULTS
-2026-04-09 16:52:29,326 [INFO] ======================================================================
-2026-04-09 16:52:29,326 [INFO] Total Tests: 29
-2026-04-09 16:52:29,326 [INFO] ✅ Passed: 29
-2026-04-09 16:52:29,326 [INFO] ❌ Failed: 0
-2026-04-09 16:52:29,326 [INFO] 
-2026-04-09 16:52:29,326 [INFO] 🎉 ALL TESTS PASSED - SYSTEM IS PRODUCTION READY!
+2026-04-21 11:48:56,362 [INFO] Prop Firm Rule Engine initialized: TopStep
+2026-04-21 11:48:56,362 [INFO] Rules: Daily Loss=$150.0, Drawdown=$3000.0, Target=$3000.0
+2026-04-21 11:48:56,364 [INFO] 😈 Devil's Advocate agent initialized
+2026-04-21 11:48:56,364 [INFO] 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
+2026-04-21 11:48:56,365 [INFO] 🧠 Analyzing BTC-USD with qwen2.5:latest
+2026-04-21 11:48:56,672 [INFO] 🕐 Market Session Detector initialized with Holiday Awareness
+2026-04-21 11:48:56,672 [INFO] 🧠 Calling local brain: qwen2.5:latest (timeout=90s)
+2026-04-21 11:49:00,799 [INFO] ✅ Local brain responded successfully
+2026-04-21 11:49:00,800 [INFO] 🧠 Calling local brain: qwen2.5:latest (timeout=90s)
+2026-04-21 11:49:04,321 [INFO] ✅ Local brain responded successfully
+2026-04-21 11:49:04,322 [INFO] 🧠 Calling local brain: qwen2.5:latest (timeout=90s)
+2026-04-21 11:49:11,579 [INFO] ✅ Local brain responded successfully
+2026-04-21 11:49:38,510 [INFO] 😈 Devil's Advocate: STRONG_AVOID - 3 reasons found
+2026-04-21 11:49:38,510 [WARNING] 😈 Devil's Advocate PENALTY: -0.01 | Reasons: ['RSI Oversold Condition: The RSI value of 35.0 indicates an oversold condition, but the signal is based on a single indicator without considering other technical factors such as MACD or Stochastic Oscillator.', 'High Entry Price: Entering at $85,000 when the market is already near all-time highs introduces significant risk and could lead to quick profit-taking if sentiment shifts.', 'Lack of Volume Confirmation: The trade signal does not mention any volume confirmation, which can be a critical factor in confirming trend continuation.']
+2026-04-21 11:49:38,511 [INFO] ✅ Analysis complete: BUY BTC-USD
+2026-04-21 11:49:42,342 [INFO] ✅ Settings loaded from trading_settings.json
+2026-04-21 11:49:43,188 [INFO] Command Center initialized - Professional Trading Mode
+2026-04-21 11:49:43,432 [INFO] 😈 Devil's Advocate agent initialized
+2026-04-21 11:49:43,432 [INFO] 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
+2026-04-21 11:49:44,270 [INFO] 😈 Devil's Advocate agent initialized
+2026-04-21 11:49:44,270 [INFO] 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
+2026-04-21 11:49:44,270 [INFO] 🏗️ Code Architect initialized
+2026-04-21 11:49:44,270 [INFO] 🕐 Market Session Detector initialized with Holiday Awareness
+2026-04-21 11:49:44,270 [INFO] ☁️ Cloud Scanner initialized with Market Session Awareness
+2026-04-21 11:49:44,270 [INFO] Circuit breaker: 20 consecutive errors before alert
+2026-04-21 11:49:44,666 [INFO] Signal Dispatcher initialized on port 17199
+2026-04-21 11:49:44,675 [INFO] No calibration file found — using defaults
+2026-04-21 11:49:44,772 [INFO] RPA Hand: PyAutoGUI & PyGetWindow initialized
+2026-04-21 11:49:44,773 [INFO] Trade ledger initialized
+2026-04-21 11:49:44,773 [INFO] [TEACHER MODE] Signal: SignalAction.BUY XAUUSD=X - Test signal
+2026-04-21 11:49:44,774 [CRITICAL] KILL SWITCH ACTIVATED
+2026-04-21 11:49:44,774 [WARNING] KILL SWITCH ACTIVE - Trading halted
+2026-04-21 11:49:44,774 [INFO] Kill switch deactivated

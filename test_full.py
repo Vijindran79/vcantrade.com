@@ -3,8 +3,8 @@
 import sys
 import io
 
-# Force UTF-8 on Windows
-if sys.platform == 'win32':
+# Force UTF-8 on Windows for standalone runs only.
+if sys.platform == 'win32' and 'pytest' not in sys.modules:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 

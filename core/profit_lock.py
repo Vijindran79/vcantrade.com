@@ -134,6 +134,12 @@ class ProfitLock:
     4. Trigger Walk Away Protocol on max loss
     """
 
+    POINT_VALUE_BY_ASSET = {
+        "NQ=F": 2.0,
+        "MNQ": 2.0,
+        "MNQ1": 2.0,
+    }
+
     def __init__(
         self,
         daily_profit_target_pct: float = 3.0,
@@ -194,11 +200,13 @@ class ProfitLock:
         stop_loss: float,
         take_profit: Optional[float],
         position_size: float,
+        side: str = "BUY",
     ):
         """Add a position to tracking."""
         initial_risk_amount = abs(entry_price - stop_loss) * max(position_size, 0.0)
         self.open_positions.append({
             "asset": asset,
+            "side": str(side or "BUY").upper(),
             "entry_price": entry_price,
             "original_stop": stop_loss,
             "current_stop": stop_loss,
@@ -214,6 +222,21 @@ class ProfitLock:
             f"📊 Position added to Profit Lock: "
             f"{asset} @ ${entry_price:.2f}, SL=${stop_loss:.2f}"
         )
+
+    @classmethod
+    def _point_value_for_asset(cls, asset: str) -> float:
+        normalized_asset = str(asset or "").strip().upper()
+        return float(cls.POINT_VALUE_BY_ASSET.get(normalized_asset, 1.0))
+
+    def _price_offset_for_dollars(self, position: Dict, dollars: float) -> float:
+        """Convert a dollar objective into a price offset using contract value when known."""
+        quantity = float(position.get("quantity", position.get("position_size", 0.0)) or 0.0)
+        asset = str(position.get("asset", "") or "")
+        point_value = float(position.get("point_value", self._point_value_for_asset(asset)) or 1.0)
+        denominator = max(quantity * point_value, 0.0)
+        if denominator <= 0:
+            return 0.0
+        return float(dollars) / denominator
 
     def remove_position(self, asset: str):
         """Remove a position from tracking after it closes."""
@@ -247,62 +270,116 @@ class ProfitLock:
         entry_price = float(position.get("entry", position.get("entry_price", 0.0)) or 0.0)
         quantity = float(position.get("quantity", position.get("position_size", 0.0)) or 0.0)
         side = str(position.get("side", "") or "").upper()
+        asset = str(position.get("asset", "") or "")
+        point_value = float(position.get("point_value", self._point_value_for_asset(asset)) or 1.0)
         if entry_price <= 0 or quantity <= 0 or current_price <= 0:
             return 0.0
         if side == "SELL":
-            return (entry_price - current_price) * quantity
-        return (current_price - entry_price) * quantity
+            return (entry_price - current_price) * quantity * point_value
+        return (current_price - entry_price) * quantity * point_value
+
+    def calculate_open_profit(self, position: Dict, current_price: float) -> float:
+        """Public helper so the UI and stop engine share the same P&L math."""
+        return self._current_profit_amount(position, current_price)
 
     def check_break_even(self, position: Dict, current_price: float) -> Optional[Dict]:
-        """
-        MICRO-CONTRACT SHIELD: Raise the stop to entry plus buffer once profit target is achieved.
-        
-        PREDATOR-CLASS MNQ/MES LOGIC:
-        - Automatic Break-Even at +7.5 points profit
-        - Buffer: 0.5% to prevent premature triggering
-        
-        FIXED: Now correctly uses position entry price, not account balance.
-        """
+        """Raise the stop to entry plus the prop-firm lock amount once the trade is up enough."""
         entry_price = float(position.get("entry", position.get("entry_price", 0.0)) or 0.0)
         current_stop = float(position.get("sl_price", position.get("current_stop", 0.0)) or 0.0)
         side = str(position.get("side", "") or "").upper()
-        initial_risk_amount = float(position.get("initial_risk_amount", 0.0) or 0.0)
         break_even_locked = bool(position.get("break_even_locked"))
-        
-        # PREDATOR-CLASS: MNQ/MES Break-Even at +7.5 points ($2/pt = $15 profit threshold)
-        MNQ_BREAK_EVEN_POINTS = 7.5
-        MNQ_POINT_VALUE = 2.0  # $2 per point for Micro NQ
-        
-        if break_even_locked or entry_price <= 0 or initial_risk_amount <= 0 or side not in {"BUY", "SELL"}:
+
+        if break_even_locked or entry_price <= 0 or side not in {"BUY", "SELL"}:
             return None
 
         current_profit = self._current_profit_amount(position, current_price)
-        
-        # PREDATOR-CLASS: Check if we've achieved +7.5 points profit
-        profit_points = abs(current_price - entry_price)
-        if profit_points < MNQ_BREAK_EVEN_POINTS:
+        trigger_profit = max(0.0, float(getattr(config, "AUTONOMOUS_BREAK_EVEN_TRIGGER_USD", 15.0)))
+        if current_profit < trigger_profit:
             return None
 
-        # Use configurable buffer percentage (default 0.5% for MNQ/MES)
-        buffer_pct = max(0.0, float(getattr(config, 'AUTONOMOUS_BREAK_EVEN_BUFFER_PCT', 0.5)))
-        
+        lock_profit = max(0.0, float(getattr(config, "AUTONOMOUS_BREAK_EVEN_PLUS_USD", 2.0)))
+        price_offset = self._price_offset_for_dollars(position, lock_profit)
+        if price_offset <= 0:
+            buffer_pct = max(0.0, float(config.AUTONOMOUS_BREAK_EVEN_BUFFER_PCT))
+            price_offset = entry_price * (buffer_pct / 100.0)
+
         if side == "SELL":
-            # For shorts: new stop = entry + buffer (stop goes ABOVE entry)
-            new_stop = entry_price * (1.0 + (buffer_pct / 100.0))
-            # Only update if new stop is tighter (lower than current)
+            new_stop = entry_price - price_offset
             if current_stop > 0 and new_stop >= current_stop:
                 return None
         else:
-            # For longs: new stop = entry - buffer (stop goes BELOW entry)
-            new_stop = entry_price * (1.0 - (buffer_pct / 100.0))
-            # Only update if new stop is tighter (higher than current)
+            new_stop = entry_price + price_offset
             if current_stop > 0 and new_stop <= current_stop:
                 return None
 
         return {
             "new_stop": float(new_stop),
-            "reason": f"🛡️ MNQ Shield BE lock (+{MNQ_BREAK_EVEN_POINTS}pts/{buffer_pct:.2f}%)",
+            "reason": "Prop-firm break-even lock",
             "break_even_locked": True,
+            "stop_locked": True,
+        }
+
+    def calculate_structural_trailing_stop(
+        self,
+        position: Dict,
+        recent_candles: Any,
+        current_price: float,
+    ) -> Optional[Dict]:
+        """Trail behind fresh 1-minute structure once a new higher low or lower high prints."""
+        if recent_candles is None:
+            return None
+
+        side = str(position.get("side", "") or "").upper()
+        current_stop = float(position.get("sl_price", position.get("current_stop", 0.0)) or 0.0)
+        if current_price <= 0 or side not in {"BUY", "SELL"}:
+            return None
+
+        candles = recent_candles
+        try:
+            if len(recent_candles.index) >= 3:
+                candles = recent_candles.iloc[:-1]
+        except Exception:
+            candles = recent_candles
+
+        if getattr(candles, "empty", True):
+            return None
+
+        if side == "SELL":
+            if "High" not in candles:
+                return None
+            highs = candles["High"].dropna()
+            if len(highs) < 2:
+                return None
+            previous_high = float(highs.iloc[-2])
+            latest_high = float(highs.iloc[-1])
+            if latest_high >= previous_high or latest_high <= current_price:
+                return None
+            if current_stop > 0 and latest_high >= current_stop:
+                return None
+            return {
+                "new_stop": latest_high,
+                "reason": "1m structural lower-high trail",
+                "break_even_locked": False,
+                "stop_locked": True,
+            }
+
+        if "Low" not in candles:
+            return None
+        lows = candles["Low"].dropna()
+        if len(lows) < 2:
+            return None
+
+        previous_low = float(lows.iloc[-2])
+        latest_low = float(lows.iloc[-1])
+        if latest_low <= previous_low or latest_low >= current_price:
+            return None
+        if current_stop > 0 and latest_low <= current_stop:
+            return None
+
+        return {
+            "new_stop": latest_low,
+            "reason": "1m structural higher-low trail",
+            "break_even_locked": False,
             "stop_locked": True,
         }
 

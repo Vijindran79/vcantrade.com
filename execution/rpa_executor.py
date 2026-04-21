@@ -41,6 +41,10 @@ MOUSE_MOVE_MAX = 0.65
 ACTION_JITTER_MIN = 0.3
 ACTION_JITTER_MAX = 0.8
 
+# Pre-click human latency for stealth execution
+STEALTH_CLICK_DELAY_MIN = 0.7
+STEALTH_CLICK_DELAY_MAX = 1.5
+
 # Keystroke typing delay per character (seconds)
 TYPE_DELAY_MIN = 0.02
 TYPE_DELAY_MAX = 0.08
@@ -203,8 +207,12 @@ class RPAExecutor:
         self.hotkey_buy = config.HOTKEY_BUY
         self.hotkey_sell = config.HOTKEY_SELL
         self.hotkey_close = config.HOTKEY_CLOSE
+        self.human_latency_enabled = bool(getattr(config, "HUMAN_LATENCY", True))
         self.on_blind_error = on_blind_error  # Safety interlock callback
         self.last_failure_reason = ""
+        self.is_executing = False  # Lightning Strike Lock
+        self.active_watchlist = [] # Set by Main App
+        self._last_click_point: Optional[Tuple[int, int]] = None
 
         # Load calibrated coordinates
         self.calibration_manager = CalibrationManager()
@@ -224,6 +232,37 @@ class RPAExecutor:
             logger.info("RPA Hand: PyAutoGUI & PyGetWindow initialized")
         except ImportError:
             logger.warning("RPA Hand: Required libraries missing - mouse execution disabled")
+
+    def set_human_latency(self, enabled: bool) -> None:
+        """Enable or disable the prop-firm stealth latency profile."""
+        self.human_latency_enabled = bool(enabled)
+
+    def _resolve_click_point(self, x: int, y: int) -> Tuple[int, int]:
+        """Offset each click target slightly so repeated strikes avoid identical pixels."""
+        target_x = int(x) + random.choice([-2, -1, 1, 2])
+        target_y = int(y) + random.choice([-2, -1, 1, 2])
+
+        if self._last_click_point == (target_x, target_y):
+            target_x += 1
+
+        self._last_click_point = (target_x, target_y)
+        return self._last_click_point
+
+    def _pause_before_click(self) -> None:
+        """Wait like a human before committing the click."""
+        if self.human_latency_enabled:
+            time.sleep(random.uniform(STEALTH_CLICK_DELAY_MIN, STEALTH_CLICK_DELAY_MAX))
+        else:
+            time.sleep(random.uniform(0.05, 0.15))
+
+    def direct_strike(self, x: int, y: int, move_duration: float = 0.1):
+        """Fast linear movement that still respects stealth click timing and offset."""
+        if not self.pyautogui:
+            return
+        target_x, target_y = self._resolve_click_point(x, y)
+        self.pyautogui.moveTo(target_x, target_y, duration=move_duration)
+        self._pause_before_click()
+        self.pyautogui.click()
 
     def get_permission_status(self) -> dict:
         """Return a best-effort snapshot of OS privileges required for mouse control."""
@@ -511,7 +550,10 @@ class RPAExecutor:
         if not self._ensure_window_frontmost(ticker_hint=ticker_hint):
             return False
         self._log_move_attempt(int(x), int(y), ticker_hint=ticker_hint)
-        _human_click(self.pyautogui, int(x), int(y))
+        target_x, target_y = self._resolve_click_point(int(x), int(y))
+        _human_move(self.pyautogui, target_x, target_y)
+        self._pause_before_click()
+        self.pyautogui.click()
         return True
 
     def _force_focus_tradingview(self, win, ticker_hint: Optional[str] = None) -> bool:
@@ -673,17 +715,27 @@ class RPAExecutor:
     def execute_trade(self, trade: TradeRecord) -> bool:
         """Execute a trade via RPA. Returns True if successful."""
         self.last_failure_reason = ""
+        
+        # 1. Blacklist Non-Watchlist Assets
+        if self.active_watchlist and trade.asset not in self.active_watchlist:
+            error_msg = f"BLACKLIST ERROR: {trade.asset} not in active session_watchlist. Aborting strike."
+            logger.error(error_msg)
+            self.last_failure_reason = error_msg
+            return False
+
         if config.DRY_RUN:
             logger.info(f"[DRY RUN] Would execute {trade.action.value} {trade.asset}")
             return True
 
-        # ── Safety Interlock ─────────────────────────────────────────────
-        # Do NOT click if TradingView is minimized or covered by another app
-        if not self.bring_tradingview_to_front(ticker_hint=trade.asset):
-            logger.error("[ABORT] Professor is blind — execution cancelled")
-            return False
-
+        # 2. Execution Lock
+        self.is_executing = True
         try:
+            # ── Safety Interlock ─────────────────────────────────────────────
+            # Do NOT click if TradingView is minimized or covered by another app
+            if not self.bring_tradingview_to_front(ticker_hint=trade.asset):
+                logger.error("[ABORT] Professor is blind — execution cancelled")
+                return False
+
             if trade.action == SignalAction.BUY:
                 return self._execute_buy(trade)
             elif trade.action == SignalAction.SELL:
@@ -698,6 +750,8 @@ class RPAExecutor:
             self.last_failure_reason = f"RPA execution error | {e}"
             logger.error(f"RPA execution failed: {e}")
             return False
+        finally:
+            self.is_executing = False
 
     def draw_liquidity_zone(self, ticker: str, liquidity_zone: Optional[dict]) -> bool:
         """Draw nearest liquidity zone using rectangle tool when optional calibration exists."""
@@ -886,15 +940,64 @@ class RPAExecutor:
         return self.move_human_like(x, y)
 
     def _execute_entry_with_retry(self, button_point: str, trade: TradeRecord) -> bool:
+        """Optimized Lightning Strike entry sequence."""
         for attempt in range(2):
-            if not self._mouse_click_with_input(button_point, trade, fill_sl=True, fill_tp=True):
+            # Lightning Strike Precision: Focus Window -> Direct Move Buy -> SL -> TP -> Confirm
+            if not self._lightning_strike_sequence(button_point, trade):
                 continue
-            time.sleep(1.0)
+            
+            time.sleep(0.5) # Reduced wait
             if self._position_open_visible():
-                logger.info("Position-open verification succeeded for %s on attempt %s", trade.asset, attempt + 1)
+                logger.info("Position-open verification succeeded for %s", trade.asset)
                 return True
-            logger.warning("Position-open verification failed for %s on attempt %s", trade.asset, attempt + 1)
         return False
+
+    def _lightning_strike_sequence(self, button_point: str, trade: TradeRecord) -> bool:
+        """High-speed multi-click buffering (Buy + SL + TP + Confirm < 1.5s)."""
+        if not self.pyautogui:
+            return False
+
+        try:
+            # Action Button (Buy/Sell)
+            btn_x, btn_y = self._get_abs_coord(button_point, ticker_hint=trade.asset)
+            if (btn_x, btn_y) == (0, 0): return False
+            
+            self.direct_strike(btn_x, btn_y)
+            time.sleep(0.1) # Micro-buffer for order window to appear
+
+            # SL Input
+            if trade.stop_loss:
+                sl_x, sl_y = self._get_abs_coord("sl_input", ticker_hint=trade.asset)
+                if (sl_x, sl_y) != (0, 0):
+                    self.direct_strike(sl_x, sl_y, move_duration=0.1)
+                    self.pyautogui.hotkey("ctrl", "a")
+                    self.pyautogui.write(str(trade.stop_loss))
+                    time.sleep(0.05)
+
+            # TP Input
+            if trade.take_profit:
+                tp_x, tp_y = self._get_abs_coord("tp_input", ticker_hint=trade.asset)
+                if (tp_x, tp_y) != (0, 0):
+                    self.direct_strike(tp_x, tp_y, move_duration=0.1)
+                    self.pyautogui.hotkey("ctrl", "a")
+                    self.pyautogui.write(str(trade.take_profit))
+                    time.sleep(0.05)
+
+            # Confirm Strike
+            confirm_x, confirm_y = self._get_abs_coord("confirm_button", ticker_hint=trade.asset)
+            # Fast visual confirm check
+            confirm_pos = self._find_button_by_image(CONFIRM_BUTTON_IMAGE, confidence=0.85)
+            if confirm_pos:
+                confirm_x, confirm_y = confirm_pos
+
+            if (confirm_x, confirm_y) != (0, 0):
+                self.direct_strike(confirm_x, confirm_y)
+                return True
+                
+            return False
+        except Exception as e:
+            logger.error(f"Lightning strike sequence failed: {e}")
+            return False
 
     def _execute_buy(self, trade: TradeRecord) -> bool:
         logger.info(f"[AUTONOMOUS] Executing BUY on {trade.asset} via RPA Hand")
