@@ -56,6 +56,10 @@ WHITE = "#E6EDF3"
 DIM = "#6E7681"
 YELLOW = "#F0E68C"
 
+# HIGH-CONTRAST TRADING COLORS (Neon for visibility across room)
+NEON_GREEN = "#00FF41"  # Bright neon green for BUY signals
+BRIGHT_RED = "#FF003C"  # Bright red for SELL signals
+
 
 class StatusDot(QWidget):
     """Small colored status indicator dot."""
@@ -883,8 +887,12 @@ class CommandCenter(QWidget):
         self.watchlist_table = QTableWidget()
         self.watchlist_table.setColumnCount(4)
         self.watchlist_table.setHorizontalHeaderLabels(["✓", "Ticker", "Last Signal", "Status"])
-        self.watchlist_table.horizontalHeader().setStretchLastSection(True)
-        self.watchlist_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # Column width optimization: Slim Ticker/Status, wide Logic/Reasoning
+        self.watchlist_table.setColumnWidth(0, 30)   # Checkmark - very slim
+        self.watchlist_table.setColumnWidth(1, 80)   # Ticker - slim
+        self.watchlist_table.setColumnWidth(2, 200)  # Last Signal - medium
+        self.watchlist_table.horizontalHeader().setStretchLastSection(True)  # Status stretches
+        self.watchlist_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Status column stretches to fill
         self.watchlist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.watchlist_table.setAlternatingRowColors(True)
         self.watchlist_table.setMaximumHeight(200)
@@ -918,8 +926,16 @@ class CommandCenter(QWidget):
         self.positions_table.setHorizontalHeaderLabels([
             "Asset", "Side", "Entry", "Current", "P&L ($)", "P&L (%)", "TP", "SL"
         ])
+        # Column width optimization: Slim Side/Entry/Current, wide Asset for readability
+        self.positions_table.setColumnWidth(0, 100)  # Asset - medium
+        self.positions_table.setColumnWidth(1, 50)   # Side - slim (BUY/SELL)
+        self.positions_table.setColumnWidth(2, 70)   # Entry - slim
+        self.positions_table.setColumnWidth(3, 70)   # Current - slim
+        self.positions_table.setColumnWidth(4, 80)   # P&L ($) - medium
+        self.positions_table.setColumnWidth(5, 70)   # P&L (%) - medium
+        self.positions_table.setColumnWidth(6, 70)   # TP - slim
+        self.positions_table.setColumnWidth(7, 70)   # SL - slim
         self.positions_table.horizontalHeader().setStretchLastSection(True)
-        self.positions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.positions_table.setAlternatingRowColors(True)
         self.positions_table.setMaximumHeight(200)
         self.positions_table.setStyleSheet(f"""
@@ -966,8 +982,13 @@ class CommandCenter(QWidget):
         self.trade_log_table.setHorizontalHeaderLabels([
             "Time", "Asset", "Action", "Amount", "P&L", "Status"
         ])
-        self.trade_log_table.horizontalHeader().setStretchLastSection(True)
-        self.trade_log_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # Column width optimization: Slim Time/Action/Amount, wide Asset for readability
+        self.trade_log_table.setColumnWidth(0, 90)   # Time - slim
+        self.trade_log_table.setColumnWidth(1, 80)   # Asset - slim
+        self.trade_log_table.setColumnWidth(2, 60)   # Action - very slim (BUY/SELL)
+        self.trade_log_table.setColumnWidth(3, 70)   # Amount - slim
+        self.trade_log_table.setColumnWidth(4, 80)   # P&L - medium
+        self.trade_log_table.horizontalHeader().setStretchLastSection(True)  # Status stretches
         self.trade_log_table.setAlternatingRowColors(True)
         self.trade_log_table.setMaximumHeight(180)
         self.trade_log_table.setStyleSheet(f"""
@@ -1645,7 +1666,7 @@ class CommandCenter(QWidget):
         """)
 
     def update_positions(self, positions: List[Dict]):
-        """Update live positions table."""
+        """Update live positions table with HIGH-CONTRAST BUY/SELL colors."""
         self.positions_table.setRowCount(len(positions))
         
         for i, pos in enumerate(positions):
@@ -1664,15 +1685,28 @@ class CommandCenter(QWidget):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
-                # Color P&L columns
-                if j == 4 or j == 5:
+                # HIGH-CONTRAST: Side column (BUY=Neon Green, SELL=Bright Red)
+                if j == 1:
+                    side = pos.get("side", "").upper()
+                    if "BUY" in side or "LONG" in side:
+                        item.setForeground(QColor(NEON_GREEN))
+                        item.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+                    elif "SELL" in side or "SHORT" in side:
+                        item.setForeground(QColor(BRIGHT_RED))
+                        item.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+                
+                # Color P&L columns with high contrast
+                elif j == 4 or j == 5:
                     pnl = pos.get('pnl', 0)
-                    item.setForeground(QColor(GREEN if pnl >= 0 else RED))
+                    if pnl > 0:
+                        item.setForeground(QColor(NEON_GREEN))
+                    elif pnl < 0:
+                        item.setForeground(QColor(BRIGHT_RED))
                 
                 self.positions_table.setItem(i, j, item)
 
     def add_trade_log(self, asset: str, action: str, amount: float, pnl: float = 0, status: str = "Open"):
-        """Add entry to trade log."""
+        """Add entry to trade log with HIGH-CONTRAST BUY/SELL colors."""
         row = self.trade_log_table.rowCount()
         self.trade_log_table.insertRow(row)
 
@@ -1684,11 +1718,24 @@ class CommandCenter(QWidget):
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            if j == 5:  # Status column
+            # HIGH-CONTRAST: Action column (BUY=Neon Green, SELL=Bright Red)
+            if j == 2:
+                action_upper = action.upper()
+                if "BUY" in action_upper or "LONG" in action_upper:
+                    item.setForeground(QColor(NEON_GREEN))
+                    item.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+                elif "SELL" in action_upper or "SHORT" in action_upper:
+                    item.setForeground(QColor(BRIGHT_RED))
+                    item.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+            
+            # Status column with high contrast
+            elif j == 5:
                 if status == "Closed - Profit":
-                    item.setForeground(QColor(GREEN))
+                    item.setForeground(QColor(NEON_GREEN))
+                    item.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
                 elif status == "Closed - Loss":
-                    item.setForeground(QColor(RED))
+                    item.setForeground(QColor(BRIGHT_RED))
+                    item.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
 
             self.trade_log_table.setItem(row, j, item)
 

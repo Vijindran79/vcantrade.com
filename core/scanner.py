@@ -63,14 +63,27 @@ class CloudScanner:
         self.code_architect = CodeArchitect()
         self.recent_signals: Dict[str, datetime] = {}  # Prevent duplicate signals
         self.signal_cooldown = 300  # 5 minutes between signals for same ticker
+        
+        # LION MODE: Re-Entry Lock - Prevents overtrading after stop loss
+        self.re_entry_lockout: Dict[str, datetime] = {}  # ticker -> lockout expiry time
+        self.LOCKOUT_DURATION = 300  # 5-minute lockout after trade closure
+        
         self.status_callback = None
         self.market_data_cache: Dict[Tuple[str, str, str], pd.DataFrame] = {}
         self.last_close_cache: Dict[str, float] = {}
         
+        # Circuit Breaker - prevents silent failures during API outages
+        self.consecutive_errors = 0
+        self.max_consecutive_errors = 20  # ~10 minutes of errors before alert
+        self.last_successful_scan = None
+        self.error_alert_threshold = 10  # Alert user after this many errors
+
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
-        
+
         logger.info("☁️ Cloud Scanner initialized with Market Session Awareness")
+        logger.info(f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert")
+        logger.info(f"🦁 LION MODE: Re-entry lockout active ({self.LOCKOUT_DURATION}s cooldown)")
 
     def set_runtime_context(self, mode: str, dashboard_tickers: Optional[List[str]] = None):
         """Keep session awareness aligned with the operator's live dashboard state."""
@@ -148,6 +161,11 @@ class CloudScanner:
     async def _scan_single_ticker(self, ticker: str) -> List[TechnicalSignal]:
         """Scan a single ticker for technical signals."""
         signals = []
+        
+        # LION MODE: Check Re-Entry Lock - Skip if ticker is in cooldown
+        if self.is_ticker_locked(ticker):
+            logger.debug(f"🦁 LION MODE: {ticker} is in re-entry lockout. Skipping scan.")
+            return signals
         
         # Fetch 1-minute data for last day
         df = await self._fetch_market_data(ticker)
@@ -859,6 +877,43 @@ class CloudScanner:
         key = f"{ticker}:{signal_type}"
         self.recent_signals[key] = datetime.utcnow()
     
+    def is_ticker_locked(self, ticker: str) -> bool:
+        """
+        LION MODE: Check if ticker is in re-entry lockout.
+        Returns True if ticker cannot be traded (within 5-min cooldown after closure).
+        """
+        if ticker not in self.re_entry_lockout:
+            return False
+        
+        expiry = self.re_entry_lockout[ticker]
+        if datetime.utcnow() < expiry:
+            remaining = (expiry - datetime.utcnow()).total_seconds()
+            logger.debug(f"🦁 LION MODE: {ticker} locked for {remaining:.0f}s more")
+            return True
+        
+        # Lockout expired - remove from lockout dict
+        del self.re_entry_lockout[ticker]
+        logger.debug(f"✅ LION MODE: {ticker} re-entry lockout expired")
+        return False
+    
+    def lock_ticker(self, ticker: str, reason: str = "Trade closed"):
+        """
+        LION MODE: Lock ticker for re-entry cooldown period.
+        Called when a trade is closed (especially on stop loss).
+        """
+        expiry = datetime.utcnow() + timedelta(seconds=self.LOCKOUT_DURATION)
+        self.re_entry_lockout[ticker] = expiry
+        logger.info(f"🦁 LION MODE: {ticker} locked for re-entry ({self.LOCKOUT_DURATION}s) - {reason}")
+    
+    def cleanup_expired_lockouts(self):
+        """Remove expired lockouts to prevent memory bloat."""
+        now = datetime.utcnow()
+        expired = [t for t, exp in self.re_entry_lockout.items() if now >= exp]
+        for ticker in expired:
+            del self.re_entry_lockout[ticker]
+        if expired:
+            logger.debug(f"🧹 Cleaned up {len(expired)} expired lockouts")
+    
     async def process_signals(self, signals: List[TechnicalSignal]) -> Optional[dict]:
         """
         Process detected signals through Swarm Debate.
@@ -1196,38 +1251,61 @@ class CloudScanner:
             return False
     
     async def run_scanner(self):
-        """Main scanner loop - continuous scanning."""
-        logger.info(f" Cloud Scanner started - monitoring {len(self.tickers)} tickers")
+        """Main scanner loop - continuous scanning with circuit breaker."""
+        logger.info(f"☁️ Cloud Scanner started - monitoring {len(self.tickers)} tickers")
         logger.info(f"Tickers: {', '.join(self.tickers)}")
         logger.info(f"Confidence threshold: {config.SWARM_CONFIDENCE_THRESHOLD}")
-        
+        logger.info(f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert")
+
         while True:
             try:
                 # Scan all tickers
                 signals = await self.scan_all_tickers()
-                
+
                 # Process through Swarm
                 if signals:
                     trade_signal = await self.process_signals(signals)
-                    
+
                     if trade_signal:
                         # Dispatch to local executor
                         success = await self.dispatch_to_local(trade_signal)
-                        
+
                         if success:
-                            logger.info(f" Trade signal executed: {trade_signal}")
+                            logger.info(f"✅ Trade signal executed: {trade_signal}")
                         else:
-                            logger.warning(f" Trade signal dispatch failed")
-                
+                            logger.warning(f"⚠️ Trade signal dispatch failed")
+
+                # Success - reset error counter
+                self.consecutive_errors = 0
+                self.last_successful_scan = datetime.utcnow()
+
                 # Wait before next scan
                 await asyncio.sleep(self.get_scan_interval())
-                
+
             except KeyboardInterrupt:
-                logger.info("Scanner stopped by user")
+                logger.info("🛑 Scanner stopped by user")
                 break
             except Exception as e:
-                logger.error(f"Scanner error: {e}")
-                await asyncio.sleep(5)  # Wait before retry
+                self.consecutive_errors += 1
+                logger.error(f"❌ Scanner error ({self.consecutive_errors}/{self.max_consecutive_errors}): {type(e).__name__}: {e}")
+                
+                # Alert user if threshold exceeded
+                if self.consecutive_errors >= self.error_alert_threshold:
+                    logger.critical(
+                        f"🚨 SCANNER ALERT: {self.consecutive_errors} consecutive errors! "
+                        f"Last success: {self.last_successful_scan}. "
+                        f"Check API connectivity, API keys, and network status."
+                    )
+                
+                # Circuit breaker - suggest manual intervention
+                if self.consecutive_errors >= self.max_consecutive_errors:
+                    logger.critical(
+                        f"🛑 CIRCUIT BREAKER TRIGGERED: {self.max_consecutive_errors} consecutive errors. "
+                    )
+                    # Still wait, but log more aggressively
+                    await asyncio.sleep(10)  # Longer wait when in error state
+                else:
+                    await asyncio.sleep(5)  # Normal retry delay
 
 
 def run_cloud_scanner():

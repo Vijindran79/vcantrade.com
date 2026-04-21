@@ -411,8 +411,8 @@ class BrowserAgent:
             # Navigate to TradingView
             await self.navigate_to(url)
             
-            # Wait for price to load
-            await self.page.wait_for_selector('.js-symbol-last', timeout=10000)
+            # Wait for price to load - INCREASED TIMEOUT FOR STABILITY (20s)
+            await self.page.wait_for_selector('.js-symbol-last', timeout=20000)
             
             # Scrape the current price
             price_text = await self.page.text_content('.js-symbol-last')
@@ -458,8 +458,8 @@ class BrowserAgent:
             # Navigate to Yahoo Finance
             await self.navigate_to(url)
             
-            # Wait for price to load
-            await self.page.wait_for_selector('[data-testid="qsp-price"]', timeout=10000)
+            # Wait for price to load - INCREASED TIMEOUT FOR STABILITY (20s)
+            await self.page.wait_for_selector('[data-testid="qsp-price"]', timeout=20000)
             
             # Scrape the current price
             price_text = await self.page.get_attribute('[data-testid="qsp-price"]', 'innerText')

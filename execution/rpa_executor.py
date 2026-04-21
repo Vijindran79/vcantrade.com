@@ -51,6 +51,10 @@ BEZIER_CONTROL_OFFSET = 80
 # Window focus settle delay — gives Windows time to foreground the browser
 WINDOW_SETTLE_DELAY = 1.5
 
+# Predator-Class Stealth: Extended reaction delay for Apex/TopStep stealth
+REACTION_DELAY_MIN = 0.8  # Minimum human reaction time (seconds)
+REACTION_DELAY_MAX = 1.6  # Maximum human reaction time (seconds)
+
 
 # ---------------------------------------------------------------------------
 # Bezier curve mouse movement
@@ -153,10 +157,15 @@ def _human_move(pyautogui, x: int, y: int):
 
 
 def _human_click(pyautogui, x: int, y: int):
-    """Move to target with Bezier curve, then click."""
+    """
+    Move to target with Bezier curve, then click.
+    
+    Predator-Class Stealth: Uses extended reaction delay (0.8s-1.6s) to mimic
+    human cognitive processing time and evade prop firm detection algorithms.
+    """
     _human_move(pyautogui, x, y)
-    # Tiny pause before click (human reaction time)
-    time.sleep(random.uniform(0.05, 0.15))
+    # Predator-Class reaction delay: 0.8s to 1.6s (human cognitive processing)
+    time.sleep(random.uniform(REACTION_DELAY_MIN, REACTION_DELAY_MAX))
     pyautogui.click()
 
 
@@ -293,13 +302,24 @@ class RPAExecutor:
         "FOREX", "FUTURES", "CRYPTO", "BINANCE", "BYBIT", "COINBASE",
         "METATRADER", "MT4", "MT5", "OANDA", "EXNESS",
     ]
+    # PREDATOR-CLASS BLACKLIST: Strict terminal/editor exclusion list
+    # The RPA Hand will NEVER target these windows under any circumstances
     _WINDOW_TITLE_BLACKLIST = [
         "POWERSHELL",
         "PWSH",
+        "CMD",
         "COMMAND PROMPT",
-        "CMD.EXE",
         "TERMINAL",
         "VISUAL STUDIO CODE",
+        "VSCODE",
+        "PYTHON",
+        "CONSOLE",
+        "GIT BASH",
+        "WSL",
+        "UBUNTU",
+        "DEVELOPER",
+        "DEBUG",
+        "ADMINISTRATOR",
     ]
     _PREFERRED_BROWSER_HINTS = ["GOOGLE CHROME", "MICROSOFT EDGE", "BRAVE"]
     # Allowed browser titles when TradingView itself is not present
@@ -373,9 +393,16 @@ class RPAExecutor:
                     if not win.isMinimized:
                         logger.debug("Window matched (tier): '%s'", win.title)
                         return win
-                except Exception:
+                except AttributeError:
+                    # Window object doesn't have isMinimized - assume it's valid
+                    logger.debug("Window matched (no isMinimized attr): '%s'", win.title)
                     return win
-            # All minimized — return first anyway so we can restore it
+                except Exception as e:
+                    # Log the specific error and skip this window
+                    logger.warning(f"Error checking window '{win.title}': {e}")
+                    continue
+            
+            # All candidates minimized — return first anyway so we can restore it
             logger.debug("All candidates minimized, returning '%s'", candidates[0].title)
             return candidates[0]
 
@@ -410,16 +437,33 @@ class RPAExecutor:
         return False
 
     def _cycle_tabs_until_match(self, ticker_hint: Optional[str] = None, attempts: int = 8) -> bool:
-        """Cycle browser tabs until TradingView or ticker title becomes active."""
+        """Cycle browser tabs until TradingView or ticker title becomes active.
+        
+        IMPROVED: Now logs each failed attempt and final failure reason.
+        """
         if not self.pyautogui:
             return False
-        for _ in range(max(1, attempts)):
+        
+        initial_title = self._active_window_title()
+        logger.debug(f"Starting tab cycle from: '{initial_title}'")
+        
+        for i in range(max(1, attempts)):
             title = self._active_window_title()
             if self._title_matches_target(title, ticker_hint=ticker_hint):
+                logger.info(f"Tab match found after {i+1} cycles: '{title}'")
                 return True
+            
+            logger.debug(f"Tab cycle {i+1}/{attempts}: '{title}' → cycling...")
             self.pyautogui.hotkey("ctrl", "tab")
             time.sleep(0.3)
-        return self._title_matches_target(self._active_window_title(), ticker_hint=ticker_hint)
+        
+        final_title = self._active_window_title()
+        logger.warning(
+            f"Tab cycling exhausted ({attempts} attempts). "
+            f"Started: '{initial_title}', Ended: '{final_title}'. "
+            f"Target matcher: ticker='{ticker_hint}'"
+        )
+        return self._title_matches_target(final_title, ticker_hint=ticker_hint)
 
     def _alt_tab_into_view(self, ticker_hint: Optional[str] = None, attempts: int = 2) -> bool:
         """Physically cycle top-level windows until TradingView is foreground."""
@@ -1046,10 +1090,20 @@ class RPAExecutor:
                 _human_type(self.pyautogui, str(trade.stop_loss))
                 logger.info(f"Filled Stop Loss: {trade.stop_loss}")
                 # ── Human Hesitation ─────────────────────────────────────
-                # 0.5 s pause after entering Stop Loss, before the next action.
-                # Mimics the natural moment a human re-reads their own input.
-                hesitation = 0.5 + random.uniform(0.0, 0.18)
-                logger.debug(f"Human hesitation: {hesitation:.2f}s after SL entry")
+                # Variable pause after entering Stop Loss (0.3s to 1.2s range)
+                # Uses weighted random to favor realistic human delays:
+                #   - 60% chance: quick review (0.3-0.6s)
+                #   - 30% chance: medium pause (0.6-0.9s)  
+                #   - 10% chance: deep thought (0.9-1.2s)
+                hesitation_roll = random.random()
+                if hesitation_roll < 0.6:
+                    hesitation = random.uniform(0.3, 0.6)
+                elif hesitation_roll < 0.9:
+                    hesitation = random.uniform(0.6, 0.9)
+                else:
+                    hesitation = random.uniform(0.9, 1.2)
+
+                logger.debug(f"Human hesitation: {hesitation:.2f}s after SL entry (roll={hesitation_roll:.2f})")
                 time.sleep(hesitation)
                 _jitter()
 

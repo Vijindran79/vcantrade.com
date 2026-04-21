@@ -20,6 +20,9 @@ PROP_IS_FUNDED = (
     os.getenv("PROP_IS_FUNDED", "False").lower() == "true"
 )  # Are we already funded?
 
+# ===== LION MODE: ANTI-OVERTRADING CONTROLS =====
+MAX_DAILY_TRADES = int(os.getenv("MAX_DAILY_TRADES", "30"))  # Hard limit: 30 trades/day max
+
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
 DRY_RUN = (
     os.getenv("DRY_RUN", "False").lower() == "true"
