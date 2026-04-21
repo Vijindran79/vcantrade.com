@@ -29,6 +29,7 @@ from PyQt6.QtGui import (
 from datetime import datetime
 import logging
 import sys
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -161,10 +162,14 @@ class GlassmorphicPanel(QWidget):
 
         aggression = getattr(self, "_aggression_mode", False)
         background = "rgba(56, 16, 22, 240)" if aggression else "rgba(16, 22, 36, 235)"
-        border = "rgba(248, 81, 73, 200)" if aggression else "rgba(100, 120, 160, 120)"
+        signal_alert = getattr(self, "_signal_alert_active", False) and getattr(self, "_signal_alert_flash_state", False)
+        if signal_alert:
+            border = "rgba(57, 255, 20, 235)"
+        else:
+            border = "rgba(248, 81, 73, 200)" if aggression else "rgba(100, 120, 160, 120)"
         self.setStyleSheet(
             f"background-color: {background};"
-            f"border: 1px solid {border};"
+            f"border: {'2px' if signal_alert else '1px'} solid {border};"
             "border-radius: 12px;"
         )
     
@@ -197,6 +202,10 @@ class GlassmorphicPanel(QWidget):
                 gradient.setColorAt(1, QColor(10, 15, 30, 200))
                 border_color = QColor(100, 120, 160, 80)
                 highlight_top = QColor(255, 255, 255, 30)
+
+            if getattr(self, "_signal_alert_active", False) and getattr(self, "_signal_alert_flash_state", False):
+                border_color = QColor(57, 255, 20, 225)
+                highlight_top = QColor(120, 255, 140, 58)
             
             # Draw rounded rectangle
             rect = self.rect().adjusted(2, 2, -2, -2)
@@ -263,6 +272,7 @@ class AINarratorOverlay(GlassmorphicPanel):
     
     # Signals for thread-safe updates
     activity_added = pyqtSignal(str, str, str)  # icon, message, timestamp
+    stealth_toggled = pyqtSignal(bool)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -271,8 +281,14 @@ class AINarratorOverlay(GlassmorphicPanel):
         self._pinned = True
         self._analysis_mode = False
         self._aggression_mode = False
+        self._rpa_enabled = True
+        self._signal_alert_active = False
+        self._signal_alert_flash_state = False
+        self._signal_alert_deadline = 0.0
         self._current_opacity = 0.96 if sys.platform == "win32" else 1.0
         self.setWindowOpacity(self._current_opacity)
+        self.signal_alert_timer = QTimer(self)
+        self.signal_alert_timer.timeout.connect(self._pulse_signal_alert_border)
         self.init_ui()
         self._apply_window_mode()
         self.start_status_timer()
@@ -304,6 +320,27 @@ class AINarratorOverlay(GlassmorphicPanel):
             "color: #3FB950; font-size: 12px; font-weight: bold; background: transparent;"
         )
         main_layout.addWidget(self.live_pnl_label)
+
+        hud_frame = QFrame()
+        hud_frame.setStyleSheet(
+            "QFrame { background: rgba(12,18,30,210); border: 1px solid rgba(88,166,255,0.22); border-radius: 8px; }"
+        )
+        hud_layout = QHBoxLayout()
+        hud_layout.setContentsMargins(10, 6, 10, 6)
+        hud_layout.setSpacing(10)
+        self.daily_bullets_label = QLabel("Daily Bullets: 0/30")
+        self.daily_bullets_label.setStyleSheet(
+            "color: #58A6FF; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        self.lockout_timer_label = QLabel("Lockout Timer: READY")
+        self.lockout_timer_label.setStyleSheet(
+            "color: #F2CC60; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        hud_layout.addWidget(self.daily_bullets_label)
+        hud_layout.addStretch()
+        hud_layout.addWidget(self.lockout_timer_label)
+        hud_frame.setLayout(hud_layout)
+        main_layout.addWidget(hud_frame)
 
         self.watchlist_status_frame = QFrame()
         self.watchlist_status_frame.setStyleSheet(
@@ -373,11 +410,27 @@ class AINarratorOverlay(GlassmorphicPanel):
         levels_layout.setContentsMargins(12, 10, 12, 10)
         levels_layout.setSpacing(6)
 
+        levels_header = QHBoxLayout()
+        levels_header.setSpacing(8)
+
         self.levels_title = QLabel("TEACHER BROADCAST")
         self.levels_title.setStyleSheet(
             "color: #58A6FF; font-size: 13px; font-weight: bold; letter-spacing: 1px; background: transparent;"
         )
-        levels_layout.addWidget(self.levels_title)
+        levels_header.addWidget(self.levels_title)
+        levels_header.addStretch()
+
+        self.clear_levels_btn = QPushButton("⟲")
+        self.clear_levels_btn.setFixedSize(24, 24)
+        self.clear_levels_btn.setToolTip("Reset Teacher Broadcast levels")
+        self.clear_levels_btn.setStyleSheet(
+            "QPushButton { background: rgba(248,81,73,0.16); color: #FF7B72; border: 1px solid rgba(248,81,73,0.45);"
+            "border-radius: 12px; font-size: 12px; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(248,81,73,0.28); }"
+        )
+        self.clear_levels_btn.clicked.connect(lambda: self.clear_trade_levels(announce=True))
+        levels_header.addWidget(self.clear_levels_btn)
+        levels_layout.addLayout(levels_header)
 
         self.levels_ticker = QLabel("NO ACTIVE LEVELS")
         self.levels_ticker.setStyleSheet(
@@ -522,9 +575,16 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.snap_combo.setFixedWidth(108)
         self.snap_combo.currentIndexChanged.connect(self._snap_from_combo)
 
+        self.stealth_btn = QPushButton("🖱️")
+        self.stealth_btn.setCheckable(True)
+        self.stealth_btn.setChecked(True)
+        self.stealth_btn.setFixedSize(32, 24)
+        self.stealth_btn.setToolTip("RPA Hand execution enabled")
+        self.stealth_btn.clicked.connect(self._toggle_rpa_execution)
+
         self.mode_label = QLabel()
 
-        for btn in [self.pin_btn, self.font_minus_btn, self.font_plus_btn]:
+        for btn in [self.pin_btn, self.font_minus_btn, self.font_plus_btn, self.stealth_btn]:
             btn.setStyleSheet(
                 "QPushButton { background: rgba(88,166,255,0.18); color: #E6EDF3;"
                 "border: 1px solid rgba(88,166,255,0.5); border-radius: 4px; font-size: 11px; }"
@@ -542,6 +602,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         layout.addWidget(self.font_plus_btn)
         layout.addWidget(self.opacity_slider)
         layout.addWidget(self.snap_combo)
+        layout.addWidget(self.stealth_btn)
         layout.addStretch()
         layout.addWidget(self.mode_label)
         row.setLayout(layout)
@@ -653,6 +714,24 @@ class AINarratorOverlay(GlassmorphicPanel):
         self._current_opacity = max(0.55, min(1.0, value / 100.0))
         self.setWindowOpacity(self._current_opacity)
 
+    def _toggle_rpa_execution(self):
+        self.set_rpa_execution_enabled(self.stealth_btn.isChecked(), announce=True)
+
+    def set_rpa_execution_enabled(self, enabled: bool, announce: bool = False):
+        """Sync the manual RPA Hand ON/OFF toggle with runtime execution state."""
+        previous = self._rpa_enabled
+        self._rpa_enabled = bool(enabled)
+        self.stealth_btn.setChecked(self._rpa_enabled)
+        self.stealth_btn.setToolTip(
+            "RPA Hand execution enabled" if self._rpa_enabled else "RPA Hand execution paused"
+        )
+        if announce:
+            icon = "🖱️" if self._rpa_enabled else "⛔"
+            state = "ON" if self._rpa_enabled else "OFF"
+            self.add_activity(icon, f"RPA Hand {state}")
+        if previous != self._rpa_enabled:
+            self.stealth_toggled.emit(self._rpa_enabled)
+
     def _change_font_scale(self, delta: float):
         self._font_scale = max(0.85, min(1.35, self._font_scale + delta))
         size_main = int(14 * self._font_scale)
@@ -731,6 +810,31 @@ class AINarratorOverlay(GlassmorphicPanel):
             f"color: {color}; font-size: 12px; font-weight: bold; background: transparent;"
         )
 
+    def set_daily_bullets(self, used: int, limit: int = 30):
+        """Update the Lion HUD trade-cap counter."""
+        self.daily_bullets_label.setText(f"Daily Bullets: {int(used)}/{int(limit)}")
+        color = "#F85149" if used >= limit else "#F2CC60" if used >= max(1, int(limit * 0.7)) else "#58A6FF"
+        self.daily_bullets_label.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+
+    def update_lockout_timer(self, remaining_seconds: int, ticker: str = ""):
+        """Refresh the 5-minute cooldown HUD countdown."""
+        remaining = max(0, int(remaining_seconds))
+        minutes, seconds = divmod(remaining, 60)
+        suffix = f" [{ticker}]" if ticker else ""
+        self.lockout_timer_label.setText(f"Lockout Timer: {minutes:02d}:{seconds:02d}{suffix}")
+        self.lockout_timer_label.setStyleSheet(
+            "color: #FF7B72; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+
+    def clear_lockout_timer(self):
+        """Return the lockout HUD to its ready state."""
+        self.lockout_timer_label.setText("Lockout Timer: READY")
+        self.lockout_timer_label.setStyleSheet(
+            "color: #F2CC60; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+
     def update_live_ledger(
         self,
         active_trades: int = 0,
@@ -755,6 +859,29 @@ class AINarratorOverlay(GlassmorphicPanel):
         self._ledger_rate_val.setStyleSheet(
             f"color: {rate_color}; font-size: 12px; font-weight: bold; background: transparent;"
         )
+
+    def trigger_signal_alert(self, duration_ms: int = 3000):
+        """Pulse the mirror border neon green after a fresh signal broadcast."""
+        self._signal_alert_active = True
+        self._signal_alert_flash_state = True
+        self._signal_alert_deadline = time.monotonic() + max(0.5, duration_ms / 1000.0)
+        if not self.signal_alert_timer.isActive():
+            self.signal_alert_timer.start(150)
+        self._apply_panel_chrome()
+        self.update()
+
+    def _pulse_signal_alert_border(self):
+        if not self._signal_alert_active:
+            self.signal_alert_timer.stop()
+            return
+        if time.monotonic() >= self._signal_alert_deadline:
+            self._signal_alert_active = False
+            self._signal_alert_flash_state = False
+            self.signal_alert_timer.stop()
+        else:
+            self._signal_alert_flash_state = not self._signal_alert_flash_state
+        self._apply_panel_chrome()
+        self.update()
     
     def start_status_timer(self):
         """Start timer for status dot pulse animation."""
@@ -978,13 +1105,37 @@ class AINarratorOverlay(GlassmorphicPanel):
         )
         self.levels_liquidity_label.setText(f"LIQ: {liquidity_label or '--'}")
 
-    def clear_trade_levels(self):
+    def clear_trade_levels(self, announce: bool = False):
         """Reset large trade-level broadcast when nothing actionable is active."""
         self.update_trade_levels("NO ACTIVE LEVELS", None, None, "")
+        if announce:
+            self.add_activity("🧹", "Teacher Broadcast reset")
+
+    def set_command_posture(self, posture: str, detail: str = ""):
+        """Immediately reflect high-level command posture changes from the dashboard."""
+        normalized = str(posture or "").strip().upper()
+        if normalized == "PROTECT ACCOUNT":
+            self.set_aggression_mode(False)
+            self.status_label.set_text_instant(
+                f"🛡️ Protect Account active... {detail or 'Tightening posture and respecting drawdown.'}"
+            )
+            self.status_dot.setStyleSheet("color: #58A6FF; font-size: 14px; background: transparent;")
+            self.add_activity("🛡️", "Mirror synced: PROTECT ACCOUNT")
+            return
+        if normalized == "BE AGGRESSIVE":
+            self.set_aggression_mode(True)
+            self.status_label.set_text_instant(
+                f"🔥 Aggression active... {detail or 'Lion strike posture armed.'}"
+            )
+            self.status_dot.setStyleSheet("color: #F85149; font-size: 14px; background: transparent;")
+            self.add_activity("🔥", "Mirror synced: BE AGGRESSIVE")
+            return
+        self.status_label.set_text_instant(detail or normalized or "Standing by")
     
     def notify_signal_detected(self, ticker: str, signal_type: str, confidence: float):
         """Notify that a trading signal was detected."""
         icon = "🔥" if confidence > 0.8 else "⚠️"
+        self.trigger_signal_alert(duration_ms=3000)
         self.set_status("analyzing", f"{signal_type} on {ticker}")
         self.add_activity(
             icon, 

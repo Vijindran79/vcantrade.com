@@ -565,6 +565,9 @@ class VcaniTradeApp:
         self.max_drawdown = 0.0
         self.trades_today = 0
         self.positions = []
+        self.locked_tickers = {}
+        self.rpa_execution_enabled = True
+        self.command_posture = "SCANNING"
 
         # UI - Command Center (main dashboard)
         self.cmd = CommandCenter()
@@ -578,6 +581,7 @@ class VcaniTradeApp:
         else:
             self.ai_narrator.move(20, 20)
         self.ai_narrator.show()
+        self.ai_narrator.set_rpa_execution_enabled(True)
         self._mirror_shortcut = None
 
         # Core
@@ -1030,6 +1034,7 @@ class VcaniTradeApp:
         self.cmd.test_browser_requested.connect(self._on_test_browser)
         self.cmd.force_test_trade_requested.connect(self._on_force_test_trade)
         self.cmd.user_command_sent.connect(self._on_copilot_command)  # NEW: Co-Pilot Command Bridge
+        self.ai_narrator.stealth_toggled.connect(self._handle_manual_stealth_toggle)
 
         # Cloud Scanner → UI + Narrator
         self.cloud_scanner.signal_detected.connect(self._on_cloud_signal)
@@ -1116,12 +1121,21 @@ class VcaniTradeApp:
         config.CLOUD_TICKERS = list(self.current_watchlist)
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
         self.cloud_scanner.scanner.priority_scan_list = []
+        self.rpa_hand.active_watchlist = list(self.current_watchlist)
         self._sync_runtime_session_context()
         self.cmd.log(f"📊 Watchlist updated: {len(self.current_watchlist)} tickers")
         self.ai_narrator.notify_scan_start(len(self.current_watchlist))
         self.ai_narrator.set_watchlist(self.current_watchlist)
         for ticker in self.current_watchlist:
             self._on_ticker_status_update(ticker, "scanning")
+
+    def _handle_manual_stealth_toggle(self, enabled: bool):
+        """Mirror toggle for pausing/resuming physical RPA execution."""
+        self.rpa_execution_enabled = bool(enabled)
+        state = "enabled" if self.rpa_execution_enabled else "paused"
+        self.cmd.log(f"🖱️ RPA Hand manually {state} from the Mirror")
+        self.ai_narrator.set_rpa_execution_enabled(self.rpa_execution_enabled)
+        self._update_institutional_governor_ui()
 
     def _on_ticker_status_update(self, ticker: str, status: str):
         """Update dashboard and mirror with per-ticker scanner state."""
@@ -1168,15 +1182,38 @@ class VcaniTradeApp:
         self.settings.update(settings)
 
         # Update local variables
-        self.default_investment = settings.get("investment", 1000.0)
+        self.default_investment = settings.get("investment_amount", settings.get("investment", 1000.0))
         self.max_daily_loss = settings.get("max_daily_loss", 500.0)
+        self.rpa_hand.set_human_latency(bool(settings.get("human_latency", self.settings.get("human_latency", True))))
+
+        firm_name = str(settings.get("prop_firm_name", self.settings.get("prop_firm_name", config.PROP_FIRM_NAME)))
+        if self.prop_engine:
+            from core.prop_firm_rules import PropFirmName, PropFirmRuleEngine
+
+            firm_map = {
+                "TopStep": PropFirmName.TOPSTEP,
+                "Apex Trader Funding": PropFirmName.APEX,
+                "Apex": PropFirmName.APEX,
+                "MyFundedFutures": PropFirmName.MYFUNDED,
+                "FTMO": PropFirmName.FTMO,
+                "TradeDay": PropFirmName.TRADEDAY,
+            }
+            selected_firm = firm_map.get(firm_name, PropFirmName.TOPSTEP)
+            if self.prop_engine.firm != selected_firm:
+                self.prop_engine = PropFirmRuleEngine(selected_firm)
+                self.cmd.log(f"🎓 Prop firm profile switched to {firm_name}")
 
         mode = self.settings.get("investment_mode", "dollar")
+        risk_mode = (
+            "AUTO-RISK (structure)"
+            if self.settings.get("auto_risk_enabled", True)
+            else f"manual TP {self.settings.get('take_profit_pct', 2.0):.1f}% / SL {self.settings.get('stop_loss_pct', 1.0):.1f}%"
+        )
         if mode == "lots":
             lot_size = self.settings.get("lot_size", 2.0)
-            self.cmd.log(f"⚙️ Settings updated: {lot_size} lots/trade, autonomous stop management active")
+            self.cmd.log(f"⚙️ Settings updated: {lot_size} lots/trade, {risk_mode}")
         else:
-            self.cmd.log(f"⚙️ Settings updated: ${self.default_investment}/trade, autonomous stop management active")
+            self.cmd.log(f"⚙️ Settings updated: ${self.default_investment}/trade, {risk_mode}")
 
         # Notify AI Narrator
         self.ai_narrator.add_activity(
@@ -1205,6 +1242,8 @@ class VcaniTradeApp:
             # Store aggressive mode flag for scanner/executor to use
             self._aggressive_mode = True
             self.ai_narrator.set_aggression_mode(True)
+            self.ai_narrator.set_command_posture("BE AGGRESSIVE")
+            self.cmd.update_copilot_mode("BE AGGRESSIVE", "#F85149")
             self.cmd.update_vibe_status("Aggressive - Low Confirmations", "active")
             self.cmd.update_copilot_status("AGGRESSIVE MODE")
             return
@@ -1220,6 +1259,8 @@ class VcaniTradeApp:
             self._aggressive_mode = False
             self._prop_firm_mode = True
             self.ai_narrator.set_aggression_mode(False)
+            self.ai_narrator.set_command_posture("PROTECT ACCOUNT")
+            self.cmd.update_copilot_mode("PROTECT ACCOUNT", "#58A6FF")
             self.cmd.update_vibe_status("Protected - Prop Firm Rules", "active")
             self.cmd.update_copilot_status("PROP FIRM MODE")
             return
@@ -2370,6 +2411,50 @@ class VcaniTradeApp:
             unrealized_pnl=unrealized,
             daily_success_rate=rate,
         )
+        self.ai_narrator.set_daily_bullets(self.trades_today, config.MAX_DAILY_TRADES)
+        self._refresh_lockout_timer()
+
+    def _refresh_lockout_timer(self):
+        """Keep the Mirror lockout HUD aligned with the next expiring cooldown."""
+        now = time.time()
+        active_lockouts = {}
+        nearest_ticker = ""
+        nearest_remaining = None
+
+        for ticker, started_at in self.locked_tickers.items():
+            remaining = int((config.RE_ENTRY_LOCKOUT_MINUTES * 60) - (now - started_at))
+            if remaining <= 0:
+                continue
+            active_lockouts[ticker] = started_at
+            if nearest_remaining is None or remaining < nearest_remaining:
+                nearest_ticker = ticker
+                nearest_remaining = remaining
+
+        self.locked_tickers = active_lockouts
+        if nearest_remaining is None:
+            self.ai_narrator.clear_lockout_timer()
+        else:
+            self.ai_narrator.update_lockout_timer(nearest_remaining, nearest_ticker)
+
+    def _check_rsi_veto(self, action: str, rsi_value: float):
+        """Return veto label + reason when the setup is too stretched to strike."""
+        if action == "BUY" and rsi_value > config.RSI_VETO_THRESHOLD:
+            return True, f"RSI overbought ({rsi_value:.1f})", "rsi_veto_overbought"
+        if action == "SELL" and rsi_value < 20:
+            return True, f"RSI oversold ({rsi_value:.1f})", "rsi_veto_oversold"
+        return False, "", ""
+
+    def _manual_risk_targets(self, action: str, entry_price: float) -> tuple[float, float]:
+        """Build fixed-percentage SL/TP levels when AUTO-RISK is disabled."""
+        stop_pct = float(self.settings.get("stop_loss_pct", 1.0) or 1.0)
+        take_pct = float(self.settings.get("take_profit_pct", 2.0) or 2.0)
+        if action == "SELL":
+            stop_loss = entry_price * (1 + stop_pct / 100.0)
+            take_profit = entry_price * (1 - take_pct / 100.0)
+        else:
+            stop_loss = entry_price * (1 - stop_pct / 100.0)
+            take_profit = entry_price * (1 + take_pct / 100.0)
+        return float(stop_loss), float(take_profit)
 
     def _derive_structure_stop_loss(
         self,
@@ -2630,7 +2715,7 @@ class VcaniTradeApp:
             # Sentiment Pulse
             "next_event": sentiment_summary["next_event"],
             "time_to_event": sentiment_summary["time_to_event"],
-            "rpa_enabled": sentiment_summary["rpa_status"] == "ACTIVE",
+            "rpa_enabled": (sentiment_summary["rpa_status"] == "ACTIVE") and self.rpa_execution_enabled,
             
             # Profit Lock
             "stops_locked": profit_lock_summary["stops_locked"],
@@ -2858,6 +2943,7 @@ class VcaniTradeApp:
         """Close a position and update P&L."""
         self._ensure_balance_state()
         pnl = position.get("pnl", 0)
+        self.locked_tickers[position["asset"]] = time.time()
         self.balance += pnl
         self.daily_pnl += pnl
         self.total_pnl += pnl
@@ -2874,7 +2960,15 @@ class VcaniTradeApp:
             self.cmd.update_prop_firm_compliance(compliance)
 
         # Update UI
-        self.cmd.update_balance(self.balance, self.equity, self.daily_pnl, self.total_pnl)
+        self.cmd.update_balance(
+            self.balance,
+            self.equity,
+            self.daily_pnl,
+            self.total_pnl,
+            drawdown=self.max_drawdown,
+            drawdown_pct=(self.max_drawdown / self.peak_balance * 100.0) if self.peak_balance else 0.0,
+            trades_today=self.trades_today,
+        )
         self.cmd.add_trade_log(
             position["asset"],
             "CLOSE",
@@ -2917,6 +3011,12 @@ class VcaniTradeApp:
             f'{signal_data["action"]} {signal_data["ticker"]} '
             f'(confidence: {signal_data["confidence"]:.2f})'
         )
+        self.cmd.update_watchlist_status(
+            signal_data["ticker"],
+            "awaiting_strike",
+            confidence=float(signal_data.get("confidence", 0.0) or 0.0),
+            last_signal=str(signal_data.get("action", "WAIT")).upper(),
+        )
         
         # Update AI Narrator
         self.ai_narrator.notify_signal_detected(
@@ -2940,6 +3040,12 @@ class VcaniTradeApp:
             f'<span style="color:{approval_color};font-weight:bold">✅ APPROVED: {approval_label}</span>: '
             f'{resolved_action} {signal_data["ticker"]} '
             f'with ${amount:.2f}'
+        )
+        self.cmd.update_watchlist_status(
+            signal_data["ticker"],
+            "executing",
+            confidence=float(signal_data.get("confidence", 0.0) or 0.0),
+            last_signal=resolved_action,
         )
         
         # Update AI Narrator
@@ -3128,6 +3234,7 @@ class VcaniTradeApp:
         brain_used = str(signal_data.get("brain_used", "OPENROUTER") or "OPENROUTER").strip().upper()
         fallback_mode = bool(signal_data.get("fallback_mode"))
         force_execute = bool(signal_data.get("force_execute")) or brain_override_action in {"BUY", "SELL"}
+        rsi_value = float(signal_data.get("rsi", signal_data.get("RSI", 50.0)) or 50.0)
         signal_data["force_execute"] = force_execute
         signal_data["brain_used"] = brain_used
         signal_data["fallback_mode"] = fallback_mode
@@ -3161,6 +3268,19 @@ class VcaniTradeApp:
             brain_verdict,
             brain_model,
         )
+
+        if ticker in self.locked_tickers and not force_execute:
+            remaining = int((config.RE_ENTRY_LOCKOUT_MINUTES * 60) - (time.time() - self.locked_tickers[ticker]))
+            if remaining > 0:
+                self.cmd.log(f"⏳ LOCKOUT: {ticker} cooling down for {remaining}s")
+                self.cmd.update_watchlist_status(
+                    ticker,
+                    f"⏳ LOCKOUT {remaining}s",
+                    confidence=confidence_score / 100.0,
+                    last_signal=action,
+                )
+                self._refresh_lockout_timer()
+                return
 
         if penalty_info.get("summary") and not force_execute:
             self.cmd.log(
@@ -3218,6 +3338,18 @@ class VcaniTradeApp:
             self.ai_narrator.notify_error(f"No entry price for {ticker}")
             return
 
+        vetoed, veto_reason, veto_status = self._check_rsi_veto(action, rsi_value)
+        if vetoed and not force_execute:
+            self.cmd.log(f"🛡️ [VETO] RSI blocked {action} {ticker}: {veto_reason}")
+            self.cmd.update_watchlist_status(
+                ticker,
+                veto_status,
+                confidence=confidence_score / 100.0,
+                last_signal=action,
+            )
+            self.ai_narrator.notify_trade_rejected(ticker)
+            return
+
         if not self._run_pretrade_market_audit(ticker, entry_price, force_execute=force_execute):
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
@@ -3249,14 +3381,23 @@ class VcaniTradeApp:
         # ── PositionSizer Risk Gate ───────────────────────────────────────
         sizer = PositionSizer(balance=self.balance, risk_pct=1.0)
         risk_eval = sizer.evaluate(entry_price=entry_price, side=action, levels=levels)
-        sl_price = self._derive_structure_stop_loss(action, entry_price, signal_data, risk_eval)
+        auto_risk_enabled = bool(self.settings.get("auto_risk_enabled", True))
+        tp_price = 0.0
+        if auto_risk_enabled:
+            sl_price = self._derive_structure_stop_loss(action, entry_price, signal_data, risk_eval)
+        else:
+            sl_price, tp_price = self._manual_risk_targets(action, entry_price)
+            self.cmd.log(
+                f"🎯 Manual risk profile active on {ticker}: TP {self.settings.get('take_profit_pct', 2.0):.1f}% / "
+                f"SL {self.settings.get('stop_loss_pct', 1.0):.1f}%"
+            )
         stop_distance_pct = (
             (abs(entry_price - sl_price) / entry_price) * 100.0
             if entry_price > 0 and sl_price > 0
             else 0.0
         )
         actual_risk_reason = (
-            f"Structure stop @ ${sl_price:.4f} ({stop_distance_pct:.2f}% distance)"
+            f"{'Structure' if auto_risk_enabled else 'Manual'} stop @ ${sl_price:.4f} ({stop_distance_pct:.2f}% distance)"
             if sl_price > 0
             else "No valid liquidity-structure stop available"
         )
@@ -3382,7 +3523,6 @@ class VcaniTradeApp:
                 f'bypassing MTF gate for {action} {ticker} {mtf_votes}'
             )
 
-        tp_price = 0.0
         signal_data["stop_loss"] = sl_price
         signal_data["take_profit"] = tp_price
         signal_data["liquidity_label"] = self._format_liquidity_label(signal_data)
@@ -3452,6 +3592,16 @@ class VcaniTradeApp:
                 f'<span style="color:#D29922;font-weight:bold">⚠️ RPA TARGET</span>: '
                 f'no calibrated {action} button coordinates resolved for {ticker}'
             )
+        if not self.rpa_execution_enabled:
+            self.cmd.log(f"⛔ Manual stealth toggle blocked execution for {action} {ticker}")
+            self.cmd.update_watchlist_status(
+                ticker,
+                "⛔ Hand Disabled",
+                confidence=confidence_score / 100.0,
+                last_signal=action,
+            )
+            self.ai_narrator.notify_error(f"RPA Hand paused: {ticker}")
+            return
         # PREDATOR-CLASS: Silent Error Alerting with try/except wrapper
         rpa_success = False
         try:
@@ -3880,7 +4030,16 @@ class VcaniTradeApp:
         self.cmd.show()
 
         # Initialize UI with balance and ledger
-        self.cmd.update_balance(self.balance, self.equity, self.daily_pnl, self.total_pnl)
+        self.cmd.update_balance(
+            self.balance,
+            self.equity,
+            self.daily_pnl,
+            self.total_pnl,
+            drawdown=self.max_drawdown,
+            drawdown_pct=(self.max_drawdown / self.peak_balance * 100.0) if self.peak_balance else 0.0,
+            trades_today=self.trades_today,
+        )
+        self._refresh_live_ledger()
 
         # Start background threads
         if config.CLOUD_SCANNER_ENABLED:

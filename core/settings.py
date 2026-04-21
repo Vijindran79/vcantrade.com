@@ -32,6 +32,10 @@ class SettingsManager:
         
         # Lots/Units mode
         "lot_size": 2.0,  # 2 lots/units per trade
+        "max_lots": 2.0,  # Hard cap for any single trade size
+        "human_latency": True,  # Stealth click pacing for RPA execution
+        "prop_firm_mode": False,  # Force strict prop-firm limits when enabled
+        "auto_risk_enabled": True,  # Use structural stop/target data instead of fixed % inputs
         
         # Legacy fixed-target settings (kept for backwards compatibility only).
         # Autonomous risk mode ignores these values at runtime.

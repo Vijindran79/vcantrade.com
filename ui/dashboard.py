@@ -108,9 +108,17 @@ class CommandCenter(QWidget):
         if not self.watchlist:
             self.watchlist = config.CLOUD_TICKERS.copy()
         self.watchlist_slots: List[QLineEdit] = []
+        self.prop_firm_mode_enabled = bool(settings_manager.get("prop_firm_mode", False))
+        self._manual_max_loss_value = float(settings_manager.get("max_daily_loss", 500.0) or 500.0)
+        self.auto_risk_enabled = bool(settings_manager.get("auto_risk_enabled", True))
+        self.watchlist_row_state: Dict[str, Dict[str, object]] = {}
+        self._confidence_glow_on = False
         self.watchlist_sync_timer = QTimer(self)
         self.watchlist_sync_timer.setSingleShot(True)
         self.watchlist_sync_timer.timeout.connect(self._sync_watchlist_from_inputs)
+        self.confidence_glow_timer = QTimer(self)
+        self.confidence_glow_timer.timeout.connect(self._pulse_confidence_rows)
+        self.confidence_glow_timer.start(650)
 
         self._setup_window()
         self._build_ui()
@@ -371,6 +379,10 @@ class CommandCenter(QWidget):
             QComboBox {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {BORDER};
                        border-radius: 6px; padding: 6px; font-size: 12px; font-family: 'Consolas'; }}
         """)
+        saved_firm_name = str(settings_manager.get("prop_firm_name", "TopStep") or "TopStep")
+        selector_index = self.firm_selector.findText(saved_firm_name)
+        if selector_index >= 0:
+            self.firm_selector.setCurrentIndex(selector_index)
         firm_row.addWidget(self.firm_selector)
 
         self.firm_status = QLabel("✅ COMPLIANT")
@@ -382,7 +394,7 @@ class CommandCenter(QWidget):
 
         # Compliance bars
         self._add_compliance_bar(layout, "Daily Loss Used", 0.0, 150.0, GREEN, RED)
-        self._add_compliance_bar(layout, "Drawdown Used", 0.0, 3000.0, GREEN, RED)
+        self._add_compliance_bar(layout, "Trailing Drawdown", 0.0, 3000.0, GREEN, RED)
         self._add_compliance_bar(layout, "Profit Progress", 0.0, 3000.0, CYAN, CYAN)
 
         # Key metrics row
@@ -425,7 +437,11 @@ class CommandCenter(QWidget):
         # Progress bar frame
         bar_frame = QFrame()
         bar_frame.setFixedHeight(14)
-        bar_frame.setStyleSheet(f"background: {BG_INPUT}; border: 1px solid {BORDER}; border-radius: 7px;")
+        frame_border = RED if label == "Trailing Drawdown" else BORDER
+        frame_bg = "#090C10" if label == "Trailing Drawdown" else BG_INPUT
+        bar_frame.setStyleSheet(
+            f"background: {frame_bg}; border: 1px solid {frame_border}; border-radius: 7px;"
+        )
         bar_layout = QHBoxLayout(bar_frame)
         bar_layout.setContentsMargins(2, 2, 2, 2)
         bar_layout.setSpacing(0)
@@ -434,7 +450,10 @@ class CommandCenter(QWidget):
         bar = QFrame()
         bar.setFixedHeight(10)
         pct = min(100, (current / max(0.01, limit)) * 100)
-        bar_color = bad_color if pct > 80 else good_color
+        if label == "Trailing Drawdown":
+            bar_color = RED if pct >= 70 else ORANGE if pct >= 45 else good_color
+        else:
+            bar_color = bad_color if pct > 80 else good_color
         bar.setStyleSheet(f"background: {bar_color}; border-radius: 5px;")
         bar.setMinimumWidth(int(pct * 2))
         bar_layout.addWidget(bar)
@@ -455,6 +474,7 @@ class CommandCenter(QWidget):
             self.compliance_bars = {}
         
         self.compliance_bars[label] = {
+            'label': label,
             'bar': bar,
             'bar_frame': bar_frame,
             'value_label': val,
@@ -498,8 +518,8 @@ class CommandCenter(QWidget):
                 self._update_compliance_bar(bar_data, current, limit)
 
             # Update Drawdown Used bar
-            if "Drawdown Used" in self.compliance_bars:
-                bar_data = self.compliance_bars["Drawdown Used"]
+            if "Trailing Drawdown" in self.compliance_bars:
+                bar_data = self.compliance_bars["Trailing Drawdown"]
                 current = data.get("max_drawdown", 0)
                 limit = data.get("drawdown_limit", 3000.0)
                 self._update_compliance_bar(bar_data, current, limit)
@@ -514,14 +534,21 @@ class CommandCenter(QWidget):
     def _update_compliance_bar(self, bar_data, current, limit):
         """Update a single compliance bar with new values."""
         pct = min(100, (current / max(0.01, limit)) * 100)
-        bar_color = bar_data['bad_color'] if pct > 80 else bar_data['good_color']
+        if bar_data.get('label') == "Trailing Drawdown":
+            bar_color = RED if pct >= 70 else ORANGE if pct >= 45 else bar_data['good_color']
+            bar_data['bar_frame'].setStyleSheet(
+                f"background: #090C10; border: 1px solid {RED if pct >= 70 else ORANGE}; border-radius: 7px;"
+            )
+        else:
+            bar_color = bar_data['bad_color'] if pct > 80 else bar_data['good_color']
         
         # Update bar width
         bar_data['bar'].setStyleSheet(f"background: {bar_color}; border-radius: 5px;")
         bar_data['bar'].setMinimumWidth(max(4, int(pct * 2)))
         
         # Update value label
-        bar_data['value_label'].setText(f"${current:.0f} / ${limit:.0f}")
+        suffix = f" ({pct:.0f}%)" if bar_data.get('label') == "Trailing Drawdown" else ""
+        bar_data['value_label'].setText(f"${current:.0f} / ${limit:.0f}{suffix}")
 
     # =================== CONTROL PANEL ===================
     def _build_control_panel(self) -> QWidget:
@@ -575,7 +602,8 @@ class CommandCenter(QWidget):
         inv_label.setStyleSheet(f"color: {WHITE}; font-size: 12px; font-weight: bold; font-family: 'Consolas';")
         invest_row.addWidget(inv_label)
 
-        self.investment_input = QLineEdit("10")
+        saved_investment = float(settings_manager.get("investment_amount", 10.0) or 10.0)
+        self.investment_input = QLineEdit(f"{saved_investment:g}")
         self.investment_input.setPlaceholderText("Amount per trade")
         self.investment_input.setStyleSheet(f"""
             QLineEdit {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {BORDER};
@@ -597,12 +625,13 @@ class CommandCenter(QWidget):
         tp_label.setStyleSheet(f"color: {GREEN}; font-size: 11px; font-family: 'Consolas';")
         tp_layout.addWidget(tp_label)
         
+        saved_take_profit_pct = float(settings_manager.get("take_profit_pct", 2.0) or 2.0)
         self.tp_input = QDoubleSpinBox()
         self.tp_input.setRange(0.1, 50.0)
-        self.tp_input.setValue(2.0)
+        self.tp_input.setValue(saved_take_profit_pct)
         self.tp_input.setSuffix("%")
-        self.tp_input.setEnabled(False)
-        self.tp_input.setToolTip("Autonomous mode manages exits automatically.")
+        self.tp_input.setEnabled(not self.auto_risk_enabled)
+        self.tp_input.setToolTip("Manual risk target used when AUTO-RISK is off.")
         self.tp_input.setStyleSheet(f"""
             QDoubleSpinBox {{ background: {BG_INPUT}; color: {GREEN}; border: 1px solid {BORDER};
                            border-radius: 6px; padding: 6px; font-size: 13px; font-weight: bold;
@@ -613,16 +642,30 @@ class CommandCenter(QWidget):
 
         # Stop Loss %
         sl_layout = QVBoxLayout()
+        sl_header = QHBoxLayout()
+        sl_header.setSpacing(6)
+
         sl_label = QLabel("Stop Loss (%)")
         sl_label.setStyleSheet(f"color: {RED}; font-size: 11px; font-family: 'Consolas';")
-        sl_layout.addWidget(sl_label)
+        sl_header.addWidget(sl_label)
+
+        self.auto_risk_btn = QPushButton("AUTO-RISK")
+        self.auto_risk_btn.setCheckable(True)
+        self.auto_risk_btn.setChecked(self.auto_risk_enabled)
+        self.auto_risk_btn.setFixedHeight(22)
+        self.auto_risk_btn.setToolTip("Use structural stop logic from Profit Lock instead of fixed % inputs.")
+        self.auto_risk_btn.clicked.connect(self._toggle_auto_risk)
+        sl_header.addWidget(self.auto_risk_btn)
+        sl_header.addStretch()
+        sl_layout.addLayout(sl_header)
         
+        saved_stop_loss_pct = float(settings_manager.get("stop_loss_pct", 1.0) or 1.0)
         self.sl_input = QDoubleSpinBox()
         self.sl_input.setRange(0.1, 20.0)
-        self.sl_input.setValue(1.0)
+        self.sl_input.setValue(saved_stop_loss_pct)
         self.sl_input.setSuffix("%")
-        self.sl_input.setEnabled(False)
-        self.sl_input.setToolTip("Autonomous mode manages structure-based stops automatically.")
+        self.sl_input.setEnabled(not self.auto_risk_enabled)
+        self.sl_input.setToolTip("Manual stop used when AUTO-RISK is off.")
         self.sl_input.setStyleSheet(f"""
             QDoubleSpinBox {{ background: {BG_INPUT}; color: {RED}; border: 1px solid {BORDER};
                            border-radius: 6px; padding: 6px; font-size: 13px; font-weight: bold;
@@ -639,7 +682,7 @@ class CommandCenter(QWidget):
         
         self.max_loss_input = QDoubleSpinBox()
         self.max_loss_input.setRange(10, 10000)
-        self.max_loss_input.setValue(500)
+        self.max_loss_input.setValue(float(settings_manager.get("max_daily_loss", 500.0) or 500.0))
         self.max_loss_input.setPrefix("$")
         self.max_loss_input.setStyleSheet(f"""
             QDoubleSpinBox {{ background: {BG_INPUT}; color: {ORANGE}; border: 1px solid {BORDER};
@@ -650,6 +693,24 @@ class CommandCenter(QWidget):
         risk_row.addLayout(msl_layout)
 
         layout.addLayout(risk_row)
+        self._apply_auto_risk_state(initial=True)
+
+        prop_row = QHBoxLayout()
+        prop_row.setSpacing(8)
+
+        self.prop_firm_mode_btn = QPushButton("PROP FIRM MODE")
+        self.prop_firm_mode_btn.setCheckable(True)
+        self.prop_firm_mode_btn.setChecked(self.prop_firm_mode_enabled)
+        self.prop_firm_mode_btn.setMinimumHeight(34)
+        self.prop_firm_mode_btn.clicked.connect(self._toggle_prop_firm_mode)
+        prop_row.addWidget(self.prop_firm_mode_btn)
+
+        self.prop_firm_mode_status = QLabel("")
+        self.prop_firm_mode_status.setStyleSheet(f"color: {GRAY}; font-size: 11px; font-family: 'Consolas';")
+        prop_row.addWidget(self.prop_firm_mode_status)
+        prop_row.addStretch()
+        layout.addLayout(prop_row)
+        self._apply_prop_firm_mode_state(initial=True)
 
         # Save Settings Button
         save_btn = QPushButton("💾 Save Settings")
@@ -797,6 +858,73 @@ class CommandCenter(QWidget):
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
             """)
             self.log("⚠️ DRY RUN: OFF - Live trading mode (CAUTION!)")
+
+    def _apply_auto_risk_state(self, initial: bool = False):
+        """Toggle manual TP/SL inputs against structural Profit Lock risk logic."""
+        self.tp_input.setEnabled(not self.auto_risk_enabled)
+        self.sl_input.setEnabled(not self.auto_risk_enabled)
+
+        if self.auto_risk_enabled:
+            self.auto_risk_btn.setStyleSheet(f"""
+                QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                             font-size: 10px; font-weight: bold; font-family: 'Consolas'; padding: 4px 8px; }}
+                QPushButton:hover {{ background: #2ea043; }}
+            """)
+            if not initial:
+                self.log("🧠 AUTO-RISK engaged - fixed TP/SL ignored, structural Profit Lock logic in command")
+        else:
+            self.auto_risk_btn.setStyleSheet(f"""
+                QPushButton {{ background: {BG_INPUT}; color: {ORANGE}; border: 1px solid {ORANGE}; border-radius: 6px;
+                             font-size: 10px; font-weight: bold; font-family: 'Consolas'; padding: 4px 8px; }}
+                QPushButton:hover {{ border-color: {WHITE}; }}
+            """)
+            if not initial:
+                self.log(
+                    f"🎯 AUTO-RISK disabled - using fixed TP {self.tp_input.value():.1f}% / SL {self.sl_input.value():.1f}%"
+                )
+
+    def _toggle_auto_risk(self):
+        """Switch between structural risk and fixed-percent scalping mode."""
+        self.auto_risk_enabled = self.auto_risk_btn.isChecked()
+        self._apply_auto_risk_state(initial=False)
+
+    def _apply_prop_firm_mode_state(self, initial: bool = False):
+        """Reflect prop-firm enforcement in the dashboard controls."""
+        if self.prop_firm_mode_enabled:
+            self.max_loss_input.setValue(150.0)
+            self.max_loss_input.setEnabled(False)
+            self.prop_firm_mode_btn.setStyleSheet(f"""
+                QPushButton {{ background: {ORANGE}; color: {BG_DARK}; border: none; border-radius: 6px;
+                             font-size: 12px; font-weight: bold; font-family: 'Consolas'; padding: 8px 12px; }}
+                QPushButton:hover {{ background: #b8860b; }}
+            """)
+            self.prop_firm_mode_status.setText("Max Lots: 1 | Human Latency: ON | Daily Loss: $150")
+            self.prop_firm_mode_status.setStyleSheet(f"color: {ORANGE}; font-size: 11px; font-family: 'Consolas';")
+            if not initial:
+                self.log("🎓 Prop Firm Mode ON - Max lots 1, human latency enabled, daily loss capped at $150")
+        else:
+            restore_value = self._manual_max_loss_value if self._manual_max_loss_value > 0 else 500.0
+            self.max_loss_input.setEnabled(True)
+            if not initial:
+                self.max_loss_input.setValue(restore_value)
+            self.prop_firm_mode_btn.setStyleSheet(f"""
+                QPushButton {{ background: {BG_INPUT}; color: {CYAN}; border: 1px solid {BORDER}; border-radius: 6px;
+                             font-size: 12px; font-weight: bold; font-family: 'Consolas'; padding: 8px 12px; }}
+                QPushButton:hover {{ border-color: {CYAN}; }}
+            """)
+            self.prop_firm_mode_status.setText("Manual limits active")
+            self.prop_firm_mode_status.setStyleSheet(f"color: {GRAY}; font-size: 11px; font-family: 'Consolas';")
+            if not initial:
+                self.log("🎓 Prop Firm Mode OFF - manual limits restored")
+
+    def _toggle_prop_firm_mode(self):
+        """Force strict prop-firm-safe execution settings when enabled."""
+        checked = self.prop_firm_mode_btn.isChecked()
+        if checked and float(self.max_loss_input.value()) != 150.0:
+            self._manual_max_loss_value = float(self.max_loss_input.value())
+        self.prop_firm_mode_enabled = checked
+        self._apply_prop_firm_mode_state(initial=False)
+        self._save_settings()
 
     # =================== WATCHLIST PANEL ===================
     def _build_watchlist_panel(self) -> QWidget:
@@ -1157,6 +1285,11 @@ class CommandCenter(QWidget):
     def update_copilot_status(self, status: str):
         """Update AI Co-Pilot status indicator"""
         self.copilot_status.setText(f"🟢 AI Status: {status}")
+
+    def update_copilot_mode(self, mode: str, color: str = CYAN):
+        """Update the active command posture shown in the Co-Pilot bridge."""
+        self.copilot_mode.setText(f"Current Mode: {mode}")
+        self.copilot_mode.setStyleSheet(f"color: {color}; font-size: 11px; font-family: 'Consolas';")
 
     def update_vibe_status(self, status: str, mode: str = "standby"):
         """Update Vibe shield status indicator."""
@@ -1646,7 +1779,16 @@ class CommandCenter(QWidget):
         cursor.movePosition(cursor.MoveOperation.End)
         self.activity_log.setTextCursor(cursor)
 
-    def update_balance(self, balance: float, equity: float, daily_pnl: float, total_pnl: float):
+    def update_balance(
+        self,
+        balance: float,
+        equity: float,
+        daily_pnl: float,
+        total_pnl: float,
+        drawdown: float | None = None,
+        drawdown_pct: float | None = None,
+        trades_today: int | None = None,
+    ):
         """Update account balance dashboard."""
         self.balance_label.setText(f"${balance:,.2f}")
         self.equity_label.setText(f"${equity:,.2f}")
@@ -1664,6 +1806,13 @@ class CommandCenter(QWidget):
             color: {GREEN if total_pnl >= 0 else RED}; font-size: 16px; font-weight: bold;
             font-family: 'Consolas';
         """)
+
+        if drawdown is not None:
+            dd_pct = float(drawdown_pct or 0.0)
+            self.drawdown_label.setText(f"${abs(drawdown):,.2f} ({dd_pct:.1f}%)")
+
+        if trades_today is not None:
+            self.trades_today_label.setText(str(int(trades_today)))
 
     def update_positions(self, positions: List[Dict]):
         """Update live positions table with HIGH-CONTRAST BUY/SELL colors."""
@@ -1864,6 +2013,9 @@ class CommandCenter(QWidget):
     def _sync_watchlist_from_inputs(self):
         """Push live slot contents into current dashboard watchlist immediately."""
         self.watchlist = self._collect_watchlist_from_inputs()
+        self.watchlist_row_state = {
+            ticker: state for ticker, state in self.watchlist_row_state.items() if ticker in self.watchlist
+        }
         settings_manager.update({"session_watchlist": list(self.watchlist)})
         self._apply_watchlist_to_inputs(self.watchlist)
         self._refresh_watchlist()
@@ -1873,6 +2025,18 @@ class CommandCenter(QWidget):
     def _refresh_watchlist(self):
         self.watchlist_table.setRowCount(len(self.watchlist))
         for i, ticker in enumerate(self.watchlist):
+            row_state = self.watchlist_row_state.get(ticker, {})
+            confidence = float(row_state.get("confidence", 0.0) or 0.0)
+            last_signal = str(row_state.get("last_signal", "-") or "-")
+            if confidence > 0 and last_signal != "-":
+                signal_text = f"{last_signal} ({confidence:.0%})"
+                signal_color = GREEN if confidence >= 0.90 else CYAN if confidence >= 0.75 else ORANGE
+            else:
+                signal_text = last_signal
+                signal_color = GRAY
+            status_text = str(row_state.get("status_text", "Monitoring") or "Monitoring")
+            status_color = QColor(str(row_state.get("status_color", CYAN)))
+
             # Checkbox
             check = QTableWidgetItem("✅")
             check.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1884,16 +2048,35 @@ class CommandCenter(QWidget):
             self.watchlist_table.setItem(i, 1, ticker_item)
             
             # Last Signal (default)
-            signal_item = QTableWidgetItem("-")
+            signal_item = QTableWidgetItem(signal_text)
             signal_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            signal_item.setForeground(QColor(GRAY))
+            signal_item.setForeground(QColor(signal_color))
             self.watchlist_table.setItem(i, 2, signal_item)
             
             # Status
-            status_item = QTableWidgetItem("Monitoring")
+            status_item = QTableWidgetItem(status_text)
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_item.setForeground(QColor(CYAN))
+            status_item.setForeground(status_color)
             self.watchlist_table.setItem(i, 3, status_item)
+
+            self._apply_watchlist_row_glow(i, confidence >= 0.90, pulse_now=self._confidence_glow_on)
+
+    def _pulse_confidence_rows(self):
+        """Pulse high-confidence rows in neon green for fast visual triage."""
+        self._confidence_glow_on = not self._confidence_glow_on
+        for row, ticker in enumerate(self.watchlist):
+            confidence = float(self.watchlist_row_state.get(ticker, {}).get("confidence", 0.0) or 0.0)
+            self._apply_watchlist_row_glow(row, confidence >= 0.90, pulse_now=self._confidence_glow_on)
+
+    def _apply_watchlist_row_glow(self, row: int, high_confidence: bool, pulse_now: bool):
+        """Apply or clear the neon row highlight for a watchlist entry."""
+        active_bg = QColor(57, 255, 20, 92 if pulse_now else 36)
+        resting_bg = QColor(0, 0, 0, 0)
+        for column in range(self.watchlist_table.columnCount()):
+            item = self.watchlist_table.item(row, column)
+            if item is None:
+                continue
+            item.setBackground(active_bg if high_confidence else resting_bg)
 
     def _update_analysis_option_visibility(self):
         """Keep the analysis option strip visible whenever dashboard slots contain tickers."""
@@ -1909,17 +2092,52 @@ class CommandCenter(QWidget):
             self.analysis_visibility_label.setText("Waiting for watchlist")
             self.analysis_visibility_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
 
-    def update_watchlist_status(self, ticker: str, status: str):
+    def update_watchlist_status(
+        self,
+        ticker: str,
+        status: str,
+        confidence: float | None = None,
+        last_signal: str | None = None,
+    ):
         """Update the watchlist table row with live status text/icon."""
         status_map = {
             "scanning": ("🟢 Scanning", QColor(GREEN)),
             "analyzing_liquidity": ("🟡 Analyzing Liquidity", QColor(ORANGE)),
             "trade_rejected": ("🔴 Trade Rejected", QColor(RED)),
+            "rsi_veto_overbought": ("[VETO] RSI OVERBOUGHT", QColor(RED)),
+            "rsi_veto_oversold": ("[VETO] RSI OVERSOLD", QColor(RED)),
+            "awaiting_strike": ("⚡ Strike Ready", QColor(GREEN)),
+            "executing": ("🦁 Striking", QColor(GREEN)),
+            "monitoring": ("Monitoring", QColor(CYAN)),
         }
         label, color = status_map.get(status, (status, QColor(CYAN)))
+        state = self.watchlist_row_state.setdefault(ticker, {})
+        state["status_text"] = label
+        state["status_color"] = color.name()
+        if confidence is not None:
+            state["confidence"] = float(confidence)
+        if last_signal is not None:
+            state["last_signal"] = str(last_signal).upper()
         for row in range(self.watchlist_table.rowCount()):
             item = self.watchlist_table.item(row, 1)
             if item and item.text() == ticker:
+                signal_item = self.watchlist_table.item(row, 2)
+                if signal_item is None:
+                    signal_item = QTableWidgetItem("-")
+                    signal_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.watchlist_table.setItem(row, 2, signal_item)
+
+                row_confidence = float(state.get("confidence", 0.0) or 0.0)
+                row_signal = str(state.get("last_signal", "-") or "-")
+                if row_signal != "-" and row_confidence > 0:
+                    signal_item.setText(f"{row_signal} ({row_confidence:.0%})")
+                    signal_item.setForeground(
+                        QColor(GREEN if row_confidence >= 0.90 else CYAN if row_confidence >= 0.75 else ORANGE)
+                    )
+                else:
+                    signal_item.setText(row_signal)
+                    signal_item.setForeground(QColor(GRAY))
+
                 status_item = self.watchlist_table.item(row, 3)
                 if status_item is None:
                     status_item = QTableWidgetItem()
@@ -1927,15 +2145,37 @@ class CommandCenter(QWidget):
                 status_item.setText(label)
                 status_item.setForeground(color)
                 status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._apply_watchlist_row_glow(row, row_confidence >= 0.90, pulse_now=self._confidence_glow_on)
                 break
 
+    def update_watchlist_signal(self, ticker: str, signal: str, confidence: float):
+        """Update just the signal/confidence portion of a watchlist row."""
+        current_status = self.watchlist_row_state.get(ticker, {}).get("status_text", "Monitoring")
+        self.update_watchlist_status(ticker, current_status, confidence=confidence, last_signal=signal)
+
     def _save_settings(self):
+        investment = float(self.investment_input.text() or 10)
+        max_daily_loss = 150.0 if self.prop_firm_mode_enabled else self.max_loss_input.value()
+        manual_max_lots = float(settings_manager.get("lot_size", settings_manager.get("max_lots", 2.0)) or 2.0)
         settings = {
-            "investment": float(self.investment_input.text() or 10),
-            "max_daily_loss": self.max_loss_input.value(),
+            "investment": investment,
+            "investment_amount": investment,
+            "take_profit_pct": float(self.tp_input.value()),
+            "stop_loss_pct": float(self.sl_input.value()),
+            "auto_risk_enabled": self.auto_risk_enabled,
+            "max_daily_loss": max_daily_loss,
+            "prop_firm_mode": self.prop_firm_mode_enabled,
+            "prop_firm_name": self.firm_selector.currentText(),
+            "max_lots": 1.0 if self.prop_firm_mode_enabled else manual_max_lots,
+            "human_latency": True if self.prop_firm_mode_enabled else bool(settings_manager.get("human_latency", True)),
         }
+        settings_manager.update(settings)
         self.settings_changed.emit(settings)
-        self.log(f"💾 Settings saved: ${settings['investment']}/trade, autonomous stop management active")
+        suffix = " | Prop Firm Mode enforced" if self.prop_firm_mode_enabled else ""
+        risk_mode = "AUTO-RISK (structure)" if self.auto_risk_enabled else (
+            f"manual TP {self.tp_input.value():.1f}% / SL {self.sl_input.value():.1f}%"
+        )
+        self.log(f"💾 Settings saved: ${investment}/trade, {risk_mode}{suffix}")
 
     def _on_kill_switch(self):
         self._killed = True
