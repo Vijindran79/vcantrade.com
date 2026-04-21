@@ -67,10 +67,17 @@ class CloudScanner:
         self.market_data_cache: Dict[Tuple[str, str, str], pd.DataFrame] = {}
         self.last_close_cache: Dict[str, float] = {}
         
+        # Circuit Breaker - prevents silent failures during API outages
+        self.consecutive_errors = 0
+        self.max_consecutive_errors = 20  # ~10 minutes of errors before alert
+        self.last_successful_scan = None
+        self.error_alert_threshold = 10  # Alert user after this many errors
+
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
-        
+
         logger.info("☁️ Cloud Scanner initialized with Market Session Awareness")
+        logger.info(f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert")
 
     def set_runtime_context(self, mode: str, dashboard_tickers: Optional[List[str]] = None):
         """Keep session awareness aligned with the operator's live dashboard state."""
@@ -1196,39 +1203,64 @@ class CloudScanner:
             return False
     
     async def run_scanner(self):
-        """Main scanner loop - continuous scanning."""
-        logger.info(f" Cloud Scanner started - monitoring {len(self.tickers)} tickers")
+        """Main scanner loop - continuous scanning with circuit breaker."""
+        logger.info(f"☁️ Cloud Scanner started - monitoring {len(self.tickers)} tickers")
         logger.info(f"Tickers: {', '.join(self.tickers)}")
         logger.info(f"Confidence threshold: {config.SWARM_CONFIDENCE_THRESHOLD}")
-        
+        logger.info(f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert")
+
         while True:
             try:
                 # Scan all tickers
                 signals = await self.scan_all_tickers()
-                
+
                 # Process through Swarm
                 if signals:
                     trade_signal = await self.process_signals(signals)
-                    
+
                     if trade_signal:
                         # Dispatch to local executor
                         success = await self.dispatch_to_local(trade_signal)
-                        
+
                         if success:
-                            logger.info(f" Trade signal executed: {trade_signal}")
+                            logger.info(f"✅ Trade signal executed: {trade_signal}")
                         else:
-                            logger.warning(f" Trade signal dispatch failed")
-                
+                            logger.warning(f"⚠️ Trade signal dispatch failed")
+
+                # Success - reset error counter
+                self.consecutive_errors = 0
+                self.last_successful_scan = datetime.utcnow()
+
                 # Wait before next scan
                 await asyncio.sleep(self.get_scan_interval())
-                
+
             except KeyboardInterrupt:
-                logger.info("Scanner stopped by user")
+                logger.info("🛑 Scanner stopped by user")
                 break
             except Exception as e:
-                logger.error(f"Scanner error: {e}")
-                await asyncio.sleep(5)  # Wait before retry
+                self.consecutive_errors += 1
+                logger.error(f"❌ Scanner error ({self.consecutive_errors}/{self.max_consecutive_errors}): {type(e).__name__}: {e}")
+                
+                # Alert user if threshold exceeded
+                if self.consecutive_errors >= self.error_alert_threshold:
+                    logger.critical(
+                        f"🚨 SCANNER ALERT: {self.consecutive_errors} consecutive errors! "
+                        f"Last success: {self.last_successful_scan}. "
+                        f"Check API connectivity, API keys, and network status."
+                    )
+                
+                # Circuit breaker - suggest manual intervention
+                if self.consecutive_errors >= self.max_consecutive_errors:
+                    logger.critical(
+                        f"🛑 CIRCUIT BREAKER TRIGGERED: {self.max_consecutive_errors} consecutive errors. "
+                    )
+                    # Still wait, but log more aggressively
+                    await asyncio.sleep(10)  # Longer wait when in error state
+                else:
+                    await asyncio.sleep(5)  # Normal retry delay
 
+
+def run_cloud_scanner():
 
 def run_cloud_scanner():
     """Entry point for cloud scanner (runs on Vast.ai server)."""

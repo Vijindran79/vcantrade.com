@@ -246,19 +246,28 @@ class DataScoutListenerThread(QThread):
 
 class CloudScannerThread(QThread):
     """
-    Background thread that runs the Cloud Scanner on Vast.ai server.
+    PREDATOR-CLASS: Background thread that runs the Cloud Scanner on Vast.ai server.
     Monitors 10 tickers using yfinance and triggers Swarm Debate.
+    
+    WATCHDOG HEARTBEAT: If scanner stops for >10 seconds, force-reinitialize connection.
     """
 
     signal_detected = pyqtSignal(object)  # Emits trade signal data
     scanner_error = pyqtSignal(str)  # Emits error message
     ticker_status = pyqtSignal(str, str)  # Emits per-ticker status updates
+    heartbeat_pulse = pyqtSignal(bool)  # Emits True when heartbeat is healthy
 
     def __init__(self):
         super().__init__()
         self.running = True
         self.scanner = CloudScanner()
         self.scanner.status_callback = self._emit_ticker_status
+        
+        # WATCHDOG HEARTBEAT TRACKING
+        self.last_scan_time = time.time()
+        self.heartbeat_timeout = 10.0  # Force reinit if no scan for >10 seconds
+        self.consecutive_failures = 0
+        self.max_failures_before_reinit = 3
 
     def _emit_ticker_status(self, ticker: str, status: str):
         self.ticker_status.emit(ticker, status)
@@ -279,11 +288,51 @@ class CloudScannerThread(QThread):
             logger.error(error_msg)
 
     async def _run_scanner(self):
-        """Run the cloud scanner loop."""
+        """
+        PREDATOR-CLASS: Run the cloud scanner loop with WATCHDOG HEARTBEAT monitoring.
+        
+        WATCHDOG LOGIC:
+        - Track last successful scan time
+        - If no scan for >10 seconds, force-reinitialize connection
+        - Emit heartbeat pulse for UI monitoring
+        """
         while self.running:
             try:
+                # WATCHDOG: Check if we've exceeded heartbeat timeout
+                elapsed = time.time() - self.last_scan_time
+                if elapsed > self.heartbeat_timeout and self.last_scan_time > 0:
+                    logger.warning(
+                        f"🐕 WATCHDOG: Scanner idle for {elapsed:.1f}s (>10s threshold). "
+                        f"Forcing reinitialization..."
+                    )
+                    self.consecutive_failures += 1
+                    
+                    if self.consecutive_failures >= self.max_failures_before_reinit:
+                        logger.critical(
+                            f"🐕 WATCHDOG: {self.consecutive_failures} consecutive failures. "
+                            f"Reinitializing scanner connection..."
+                        )
+                        try:
+                            # Force scanner reinitialization
+                            self.scanner = CloudScanner()
+                            self.scanner.status_callback = self._emit_ticker_status
+                            self.consecutive_failures = 0
+                            logger.info("🐕 WATCHDOG: Scanner reinitialized successfully")
+                        except Exception as reinit_err:
+                            logger.error(f"🐕 WATCHDOG: Reinitialization failed: {reinit_err}")
+                    
+                    # Emit unhealthy heartbeat
+                    self.heartbeat_pulse.emit(False)
+                
                 # Scan all tickers
                 signals = await self.scanner.scan_all_tickers()
+                
+                # Update heartbeat timestamp on successful scan
+                self.last_scan_time = time.time()
+                self.consecutive_failures = 0
+                
+                # Emit healthy heartbeat
+                self.heartbeat_pulse.emit(True)
 
                 # Process through Swarm
                 if signals:
@@ -309,6 +358,7 @@ class CloudScannerThread(QThread):
                 error_msg = f"Scan error: {type(e).__name__}: {e}"
                 self.scanner_error.emit(error_msg)
                 logger.error(f"☁️ SCANNER ERROR: {error_msg}")
+                self.consecutive_failures += 1
                 await asyncio.sleep(5)  # Wait before retry
 
     def stop(self):
@@ -1135,11 +1185,44 @@ class VcaniTradeApp:
         )
 
     def _on_copilot_command(self, command: str):
-        """Handle Co-Pilot Command Bridge - Process user suggestions"""
+        """Handle Co-Pilot Command Bridge - Process user suggestions with DYNAMIC STYLE SWITCHING"""
         import re
         
         self.cmd.log(f"🚀 CO-PILOT COMMAND: {command}")
         self.cmd.update_copilot_status("Processing...")
+
+        # ========== DYNAMIC STYLE SWITCHING ==========
+        command_upper = command.upper()
+        
+        # "BE AGGRESSIVE" mode - Decrease MTF Confirmation requirements
+        if "BE AGGRESSIVE" in command_upper or "GO AGGRESSIVE" in command_upper:
+            self.cmd.log("🔥 AGGRESSIVE MODE ACTIVATED: Lowering MTF confirmation requirements")
+            self.cmd.add_copilot_response(
+                thoughts="User wants more aggressive trading. Reducing confirmation gates to capture more opportunities.",
+                verdict="AGGRESSIVE MODE ENABLED",
+                adjustment="MTF confirmation reduced from 2/3 agents to 1/3. Position size increased to 100%. Faster execution enabled."
+            )
+            # Store aggressive mode flag for scanner/executor to use
+            self._aggressive_mode = True
+            self.ai_narrator.set_aggression_mode(True)
+            self.cmd.update_vibe_status("Aggressive - Low Confirmations", "active")
+            self.cmd.update_copilot_status("AGGRESSIVE MODE")
+            return
+        
+        # "PROTECT ACCOUNT" mode - Switch to Prop Firm Mode with tight trailing stops
+        if "PROTECT ACCOUNT" in command_upper or "CONSERVATIVE" in command_upper or "SAFE MODE" in command_upper:
+            self.cmd.log("🛡️ PROP FIRM MODE ACTIVATED: Maximum protection enabled")
+            self.cmd.add_copilot_response(
+                thoughts="User wants maximum capital protection. Enabling strict prop firm compliance rules.",
+                verdict="PROP FIRM MODE ENABLED",
+                adjustment="MTF confirmation increased to 3/3 agents. Position size reduced to 50%. Tight trailing stops enabled. Daily loss limit enforced."
+            )
+            self._aggressive_mode = False
+            self._prop_firm_mode = True
+            self.ai_narrator.set_aggression_mode(False)
+            self.cmd.update_vibe_status("Protected - Prop Firm Rules", "active")
+            self.cmd.update_copilot_status("PROP FIRM MODE")
+            return
 
         force_action_phrase = "FORCE ACTION"
         force_action_requested = force_action_phrase in command.upper()
@@ -3369,7 +3452,47 @@ class VcaniTradeApp:
                 f'<span style="color:#D29922;font-weight:bold">⚠️ RPA TARGET</span>: '
                 f'no calibrated {action} button coordinates resolved for {ticker}'
             )
-        rpa_success = self.rpa_hand.execute_trade(rpa_trade)
+        # PREDATOR-CLASS: Silent Error Alerting with try/except wrapper
+        rpa_success = False
+        try:
+            rpa_success = self.rpa_hand.execute_trade(rpa_trade)
+        except Exception as exec_err:
+            # SILENT ERROR ALERT: Voice + Pop-up notification
+            error_msg = f"RPA Execution FAILED for {action} {ticker}: {exec_err}"
+            logger.critical(f"🚨 EXECUTION ERROR: {error_msg}")
+            
+            # Voice Alert (Windows TTS)
+            try:
+                import ctypes
+                # Simple Windows voice alert via SAPI
+                sapi = ctypes.windll.LoadLibrary("sapi.dll")
+                # Fallback: use PowerShell for voice alert
+                import subprocess
+                subprocess.run(
+                    ["powershell", "-Command", 
+                     f"Add-Type -AssemblyName System.Speech; "
+                     f"$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                     f"$synth.Speak('Alert. Trade execution failed for {ticker}.')"],
+                    capture_output=True, timeout=2
+                )
+            except Exception:
+                pass  # Voice not available, continue with popup
+            
+            # Pop-up Alert (PyQt6 MessageBox)
+            from PyQt6.QtWidgets import QMessageBox
+            from PyQt6.QtCore import Qt
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Icon.Critical)
+            msg_box.setWindowTitle("🚨 TRADE EXECUTION FAILED")
+            msg_box.setText(f"Failed to execute {action} order for {ticker}")
+            msg_box.setInformativeText(error_msg)
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
+            
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🚨 EXECUTION ALERT</span>: {error_msg}'
+            )
+        
         order_status = "rpa_executed" if rpa_success else "rpa_failed"
         logger.info("EXEC_CLOUD: rpa result for %s %s -> %s", action, ticker, order_status)
         self.cmd.log(
