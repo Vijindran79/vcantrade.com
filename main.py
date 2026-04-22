@@ -14,15 +14,26 @@ Architecture:
 - Watchtower runs independently, feeds anomalies to Swarm
 """
 
-# Fix Windows PowerShell emoji encoding issues
+# Fix Windows terminal encoding issues — runs before ANY other import so that
+# even early import-time prints/logs never hit cp1252 raw.
 import sys
 import os
 import io
 
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    # Re-wrap stdout/stderr with ASCII + ignore so emojis are silently dropped
+    # instead of raising UnicodeEncodeError on cp1252 / cp850 terminals.
+    try:
+        sys.stdout = io.TextIOWrapper(
+            sys.stdout.buffer, encoding='ascii', errors='ignore', line_buffering=True
+        )
+        sys.stderr = io.TextIOWrapper(
+            sys.stderr.buffer, encoding='ascii', errors='ignore', line_buffering=True
+        )
+    except AttributeError:
+        # Already wrapped (e.g. pytest capture) — nothing to do.
+        pass
 
 import signal
 import socket
@@ -81,26 +92,59 @@ from core.market_sessions import MarketSessionDetector
 from ui.dashboard import CommandCenter
 from ui.signal_dialog import SignalApprovalDialog
 from ui.ai_narrator import AINarratorOverlay
+from ui.calibration_dialog import CalibrationWizardDialog
+from ui.vision_dialog import VisionConfirmationDialog, VisionTestDialog
 
 # Setup logging with UTF-8 encoding to prevent emoji crashes
 # Clear any existing handlers and set up fresh
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
+
+class _SafeStreamHandler(logging.StreamHandler):
+    """StreamHandler that NEVER raises UnicodeEncodeError.
+
+    Strategy (belt-and-suspenders):
+    1. Strip every non-ASCII character from the formatted message *before*
+       writing, so the underlying stream (even cp1252) never sees an emoji.
+    2. If a write still fails for any reason, encode with errors='ignore'
+       and decode back to a plain ASCII string as a final fallback.
+    3. Always flush after each record so logs appear immediately.
+    """
+
+    # Matches any character outside the 7-bit ASCII range (includes all emojis).
+    _NON_ASCII = re.compile(r'[^\x00-\x7F]+')
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            # Step 1: strip all non-ASCII characters.
+            msg = self._NON_ASCII.sub('', msg)
+            stream = self.stream
+            try:
+                stream.write(msg + self.terminator)
+            except UnicodeEncodeError:
+                # Step 2: final fallback — encode as ASCII ignoring errors.
+                safe = msg.encode('ascii', errors='ignore').decode('ascii')
+                stream.write(safe + self.terminator)
+            self.flush()
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+
+
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.FileHandler(config.LOG_FILE, encoding='utf-8', mode='a'),
-        logging.StreamHandler(sys.stdout)
+        _SafeStreamHandler(sys.stdout),
     ],
     force=True  # Force reconfiguration
 )
 logger = logging.getLogger(__name__)
 logger.info("Logging system initialized")
-
-
-_instance_lock_socket = None
 
 
 def _acquire_single_instance_lock() -> bool:
@@ -125,22 +169,6 @@ def _release_single_instance_lock() -> None:
         except Exception:
             pass
         _instance_lock_socket = None
-
-# Force unbuffered/immediate flush on the file handler so log entries hit disk
-# without a Python closure bug. Replace instance flush with a proper per-handler
-# closure using a default-argument capture.
-for _h in logging.root.handlers:
-    if hasattr(_h, 'stream'):
-        def _make_flusher(_handler):
-            original_emit = _handler.emit
-            def _flushing_emit(record):
-                original_emit(record)
-                try:
-                    _handler.stream.flush()
-                except Exception:
-                    pass
-            return _flushing_emit
-        _h.emit = _make_flusher(_h)
 
 
 from core.signal_dispatcher import SignalDispatcher
@@ -4121,32 +4149,51 @@ class VcaniTradeApp:
         logger.info("Starting VcaniTrade AI (Hybrid)...")
         self._ensure_balance_state()
 
-        # Show dashboard
-        self.cmd.show()
+        # Show dashboard — this MUST succeed regardless of any service errors.
+        try:
+            self.cmd.show()
+        except Exception as exc:
+            logger.error("Dashboard show() failed: %s — attempting re-init", exc)
+            self.cmd = CommandCenter()
+            self.cmd.show()
 
         # Initialize UI with balance and ledger
-        self.cmd.update_balance(
-            self.balance,
-            self.equity,
-            self.daily_pnl,
-            self.total_pnl,
-            drawdown=self.max_drawdown,
-            drawdown_pct=(self.max_drawdown / self.peak_balance * 100.0) if self.peak_balance else 0.0,
-            trades_today=self.trades_today,
-        )
-        self._refresh_live_ledger()
+        try:
+            self.cmd.update_balance(
+                self.balance,
+                self.equity,
+                self.daily_pnl,
+                self.total_pnl,
+                drawdown=self.max_drawdown,
+                drawdown_pct=(self.max_drawdown / self.peak_balance * 100.0) if self.peak_balance else 0.0,
+                trades_today=self.trades_today,
+            )
+            self._refresh_live_ledger()
+        except Exception as exc:
+            logger.warning("update_balance failed (non-fatal): %s", exc)
 
         # Start background threads
         if config.CLOUD_SCANNER_ENABLED:
-            self.cloud_scanner.start()
-            self.cmd.log("☁️ Cloud Scanner started")
+            try:
+                self.cloud_scanner.start()
+                self.cmd.log("Cloud Scanner started")
+            except Exception as exc:
+                logger.warning("Cloud Scanner start failed (non-fatal): %s", exc)
+                self.cmd.log(f"Cloud Scanner start failed: {exc}")
         else:
-            self.cmd.log("☁️ Cloud Scanner disabled - using local watchlist only")
+            self.cmd.log("Cloud Scanner disabled - using local watchlist only")
 
-        self.signal_listener.start()
-        self.data_scout_listener.start()
-        self.watchtower.start()
-        self.analysis_worker.start()
+        for svc_name, svc in [
+            ("signal_listener", self.signal_listener),
+            ("data_scout_listener", self.data_scout_listener),
+            ("watchtower", self.watchtower),
+            ("analysis_worker", self.analysis_worker),
+        ]:
+            try:
+                svc.start()
+            except Exception as exc:
+                logger.warning("%s start failed (non-fatal): %s", svc_name, exc)
+                self.cmd.log(f"{svc_name} start failed: {exc}")
 
         # Startup messages
         self.cmd.log("VcaniTrade AI started - Hybrid Architecture")

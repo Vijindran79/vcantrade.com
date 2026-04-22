@@ -43,6 +43,7 @@ RED = "#F85149"
 ORANGE = "#D29922"
 GRAY = "#8B949E"
 WHITE = "#E6EDF3"
+DIM = "#484F58"
 
 
 class VisionConfirmationDialog(QDialog):
@@ -474,3 +475,65 @@ Respond with ONLY JSON - no markdown, no explanations."""
         """User rejected trade."""
         self.rejected.emit(self.signal_data)
         self.reject()
+
+
+class VisionTestDialog(QDialog):
+    """Simple dialog to preview a captured chart screenshot for sanity-checking."""
+
+    def __init__(self, image, parent=None):
+        super().__init__(parent)
+        self._image = image
+        self._setup_ui()
+
+    def _setup_ui(self):
+        self.setWindowTitle("Vision Test — Screenshot Preview")
+        self.setModal(False)
+        self.setStyleSheet(f"background: {BG_DARK}; color: {WHITE};")
+        self.resize(720, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel("📸 Chart Screenshot Capture Test")
+        title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {CYAN};")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        self._img_label = QLabel()
+        self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img_label.setStyleSheet(f"""
+            background: {BG_PANEL}; border: 1px solid {BORDER}; border-radius: 6px;
+            padding: 6px;
+        """)
+        self._render_image()
+        layout.addWidget(self._img_label)
+
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(34)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{ background: {BG_PANEL}; color: {WHITE}; border: 1px solid {BORDER};
+                           border-radius: 6px; padding: 0 20px; }}
+            QPushButton:hover {{ border-color: {CYAN}; color: {CYAN}; }}
+        """)
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def _render_image(self):
+        """Convert PIL Image to QPixmap and display it."""
+        try:
+            import io
+            buf = io.BytesIO()
+            self._image.save(buf, format="PNG")
+            buf.seek(0)
+            pixmap = QPixmap()
+            pixmap.loadFromData(buf.read())
+            scaled = pixmap.scaled(
+                680, 480,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._img_label.setPixmap(scaled)
+        except Exception as exc:
+            self._img_label.setText(f"Could not render image: {exc}")
+

@@ -183,7 +183,6 @@ class BrowserAgent:
         url = f"https://www.tradingview.com/symbols/{tv_symbol}/"
 
         try:
-            import asyncio
             logger.info(f"🌐 Navigating to TradingView: {ticker} ({tv_symbol})")
             
             # Use 'commit' instead of 'domcontentloaded' - much faster, doesn't wait for WS
