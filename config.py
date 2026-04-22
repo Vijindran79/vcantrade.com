@@ -63,8 +63,8 @@ NVIDIA_API_KEY = "nvapi-o84NoY6DwyK0Hn28MDwOvUwoFvOCACYbBbnE64pyXzMBHUu-hHjhFc2f
 BRAINSTORM_API_KEY = "sk-8226971a2ecd43adb234d88b2e102597"
 
 # Local execution settings
-LLM_TIMEOUT = 90
-OLLAMA_TIMEOUT = LLM_TIMEOUT
+LLM_TIMEOUT = 90  # Heavy local Qwen runs need more time to finish reliably
+OLLAMA_TIMEOUT = LLM_TIMEOUT  # Alias used by llm_analyzer swarm runner
 JSON_OUTPUT = True
 
 # ===== VISION / VLM CONFIGURATION =====

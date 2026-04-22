@@ -365,7 +365,9 @@ class CloudScanner:
                     "label": "LIQUIDITY TARGET",
                     "distance": float(distance),
                 }
-                if best_zone is None or zone["distance"] < best_zone["distance"]:
+                if best_zone is None:
+                    best_zone = zone
+                elif zone["distance"] < best_zone["distance"]:
                     best_zone = zone
 
         if best_zone:

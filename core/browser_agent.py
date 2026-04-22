@@ -183,7 +183,6 @@ class BrowserAgent:
         url = f"https://www.tradingview.com/symbols/{tv_symbol}/"
 
         try:
-            import asyncio
             logger.info(f"[GLOBE] Navigating to TradingView: {ticker} ({tv_symbol})")
             
             # Use 'commit' instead of 'domcontentloaded' - much faster, doesn't wait for WS
@@ -579,7 +578,7 @@ class BrowserAgent:
                 logger.warning("Not on TradingView, navigating...")
                 await self.navigate_to_chart("BTCUSD")
             
-            logger.info("[EMOJI] Injecting Pine Script to TradingView...")
+            logger.info("[BUILD] Injecting Pine Script to TradingView...")
             
             # Open pine Editor via keyboard shortcut (Ctrl+P for Pine Editor)
             await self.page.keyboard.press("Control+p")
@@ -711,7 +710,7 @@ class BrowserAgent:
 
         self.restart_count += 1
         logger.warning(
-            f"[EMOJI] Self-Healing Restart #{self.restart_count} initiated... "
+            f"[WRENCH] Self-Healing Restart #{self.restart_count} initiated... "
             f"(Last error: {self.last_error})"
         )
 
