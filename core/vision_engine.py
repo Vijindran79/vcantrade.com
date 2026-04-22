@@ -40,16 +40,16 @@ DEFAULT_CHART_REGION = (
     config.CHART_REGION_H,
 )
 
-# VLM image constraints — keep small to save VRAM during inference
-VLM_MAX_WIDTH = 640  # 640px wide (not 720p — saves significant VRAM)
+# VLM image constraints [DASH] keep small to save VRAM during inference
+VLM_MAX_WIDTH = 640  # 640px wide (not 720p [DASH] saves significant VRAM)
 VLM_MAX_HEIGHT = 480  # 480px tall
 VLM_QUALITY = 75  # JPEG quality (lower = smaller file = faster decode)
 VLM_FORMAT = "JPEG"
 
-# Inference timeout — 15s max before graceful degradation
+# Inference timeout [DASH] 15s max before graceful degradation
 VLM_TIMEOUT = 15
 
-# Ollama keep_alive in seconds — unload model after this to free VRAM
+# Ollama keep_alive in seconds [DASH] unload model after this to free VRAM
 OLLAMA_KEEP_ALIVE = "30s"
 
 # Screenshot save directory (for debugging)
@@ -91,7 +91,7 @@ class ChartScreenshot:
     def to_base64(self, fmt: str = VLM_FORMAT, quality: int = VLM_QUALITY) -> str:
         """
         Encode image as base64 string for VLM API.
-        Returns raw base64 (no data URI prefix) — Ollama expects plain base64.
+        Returns raw base64 (no data URI prefix) [DASH] Ollama expects plain base64.
         """
         buffer = io.BytesIO()
         resized = self._resize_for_vlm()
@@ -116,7 +116,7 @@ class ChartScreenshot:
     def _resize_for_vlm(self) -> Image.Image:
         """
         Resize image to VRAM-friendly dimensions.
-        640x480 max — moondream and llava-q4 handle this easily on 6GB VRAM.
+        640x480 max [DASH] moondream and llava-q4 handle this easily on 6GB VRAM.
         """
         w, h = self.image.size
         if w <= VLM_MAX_WIDTH and h <= VLM_MAX_HEIGHT:
@@ -138,7 +138,7 @@ class ChartScreenshot:
 
 
 # ---------------------------------------------------------------------------
-# VisionCapture — Screen capture with library fallback chain
+# VisionCapture [DASH] Screen capture with library fallback chain
 # ---------------------------------------------------------------------------
 
 
@@ -288,7 +288,7 @@ class VisionCapture:
 
 
 # ---------------------------------------------------------------------------
-# VLMClient — Hardware-optimized for RTX 4050 6GB VRAM
+# VLMClient [DASH] Hardware-optimized for RTX 4050 6GB VRAM
 # ---------------------------------------------------------------------------
 
 
@@ -348,7 +348,7 @@ class VLMClient:
             self._active_model = RECOMMENDED_MODELS["fallback"]
             return result
 
-        logger.error("VLM: All models failed — vision analysis unavailable")
+        logger.error("VLM: All models failed [DASH] vision analysis unavailable")
         return None
 
     def _inference(self, image_base64: str, prompt: str, model: str) -> Optional[str]:
@@ -356,9 +356,9 @@ class VLMClient:
         Single inference call to Ollama with timeout and error handling.
 
         Catches:
-        - Timeout (15s) — model too slow or VRAM thrashing
-        - ConnectionError — model not loaded
-        - HTTP 500 — OOM / VRAM error
+        - Timeout (15s) [DASH] model too slow or VRAM thrashing
+        - ConnectionError [DASH] model not loaded
+        - HTTP 500 [DASH] OOM / VRAM error
         - Any other exception
         """
         try:
@@ -378,7 +378,7 @@ class VLMClient:
             # HTTP 500 from Ollama usually means OOM / VRAM error
             if resp.status_code == 500:
                 logger.error(
-                    f"VLM: Ollama returned 500 for '{model}' — "
+                    f"VLM: Ollama returned 500 for '{model}' [DASH] "
                     f"likely VRAM/OOM error. Model may need to be reloaded."
                 )
                 return None
@@ -399,7 +399,7 @@ class VLMClient:
 
         except requests.exceptions.Timeout:
             logger.warning(
-                f"VLM: '{model}' timed out after {self.timeout}s — "
+                f"VLM: '{model}' timed out after {self.timeout}s [DASH] "
                 f"model may be too large for 6GB VRAM or still loading"
             )
             return None
@@ -412,7 +412,7 @@ class VLMClient:
             error_str = str(e).lower()
             if "out of memory" in error_str or "cuda" in error_str or "vr" in error_str:
                 logger.error(
-                    f"VLM: VRAM/OOM error with '{model}' — "
+                    f"VLM: VRAM/OOM error with '{model}' [DASH] "
                     f"try a smaller model like moondream"
                 )
             else:
@@ -457,10 +457,10 @@ class VLMClient:
     def pull_model(self, model: Optional[str] = None) -> bool:
         """
         Trigger Ollama to pull a VLM model.
-        Blocking call — may take several minutes depending on model size.
+        Blocking call [DASH] may take several minutes depending on model size.
         """
         target = model or self.model
-        logger.info(f"VLM: Pulling model '{target}' — this may take a few minutes...")
+        logger.info(f"VLM: Pulling model '{target}' [DASH] this may take a few minutes...")
         try:
             resp = requests.post(
                 f"{self.base_url}/api/pull",
@@ -529,8 +529,8 @@ def setup_vlm_for_hardware(
     Configure VLM client optimally for RTX 4050 6GB VRAM.
 
     Strategy:
-    1. Check if moondream is available — use it (fastest, lowest VRAM)
-    2. If not, check for llava:7b-q4 — use it (acceptable)
+    1. Check if moondream is available [DASH] use it (fastest, lowest VRAM)
+    2. If not, check for llava:7b-q4 [DASH] use it (acceptable)
     3. If neither, pull moondream automatically
     4. Return configured VLMClient
     """
@@ -554,12 +554,12 @@ def setup_vlm_for_hardware(
         client.model = RECOMMENDED_MODELS["fallback"]
         return client
 
-    # Neither available — pull moondream (small, fast download ~1GB)
+    # Neither available [DASH] pull moondream (small, fast download ~1GB)
     logger.info(
         f"VLM: No vision models found. Pulling '{RECOMMENDED_MODELS['primary']}' "
         f"(~1GB download, optimal for 6GB VRAM)..."
     )
-    print(f"\n  Pulling moondream model (~1GB) — this takes 1-3 minutes...")
+    print(f"\n  Pulling moondream model (~1GB) [DASH] this takes 1-3 minutes...")
     print(
         f"  Run 'ollama pull moondream' manually in another terminal if this hangs.\n"
     )

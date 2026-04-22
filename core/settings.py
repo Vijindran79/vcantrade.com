@@ -127,8 +127,8 @@ class SettingsManager:
                 self._normalize_settings()
                 if self.settings != normalized_snapshot:
                     self.save()
-                    logger.info("🧹 Settings normalized and re-saved to remove invalid watchlist entries")
-                logger.info(f"✅ Settings loaded from {self.SETTINGS_FILE}")
+                    logger.info("[BROOM] Settings normalized and re-saved to remove invalid watchlist entries")
+                logger.info(f"[OK] Settings loaded from {self.SETTINGS_FILE}")
             except Exception as e:
                 logger.error(f"Failed to load settings: {e}")
                 self.settings = self.DEFAULT_SETTINGS.copy()
@@ -141,7 +141,7 @@ class SettingsManager:
         try:
             with open(self.settings_file, 'w') as f:
                 json.dump(self.settings, f, indent=2)
-            logger.info(f"✅ Settings saved to {self.SETTINGS_FILE}")
+            logger.info(f"[OK] Settings saved to {self.SETTINGS_FILE}")
         except Exception as e:
             logger.error(f"Failed to save settings: {e}")
     
@@ -156,7 +156,7 @@ class SettingsManager:
                 value = self.normalize_watchlist(value)
             self.settings[key] = value
             self.save()
-            logger.info(f"⚙️ Setting updated: {key} = {value}")
+            logger.info(f"[GEAR] Setting updated: {key} = {value}")
         else:
             logger.warning(f"Unknown setting key: {key}")
     
@@ -168,7 +168,7 @@ class SettingsManager:
                     value = self.normalize_watchlist(value)
                 self.settings[key] = value
         self.save()
-        logger.info(f"⚙️ Settings batch updated: {list(updates.keys())}")
+        logger.info(f"[GEAR] Settings batch updated: {list(updates.keys())}")
     
     def get_all(self) -> Dict[str, Any]:
         """Get all settings."""
@@ -178,7 +178,7 @@ class SettingsManager:
         """Reset all settings to defaults."""
         self.settings = self.DEFAULT_SETTINGS.copy()
         self.save()
-        logger.info("🔄 Settings reset to defaults")
+        logger.info("[REFRESH] Settings reset to defaults")
     
     def get_investment_for_trade(self, entry_price: float) -> tuple:
         """

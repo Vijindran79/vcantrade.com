@@ -44,8 +44,8 @@ Grade the entry quality from A to F:
 - A: Perfect entry at support/resistance, clean exit at target
 - B: Good entry, minor slippage or early/late exit
 - C: Acceptable entry but ignored a key level
-- D: Poor entry — chased price or entered against structure
-- F: Terrible entry — completely wrong direction or no setup
+- D: Poor entry [DASH] chased price or entered against structure
+- F: Terrible entry [DASH] completely wrong direction or no setup
 
 Respond in STRICT JSON:
 {{
@@ -57,7 +57,7 @@ Respond in STRICT JSON:
 
 PROMPT_RISK_GRADE = """\
 You are the RISK MANAGER grading a completed trade. Evaluate ONLY the risk
-management quality — position sizing, risk/reward ratio, and whether the
+management quality [DASH] position sizing, risk/reward ratio, and whether the
 trade respected the safety rules.
 
 Trade Details:
@@ -74,8 +74,8 @@ Grade the risk management from A to F:
 - A: Excellent risk/reward (>2:1), proper sizing, stopped out cleanly or hit TP
 - B: Good risk management, minor issues with sizing or timing
 - C: Acceptable but risk was borderline or position too large
-- D: Poor risk management — ignored stop, oversized, or held too long
-- F: Dangerous — no stop loss, massive overexposure, or revenge trading
+- D: Poor risk management [DASH] ignored stop, oversized, or held too long
+- F: Dangerous [DASH] no stop loss, massive overexposure, or revenge trading
 
 Respond in STRICT JSON:
 {{
@@ -172,7 +172,7 @@ class Grader:
         # Persist to database
         self._save_autopsy(autopsy)
         logger.info(
-            f"Autopsy complete: {trade.asset} — Grade: {autopsy.grade} "
+            f"Autopsy complete: {trade.asset} [DASH] Grade: {autopsy.grade} "
             f"(Technical: {autopsy.technical_grade}, Risk: {autopsy.risk_grade})"
         )
 
@@ -205,7 +205,7 @@ class Grader:
             logger.error(f"[{agent}] Grading failed: {e}")
             return {
                 "grade": "C",
-                "explanation": f"Grading failed — defaulting to neutral.",
+                "explanation": f"Grading failed [DASH] defaulting to neutral.",
                 "lessons": ["Review this trade manually."],
             }
 
@@ -240,7 +240,7 @@ class Grader:
         if won:
             tech_grade = "A" if pnl > 50 else "B"
             tech_exp = "Clean entry at support. Price moved in your favor as expected."
-            tech_lessons = ["This setup has a proven edge — keep tracking it."]
+            tech_lessons = ["This setup has a proven edge [DASH] keep tracking it."]
         else:
             tech_grade = "C" if trade.stop_loss else "D"
             tech_exp = (
@@ -250,7 +250,7 @@ class Grader:
             )
             tech_lessons = [
                 "Wait for stronger confirmation before entering.",
-                "Always set a stop loss — never trade without one.",
+                "Always set a stop loss [DASH] never trade without one.",
             ]
 
         # Risk grade
@@ -343,7 +343,7 @@ class Grader:
 
         conn.commit()
         conn.close()
-        logger.info(f"Autopsy saved: {autopsy.trade_id} — Grade {autopsy.grade}")
+        logger.info(f"Autopsy saved: {autopsy.trade_id} [DASH] Grade {autopsy.grade}")
 
     def get_autopsy_history(self, limit: int = 50) -> List[Dict]:
         """Retrieve recent autopsies"""

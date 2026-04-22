@@ -36,7 +36,7 @@ class SignalApprovalDialog(QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle(f"🚀 Trade Signal: {self.signal_data['action']} {self.signal_data['ticker']}")
+        self.setWindowTitle(f"[SUCCESS] Trade Signal: {self.signal_data['action']} {self.signal_data['ticker']}")
         self.setModal(True)
         self.setFixedSize(500, 450)
 
@@ -107,7 +107,7 @@ class SignalApprovalDialog(QDialog):
         mode_layout = QHBoxLayout()
         
         # Dollar amount radio
-        self.dollar_radio = QRadioButton("💵 Dollar Amount ($)")
+        self.dollar_radio = QRadioButton("[CASH] Dollar Amount ($)")
         self.dollar_radio.setFont(QFont("Consolas", 11))
         self.dollar_radio.setStyleSheet("color: #E6EDF3;")
         self.dollar_radio.setChecked(True)
@@ -115,7 +115,7 @@ class SignalApprovalDialog(QDialog):
         mode_layout.addWidget(self.dollar_radio)
         
         # Lots/Units radio
-        self.lots_radio = QRadioButton("📊 Lots/Units (Quantity)")
+        self.lots_radio = QRadioButton("[CHART] Lots/Units (Quantity)")
         self.lots_radio.setFont(QFont("Consolas", 11))
         self.lots_radio.setStyleSheet("color: #E6EDF3;")
         self.lots_radio.toggled.connect(self._on_mode_changed)
@@ -149,13 +149,13 @@ class SignalApprovalDialog(QDialog):
         layout.addLayout(self.amount_layout)
         
         # Reason (brief)
-        reason_label = QLabel(f"📝 {self.signal_data.get('reason', 'No reason provided')[:100]}")
+        reason_label = QLabel(f"[NOTE] {self.signal_data.get('reason', 'No reason provided')[:100]}")
         reason_label.setFont(QFont("Consolas", 9))
         reason_label.setStyleSheet("color: #8B949E;")
         reason_label.setWordWrap(True)
         layout.addWidget(reason_label)
 
-        # 😈 Devil's Advocate Warning Section
+        # [DEVIL] Devil's Advocate Warning Section
         transcript = self.signal_data.get("transcript", {})
         devils_advocate = transcript.get("devils_advocate", {})
         
@@ -171,7 +171,7 @@ class SignalApprovalDialog(QDialog):
             warning_layout.setSpacing(6)
 
             # Warning header
-            warning_header = QLabel("😈 DEVIL'S ADVOCATE WARNINGS")
+            warning_header = QLabel("[DEVIL] DEVIL'S ADVOCATE WARNINGS")
             warning_header.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
             warning_header.setStyleSheet("color: #F85149;")
             warning_layout.addWidget(warning_header)
@@ -187,13 +187,13 @@ class SignalApprovalDialog(QDialog):
             # Rejection reasons
             reasons = devils_advocate.get("rejection_reasons", [])
             if reasons:
-                reasons_label = QLabel("⚠️ Reasons to avoid this trade:")
+                reasons_label = QLabel("[WARN] Reasons to avoid this trade:")
                 reasons_label.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
                 reasons_label.setStyleSheet("color: #E6EDF3;")
                 warning_layout.addWidget(reasons_label)
 
                 for reason in reasons:
-                    reason_item = QLabel(f"• {reason}")
+                    reason_item = QLabel(f"[BULLET] {reason}")
                     reason_item.setFont(QFont("Consolas", 9))
                     reason_item.setStyleSheet("color: #8B949E;")
                     reason_item.setWordWrap(True)
@@ -202,7 +202,7 @@ class SignalApprovalDialog(QDialog):
             # Hidden risks
             hidden_risks = devils_advocate.get("hidden_risks", "")
             if hidden_risks:
-                risk_label = QLabel(f"🔍 Hidden Risk: {hidden_risks}")
+                risk_label = QLabel(f"[MAGNIFY] Hidden Risk: {hidden_risks}")
                 risk_label.setFont(QFont("Consolas", 9))
                 risk_label.setStyleSheet("color: #D29922;")
                 risk_label.setWordWrap(True)
@@ -213,7 +213,7 @@ class SignalApprovalDialog(QDialog):
         # Buttons
         button_layout = QHBoxLayout()
 
-        self.approve_btn = QPushButton("✅ APPROVE & EXECUTE")
+        self.approve_btn = QPushButton("[OK] APPROVE & EXECUTE")
         self.approve_btn.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
         self.approve_btn.setStyleSheet(
             "background-color: #3FB950; color: #0D1117; padding: 10px; border: none; border-radius: 4px;"
@@ -221,7 +221,7 @@ class SignalApprovalDialog(QDialog):
         self.approve_btn.clicked.connect(self._on_approve)
         button_layout.addWidget(self.approve_btn)
 
-        self.reject_btn = QPushButton("❌ REJECT")
+        self.reject_btn = QPushButton("[FAIL] REJECT")
         self.reject_btn.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
         self.reject_btn.setStyleSheet(
             "background-color: #F85149; color: #0D1117; padding: 10px; border: none; border-radius: 4px;"
@@ -232,7 +232,7 @@ class SignalApprovalDialog(QDialog):
         layout.addLayout(button_layout)
         
         # Keyboard shortcuts hint
-        hint = QLabel("💡 Tip: ENTER to approve | ESC to reject")
+        hint = QLabel("[IDEA] Tip: ENTER to approve | ESC to reject")
         hint.setFont(QFont("Consolas", 9))
         hint.setStyleSheet("color: #8B949E;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)

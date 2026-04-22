@@ -356,7 +356,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.ticker_status_labels = {}
         main_layout.addWidget(self.watchlist_status_frame)
 
-        # ── Live Ledger ──────────────────────────────────────────────────
+        # [EMOJI] Live Ledger [EMOJI]
         ledger_frame = QFrame()
         ledger_frame.setStyleSheet(
             "QFrame { background: rgba(30,40,60,180); border: 1px solid rgba(88,166,255,0.25);"
@@ -395,7 +395,7 @@ class AINarratorOverlay(GlassmorphicPanel):
 
         ledger_frame.setLayout(ledger_layout)
         main_layout.addWidget(ledger_frame)
-        # ─────────────────────────────────────────────────────────────────
+        # [EMOJI]
         
         # Current status (typing label)
         self.status_label = TypingLabel()
@@ -420,7 +420,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         levels_header.addWidget(self.levels_title)
         levels_header.addStretch()
 
-        self.clear_levels_btn = QPushButton("⟲")
+        self.clear_levels_btn = QPushButton("[RELOAD]")
         self.clear_levels_btn.setFixedSize(24, 24)
         self.clear_levels_btn.setToolTip("Reset Teacher Broadcast levels")
         self.clear_levels_btn.setStyleSheet(
@@ -468,7 +468,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         main_layout.addWidget(separator)
         
         # Activity feed title
-        feed_title = QLabel("📋 Activity Feed")
+        feed_title = QLabel("[CLIPBOARD] Activity Feed")
         feed_title.setStyleSheet("""
             color: #58A6FF;
             font-size: 12px;
@@ -517,7 +517,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         # Bottom bar with resize grip for multi-monitor usability.
         bottom_bar = QHBoxLayout()
         bottom_bar.setContentsMargins(0, 2, 0, 0)
-        self.help_label = QLabel("Drag anywhere to move • Resize from bottom-right")
+        self.help_label = QLabel("Drag anywhere to move [BULLET] Resize from bottom-right")
         self.help_label.setStyleSheet("color: #8B949E; font-size: 10px; background: transparent;")
         bottom_bar.addWidget(self.help_label)
         bottom_bar.addStretch()
@@ -575,7 +575,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.snap_combo.setFixedWidth(108)
         self.snap_combo.currentIndexChanged.connect(self._snap_from_combo)
 
-        self.stealth_btn = QPushButton("🖱️")
+        self.stealth_btn = QPushButton("[MOUSE]")
         self.stealth_btn.setCheckable(True)
         self.stealth_btn.setChecked(True)
         self.stealth_btn.setFixedSize(32, 24)
@@ -636,7 +636,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         header_layout.setSpacing(10)
         
         # Status indicator (pulsing dot)
-        self.status_dot = QLabel("●")
+        self.status_dot = QLabel("[DOT]")
         self.status_dot.setStyleSheet("""
             color: #3FB950;
             font-size: 14px;
@@ -702,13 +702,13 @@ class AINarratorOverlay(GlassmorphicPanel):
         )
         if hasattr(self, "help_label"):
             self.help_label.setText(
-                "Mirror pinned • Click-through overlay active"
+                "Mirror pinned [BULLET] Click-through overlay active"
                 if self._pinned
-                else "Mirror unpinned • Drag the title bar or frame to reposition"
+                else "Mirror unpinned [BULLET] Drag the title bar or frame to reposition"
             )
         self._refresh_mode_label()
         if announce:
-            self.add_activity("📌" if self._pinned else "🪟", f"Mirror {state_text.lower()}")
+            self.add_activity("[PIN]" if self._pinned else "[WINDOW]", f"Mirror {state_text.lower()}")
 
     def _set_overlay_opacity(self, value: int):
         self._current_opacity = max(0.55, min(1.0, value / 100.0))
@@ -726,7 +726,7 @@ class AINarratorOverlay(GlassmorphicPanel):
             "RPA Hand execution enabled" if self._rpa_enabled else "RPA Hand execution paused"
         )
         if announce:
-            icon = "🖱️" if self._rpa_enabled else "⛔"
+            icon = "[MOUSE]" if self._rpa_enabled else "[NO_ENTRY]"
             state = "ON" if self._rpa_enabled else "OFF"
             self.add_activity(icon, f"RPA Hand {state}")
         if previous != self._rpa_enabled:
@@ -792,10 +792,10 @@ class AINarratorOverlay(GlassmorphicPanel):
         if enabled:
             self._refresh_mode_label()
             self.set_status("analyzing", context or "Chart focus mode")
-            self.add_activity("🧭", f"Analysis Mode ON {('- ' + context) if context else ''}")
+            self.add_activity("[COMPASS]", f"Analysis Mode ON {('- ' + context) if context else ''}")
         else:
             self._refresh_mode_label()
-            self.add_activity("✅", "Analysis Mode OFF")
+            self.add_activity("[OK]", "Analysis Mode OFF")
 
     def set_aggression_mode(self, enabled: bool):
         """Turn the mirror red when FORCE ACTION is armed."""
@@ -943,17 +943,17 @@ class AINarratorOverlay(GlassmorphicPanel):
         - success: Trade completed
         """
         status_messages = {
-            "idle": "💤 Standing by... Waiting for market signals",
-            "scanning": f"📡 Scanning markets... Monitoring {message or '10 tickers'} for opportunities",
-            "analyzing": "🧠 Analyzing signal... Running multi-agent swarm debate",
-            "thinking": f"🧠 AI Reasoning... {message or 'Consulting OpenRouter'}",
-            "fallback": f"🟡 [FALLBACK MODE] {message or 'Local Predator intelligence active'}",
-            "verdict": f"⚡ Brain verdict locked... {message or 'Awaiting execution'}",
-            "executing": f"⚡ Executing trade... {message or 'Processing order'}",
-            "monitoring": f"👁️ Monitoring positions... Watching {message or 'active trades'}",
-            "error": f"❌ Error detected... {message or 'Checking system status'}",
-            "success": f"✅ Trade executed successfully! {message or 'Position opened'}",
-            "rejected": "🚫 Trade rejected by user. Position not opened.",
+            "idle": "[SLEEP] Standing by... Waiting for market signals",
+            "scanning": f"[SAT] Scanning markets... Monitoring {message or '10 tickers'} for opportunities",
+            "analyzing": "[BRAIN] Analyzing signal... Running multi-agent swarm debate",
+            "thinking": f"[BRAIN] AI Reasoning... {message or 'Consulting OpenRouter'}",
+            "fallback": f"[YELLOW] [FALLBACK MODE] {message or 'Local Predator intelligence active'}",
+            "verdict": f"[BOLT] Brain verdict locked... {message or 'Awaiting execution'}",
+            "executing": f"[BOLT] Executing trade... {message or 'Processing order'}",
+            "monitoring": f"[EYE] Monitoring positions... Watching {message or 'active trades'}",
+            "error": f"[FAIL] Error detected... {message or 'Checking system status'}",
+            "success": f"[OK] Trade executed successfully! {message or 'Position opened'}",
+            "rejected": "[BLOCK] Trade rejected by user. Position not opened.",
         }
         
         msg = status_messages.get(status, status_messages["idle"])
@@ -1008,7 +1008,7 @@ class AINarratorOverlay(GlassmorphicPanel):
     def notify_scan_start(self, ticker_count: int = 10):
         """Notify that market scanning has started."""
         self.set_status("scanning", f"{ticker_count} tickers")
-        self.add_activity("📡", f"Started scanning {ticker_count} markets", datetime.now().strftime("%H:%M:%S"))
+        self.add_activity("[SAT]", f"Started scanning {ticker_count} markets", datetime.now().strftime("%H:%M:%S"))
 
     def set_watchlist(self, tickers: list[str]):
         """Replace live watchlist badge rows in the mirror."""
@@ -1018,7 +1018,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.ticker_status_labels = {}
 
         for ticker in tickers:
-            label = QLabel(f"⚪ {ticker}")
+            label = QLabel(f"[WHITE] {ticker}")
             label.setStyleSheet("color: #E6EDF3; font-size: 11px; background: transparent;")
             self.watchlist_status_layout.addWidget(label)
             self.ticker_status_labels[ticker] = label
@@ -1026,42 +1026,42 @@ class AINarratorOverlay(GlassmorphicPanel):
     def update_ticker_status(self, ticker: str, status: str):
         """Update a per-ticker badge in the mirror."""
         if ticker not in self.ticker_status_labels:
-            label = QLabel(f"⚪ {ticker}")
+            label = QLabel(f"[WHITE] {ticker}")
             label.setStyleSheet("color: #E6EDF3; font-size: 11px; background: transparent;")
             self.watchlist_status_layout.addWidget(label)
             self.ticker_status_labels[ticker] = label
 
         icon_map = {
-            "scanning": ("🟢", "Scanning"),
-            "analyzing_liquidity": ("🟡", "Analyzing Liquidity"),
-            "trade_rejected": ("🔴", "Trade Rejected"),
+            "scanning": ("[GREEN]", "Scanning"),
+            "analyzing_liquidity": ("[YELLOW]", "Analyzing Liquidity"),
+            "trade_rejected": ("[RED]", "Trade Rejected"),
         }
         if status.startswith("brain_reasoning:"):
-            icon, text = ("🧠", f"AI Reasoning {status.split(':', 1)[1]}")
+            icon, text = ("[BRAIN]", f"AI Reasoning {status.split(':', 1)[1]}")
         elif status.startswith("brain_fallback:"):
             brain = status.split(':', 1)[1].strip().upper() or "LOCAL"
-            icon, text = ("🟡", f"[FALLBACK MODE] {brain}")
+            icon, text = ("[YELLOW]", f"[FALLBACK MODE] {brain}")
         elif status.startswith("brain_verdict:"):
             verdict = status.split(':', 1)[1].strip().upper()
             verdict_map = {
-                "[SIGNAL] BUY": ("🟩", "Brain BUY"),
-                "[SIGNAL] SELL": ("🟥", "Brain SELL"),
-                "[SIGNAL] WAIT": ("⏸️", "Brain WAIT"),
+                "[SIGNAL] BUY": ("[GREEN_SQ]", "Brain BUY"),
+                "[SIGNAL] SELL": ("[RED_SQ]", "Brain SELL"),
+                "[SIGNAL] WAIT": ("[PAUSE]", "Brain WAIT"),
             }
-            icon, text = verdict_map.get(verdict, ("⚪", verdict or "Brain"))
+            icon, text = verdict_map.get(verdict, ("[WHITE]", verdict or "Brain"))
         else:
-            icon, text = icon_map.get(status, ("⚪", status))
+            icon, text = icon_map.get(status, ("[WHITE]", status))
         self.ticker_status_labels[ticker].setText(f"{icon} {ticker} | {text}")
 
     def notify_brain_thinking(self, ticker: str, proposed_action: str = ""):
         action_label = proposed_action.upper() if proposed_action else "SCAN"
-        self.set_status("thinking", f"{ticker} → {action_label}")
-        self.add_activity("🧠", f"AI Reasoning... {ticker} → {action_label}")
+        self.set_status("thinking", f"{ticker} -> {action_label}")
+        self.add_activity("[BRAIN]", f"AI Reasoning... {ticker} -> {action_label}")
 
     def notify_fallback_mode(self, brain_used: str = "OLLAMA_PREDATOR"):
         brain_label = str(brain_used or "OLLAMA_PREDATOR").replace("_", " ").title()
         self.set_status("fallback", f"{brain_label} engaged")
-        self.add_activity("🟡", f"[FALLBACK MODE] {brain_label}")
+        self.add_activity("[YELLOW]", f"[FALLBACK MODE] {brain_label}")
 
     def flash_brain_verdict(
         self,
@@ -1077,12 +1077,12 @@ class AINarratorOverlay(GlassmorphicPanel):
         reasoning_text = (reasoning or "OpenRouter approved the trade.").strip()
         if fallback_mode:
             self.set_status("fallback", f"{action} {ticker} via {str(brain_used or 'OLLAMA_PREDATOR').replace('_', ' ')}")
-            self.add_activity("🟡", f"[FALLBACK MODE] {brain_used}")
+            self.add_activity("[YELLOW]", f"[FALLBACK MODE] {brain_used}")
         else:
             self.set_status("verdict", f"{action} {ticker}")
-        self.add_activity("⚡", f"Brain verdict: {action} {ticker}")
+        self.add_activity("[BOLT]", f"Brain verdict: {action} {ticker}")
         if reasoning_text:
-            self.add_activity("🧾", reasoning_text[:180])
+            self.add_activity("[EMOJI]", reasoning_text[:180])
         QApplication.processEvents()
         loop = QEventLoop()
         QTimer.singleShot(max(1, int(hold_ms)), loop.quit)
@@ -1109,7 +1109,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Reset large trade-level broadcast when nothing actionable is active."""
         self.update_trade_levels("NO ACTIVE LEVELS", None, None, "")
         if announce:
-            self.add_activity("🧹", "Teacher Broadcast reset")
+            self.add_activity("[BROOM]", "Teacher Broadcast reset")
 
     def set_command_posture(self, posture: str, detail: str = ""):
         """Immediately reflect high-level command posture changes from the dashboard."""
@@ -1117,24 +1117,24 @@ class AINarratorOverlay(GlassmorphicPanel):
         if normalized == "PROTECT ACCOUNT":
             self.set_aggression_mode(False)
             self.status_label.set_text_instant(
-                f"🛡️ Protect Account active... {detail or 'Tightening posture and respecting drawdown.'}"
+                f"[SHIELD] Protect Account active... {detail or 'Tightening posture and respecting drawdown.'}"
             )
             self.status_dot.setStyleSheet("color: #58A6FF; font-size: 14px; background: transparent;")
-            self.add_activity("🛡️", "Mirror synced: PROTECT ACCOUNT")
+            self.add_activity("[SHIELD]", "Mirror synced: PROTECT ACCOUNT")
             return
         if normalized == "BE AGGRESSIVE":
             self.set_aggression_mode(True)
             self.status_label.set_text_instant(
-                f"🔥 Aggression active... {detail or 'Lion strike posture armed.'}"
+                f"[FIRE] Aggression active... {detail or 'Lion strike posture armed.'}"
             )
             self.status_dot.setStyleSheet("color: #F85149; font-size: 14px; background: transparent;")
-            self.add_activity("🔥", "Mirror synced: BE AGGRESSIVE")
+            self.add_activity("[FIRE]", "Mirror synced: BE AGGRESSIVE")
             return
         self.status_label.set_text_instant(detail or normalized or "Standing by")
     
     def notify_signal_detected(self, ticker: str, signal_type: str, confidence: float):
         """Notify that a trading signal was detected."""
-        icon = "🔥" if confidence > 0.8 else "⚠️"
+        icon = "[FIRE]" if confidence > 0.8 else "[WARN]"
         self.trigger_signal_alert(duration_ms=3000)
         self.set_status("analyzing", f"{signal_type} on {ticker}")
         self.add_activity(
@@ -1147,7 +1147,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Notify that user approved a trade."""
         action_upper = str(action).upper()
         is_sell = action_upper == "SELL"
-        icon = "🟥" if is_sell else "🟩"
+        icon = "[RED_SQ]" if is_sell else "[GREEN_SQ]"
         approval_text = "APPROVED: SELL" if is_sell else "APPROVED: BUY"
         self.set_status("executing", f"{approval_text} {ticker} ${amount:.2f}")
         self.add_activity(
@@ -1160,7 +1160,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Notify that user rejected a trade."""
         self.set_status("rejected")
         self.add_activity(
-            "🚫",
+            "[BLOCK]",
             f"REJECTED: User declined trade on {ticker}",
             datetime.now().strftime("%H:%M:%S")
         )
@@ -1169,7 +1169,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Notify that trade was successfully executed."""
         self.set_status("success", f"{action} {ticker} @ ${entry_price:.2f}")
         self.add_activity(
-            "💰",
+            "[MONEY]",
             f"EXECUTED: {action} {ticker} @ ${entry_price:.2f}",
             datetime.now().strftime("%H:%M:%S")
         )
@@ -1179,7 +1179,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.set_status("monitoring", f"{position_count} positions")
         pnl_str = f"+${daily_pnl:.2f}" if daily_pnl >= 0 else f"-${abs(daily_pnl):.2f}"
         self.add_activity(
-            "📊",
+            "[CHART]",
             f"Monitoring {position_count} positions | Daily P&L: {pnl_str}",
             datetime.now().strftime("%H:%M:%S")
         )
@@ -1188,7 +1188,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Notify about an error."""
         self.set_status("error", error_message)
         self.add_activity(
-            "❌",
+            "[FAIL]",
             f"ERROR: {error_message}",
             datetime.now().strftime("%H:%M:%S")
         )
@@ -1197,7 +1197,7 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Notify that system is ready."""
         self.set_status("idle")
         self.add_activity(
-            "🚀",
+            "[SUCCESS]",
             "System initialized - All systems connected",
             datetime.now().strftime("%H:%M:%S")
         )

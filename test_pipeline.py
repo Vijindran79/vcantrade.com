@@ -23,7 +23,7 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 # Import from core modules
-from core.swarm_consensus import OllamaSwarmConsensus
+from core.brain_swarm import OllamaSwarmConsensus
 import config
 
 # Configure logging
@@ -70,7 +70,7 @@ async def run_test_pipeline():
     # Display migration info
     console.print(
         Panel.fit(
-            "[bold blue]🚀 Swarm Consensus Test Pipeline[/bold blue]\n"
+            "[bold blue][SUCCESS] Swarm Consensus Test Pipeline[/bold blue]\n"
             f"[green]LLM Provider:[/green] Groq API\n"
             f"[green]Model:[/green] {config.LLM_MODEL}\n"
             f"[green]Temperature:[/green] {config.LLM_TEMPERATURE}\n"
@@ -85,10 +85,10 @@ async def run_test_pipeline():
     try:
         swarm = OllamaSwarmConsensus()
         console.print(
-            "[green]✓ Swarm initialized successfully with Groq client[/green]"
+            "[green][OK] Swarm initialized successfully with Groq client[/green]"
         )
     except Exception as e:
-        console.print(f"[red]✗ Failed to initialize Swarm: {e}[/red]")
+        console.print(f"[red][FAIL] Failed to initialize Swarm: {e}[/red]")
         logger.error(f"Initialization error: {e}")
         return
 
@@ -146,27 +146,27 @@ async def run_test_pipeline():
             progress.update(task, completed=True)
 
     except Exception as e:
-        console.print(f"\n[red]✗ Swarm execution failed: {e}[/red]")
+        console.print(f"\n[red][FAIL] Swarm execution failed: {e}[/red]")
         logger.error(f"Execution error: {e}", exc_info=True)
         return
 
     elapsed_time = time.time() - start_time
-    console.print(f"\n[green]✓ Swarm completed in {elapsed_time:.2f} seconds[/green]")
+    console.print(f"\n[green][OK] Swarm completed in {elapsed_time:.2f} seconds[/green]")
 
     # Display results
     console.print("\n" + "=" * 60)
-    console.print("[bold magenta]📊 SWARM CONSENSUS RESULTS[/bold magenta]")
+    console.print("[bold magenta][CHART] SWARM CONSENSUS RESULTS[/bold magenta]")
     console.print("=" * 60)
 
     # Show individual agent responses
     console.print("\n[bold]Individual Agent Analyses:[/bold]")
     for agent_resp in result.get("agent_responses", []):
         confidence_emoji = {
-            "LOW": "🔴",
-            "MEDIUM": "🟡",
-            "HIGH": "🟢",
-            "VERY_HIGH": "🟩",
-        }.get(agent_resp["confidence"], "⚪")
+            "LOW": "[RED]",
+            "MEDIUM": "[YELLOW]",
+            "HIGH": "[GREEN]",
+            "VERY_HIGH": "[GREEN_SQ]",
+        }.get(agent_resp["confidence"], "[WHITE]")
 
         panel_content = (
             f"[bold]Confidence:[/bold] {confidence_emoji} {agent_resp['confidence']}\n\n"
@@ -175,25 +175,25 @@ async def run_test_pipeline():
         )
 
         console.print(
-            Panel(panel_content, title=f"🤖 {agent_resp['name']}", border_style="blue")
+            Panel(panel_content, title=f"[ROBOT] {agent_resp['name']}", border_style="blue")
         )
 
     # Show CEO synthesis
     if result.get("status") == "success":
-        console.print("\n[bold green]🎯 CEO Final Decision:[/bold green]")
+        console.print("\n[bold green][TARGET] CEO Final Decision:[/bold green]")
 
         final_confidence_emoji = {
-            "LOW": "🔴",
-            "MEDIUM": "🟡",
-            "HIGH": "🟢",
-            "VERY_HIGH": "🟩",
-        }.get(result["final_confidence"], "⚪")
+            "LOW": "[RED]",
+            "MEDIUM": "[YELLOW]",
+            "HIGH": "[GREEN]",
+            "VERY_HIGH": "[GREEN_SQ]",
+        }.get(result["final_confidence"], "[WHITE]")
 
         decision_panel = Panel(
             f"[bold]Decision:[/bold] {result['final_decision']}\n\n"
             f"[bold]Confidence:[/bold] {final_confidence_emoji} {result['final_confidence']}\n\n"
             f"[bold]Synthesis Reasoning:[/bold]\n{result['synthesis_reasoning']}",
-            title="👔 CEO Synthesis",
+            title="[EMOJI] CEO Synthesis",
             border_style="green",
         )
         console.print(decision_panel)
@@ -206,15 +206,15 @@ async def run_test_pipeline():
         # Summary stats
         console.print("\n" + "=" * 60)
         console.print("[bold]Performance Metrics:[/bold]")
-        console.print(f"  • Total Agents: {result.get('agent_count', 0)}")
-        console.print(f"  • Execution Time: {elapsed_time:.2f}s")
-        console.print(f"  • Model: {config.LLM_MODEL}")
-        console.print(f"  • Status: [green]SUCCESS[/green]")
+        console.print(f"  [BULLET] Total Agents: {result.get('agent_count', 0)}")
+        console.print(f"  [BULLET] Execution Time: {elapsed_time:.2f}s")
+        console.print(f"  [BULLET] Model: {config.LLM_MODEL}")
+        console.print(f"  [BULLET] Status: [green]SUCCESS[/green]")
         console.print("=" * 60)
 
     else:
         console.print(
-            f"\n[red]✗ CEO Synthesis Failed:[/red] {result.get('synthesis_reasoning', 'Unknown error')}"
+            f"\n[red][FAIL] CEO Synthesis Failed:[/red] {result.get('synthesis_reasoning', 'Unknown error')}"
         )
 
 
@@ -225,11 +225,11 @@ def main():
     try:
         # Properly await the async coroutine using asyncio.run()
         asyncio.run(run_test_pipeline())
-        console.print("\n[green]✓ Test completed successfully![/green]\n")
+        console.print("\n[green][OK] Test completed successfully![/green]\n")
     except KeyboardInterrupt:
         console.print("\n[yellow]Test interrupted by user[/yellow]\n")
     except Exception as e:
-        console.print(f"\n[red]✗ Test failed with error: {e}[/red]\n")
+        console.print(f"\n[red][FAIL] Test failed with error: {e}[/red]\n")
         logger.error("Test pipeline failed", exc_info=True)
         return 1
 

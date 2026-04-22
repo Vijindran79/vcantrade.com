@@ -28,19 +28,19 @@ def record_result(test_name: str, passed: bool, error: str = None, warning: str 
     """Track test results."""
     if passed:
         test_results["passed"] += 1
-        print(f"✅ {test_name}")
+        print(f"[OK] {test_name}")
     else:
         test_results["failed"] += 1
         test_results["errors"].append({"test": test_name, "error": error})
-        print(f"❌ {test_name}: {error}")
+        print(f"[FAIL] {test_name}: {error}")
     
     if warning:
         test_results["warnings"].append({"test": test_name, "warning": warning})
-        print(f"⚠️  {test_name}: {warning}")
+        print(f"[WARN]  {test_name}: {warning}")
 
 
 print("=" * 70)
-print("🧪 VcaniTrade AI - Comprehensive Test Suite")
+print("[TEST] VcaniTrade AI - Comprehensive Test Suite")
 print("=" * 70)
 print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("=" * 70)
@@ -48,7 +48,7 @@ print("=" * 70)
 # ===================================================================
 # TEST 1: Configuration Module
 # ===================================================================
-print("\n📋 TEST 1: Configuration Module")
+print("\n[CLIPBOARD] TEST 1: Configuration Module")
 print("-" * 70)
 
 try:
@@ -82,7 +82,7 @@ try:
     else:
         record_result("DRY_RUN is True (safe)", True)
     
-    print(f"✅ Config tests: 7/7 passed")
+    print(f"[OK] Config tests: 7/7 passed")
     
 except Exception as e:
     record_result("Config module", False, error=str(e))
@@ -90,7 +90,7 @@ except Exception as e:
 # ===================================================================
 # TEST 2: Core Models
 # ===================================================================
-print("\n📦 TEST 2: Core Models")
+print("\n[BOX] TEST 2: Core Models")
 print("-" * 70)
 
 try:
@@ -151,7 +151,7 @@ try:
     assert trade.status == "OPEN"
     record_result("TradeRecord creation", True)
     
-    print(f"✅ Model tests: 8/8 passed")
+    print(f"[OK] Model tests: 8/8 passed")
     
 except Exception as e:
     record_result("Core models", False, error=str(e))
@@ -159,7 +159,7 @@ except Exception as e:
 # ===================================================================
 # TEST 3: Cloud Scanner
 # ===================================================================
-print("\n☁️  TEST 3: Cloud Scanner")
+print("\n[CLOUD]  TEST 3: Cloud Scanner")
 print("-" * 70)
 
 try:
@@ -216,7 +216,7 @@ try:
     assert confidence >= 0.70, f"High confidence signal should be >= 0.70, got {confidence}"
     record_result(f"Confidence calculation ({confidence:.2f})", True)
     
-    print(f"✅ Cloud Scanner tests: 5/5 passed")
+    print(f"[OK] Cloud Scanner tests: 5/5 passed")
     
 except Exception as e:
     record_result("Cloud Scanner", False, error=str(e))
@@ -224,7 +224,7 @@ except Exception as e:
 # ===================================================================
 # TEST 4: Signal Dispatcher
 # ===================================================================
-print("\n📡 TEST 4: Signal Dispatcher")
+print("\n[SAT] TEST 4: Signal Dispatcher")
 print("-" * 70)
 
 try:
@@ -277,7 +277,7 @@ try:
     
     asyncio.run(validate_signal_flow())
     
-    print(f"✅ Signal Dispatcher tests: 5/5 passed")
+    print(f"[OK] Signal Dispatcher tests: 5/5 passed")
     
 except Exception as e:
     record_result("Signal Dispatcher", False, error=str(e))
@@ -285,7 +285,7 @@ except Exception as e:
 # ===================================================================
 # TEST 5: LLM Analyzer (Bug Fix Verification)
 # ===================================================================
-print("\n🧠 TEST 5: LLM Analyzer")
+print("\n[BRAIN] TEST 5: LLM Analyzer")
 print("-" * 70)
 
 try:
@@ -303,7 +303,7 @@ try:
     else:
         record_result("LLM Analyzer fallback uses enums", True)
     
-    print(f"⚠️  LLM Analyzer tests: Needs bug fix (see above)")
+    print(f"[WARN]  LLM Analyzer tests: Needs bug fix (see above)")
     
 except Exception as e:
     record_result("LLM Analyzer", False, error=str(e))
@@ -311,7 +311,7 @@ except Exception as e:
 # ===================================================================
 # TEST 6: Trade Engine
 # ===================================================================
-print("\n⚙️  TEST 6: Trade Engine")
+print("\n[GEAR]  TEST 6: Trade Engine")
 print("-" * 70)
 
 try:
@@ -362,7 +362,7 @@ try:
     assert "total_pnl" in summary
     record_result("Performance summary generation", True)
     
-    print(f"✅ Trade Engine tests: 8/8 passed")
+    print(f"[OK] Trade Engine tests: 8/8 passed")
     
 except Exception as e:
     record_result("Trade Engine", False, error=str(e))
@@ -370,7 +370,7 @@ except Exception as e:
 # ===================================================================
 # TEST 7: UI Dashboard
 # ===================================================================
-print("\n🖥️  TEST 7: UI Dashboard")
+print("\n[EMOJI]  TEST 7: UI Dashboard")
 print("-" * 70)
 
 try:
@@ -405,7 +405,7 @@ try:
     assert AINarratorOverlay is not None
     record_result("AINarratorOverlay available", True)
     
-    print(f"✅ UI Dashboard tests: 3/3 passed (structure only)")
+    print(f"[OK] UI Dashboard tests: 3/3 passed (structure only)")
     
 except Exception as e:
     record_result("UI Dashboard", False, error=str(e))
@@ -413,7 +413,7 @@ except Exception as e:
 # ===================================================================
 # TEST 8: Main Application
 # ===================================================================
-print("\n🚀 TEST 8: Main Application")
+print("\n[SUCCESS] TEST 8: Main Application")
 print("-" * 70)
 
 try:
@@ -446,7 +446,7 @@ try:
     
     record_result(f"App has {len(required_handlers)} new handlers", True)
     
-    print(f"✅ Main Application tests: 4/4 passed")
+    print(f"[OK] Main Application tests: 4/4 passed")
     
 except Exception as e:
     record_result("Main Application", False, error=str(e))
@@ -454,7 +454,7 @@ except Exception as e:
 # ===================================================================
 # TEST 9: Integration Tests
 # ===================================================================
-print("\n🔗 TEST 9: Integration Tests")
+print("\n[EMOJI] TEST 9: Integration Tests")
 print("-" * 70)
 
 try:
@@ -482,7 +482,7 @@ try:
     assert market_data.asset == "XAUUSD=X"
     assert market_data.price == 2350.50
     assert market_data.volume == 500000
-    record_result("Signal → MarketDataPoint conversion", True)
+    record_result("Signal -> MarketDataPoint conversion", True)
     
     # Test confidence calculation with aligned agents
     class MockOutput:
@@ -531,9 +531,9 @@ try:
     assert trade is not None
     assert trade.asset == "XAUUSD=X"
     assert trade.action == SignalAction.BUY
-    record_result("Cloud signal → Trade engine integration", True)
+    record_result("Cloud signal -> Trade engine integration", True)
     
-    print(f"✅ Integration tests: 3/3 passed")
+    print(f"[OK] Integration tests: 3/3 passed")
     
 except Exception as e:
     record_result("Integration Tests", False, error=str(e))
@@ -541,7 +541,7 @@ except Exception as e:
 # ===================================================================
 # TEST 10: Edge Cases & Error Handling
 # ===================================================================
-print("\n🛡️  TEST 10: Edge Cases & Error Handling")
+print("\n[SHIELD]  TEST 10: Edge Cases & Error Handling")
 print("-" * 70)
 
 try:
@@ -593,7 +593,7 @@ try:
     assert engine2._check_safety() is False, "Should block when at max positions"
     record_result("Max positions limit enforced", True)
     
-    print(f"✅ Edge case tests: 4/4 passed")
+    print(f"[OK] Edge case tests: 4/4 passed")
     
 except Exception as e:
     record_result("Edge Cases", False, error=str(e))
@@ -602,22 +602,22 @@ except Exception as e:
 # FINAL SUMMARY
 # ===================================================================
 print("\n" + "=" * 70)
-print("📊 TEST SUMMARY")
+print("[CHART] TEST SUMMARY")
 print("=" * 70)
 
 total = test_results["passed"] + test_results["failed"]
 print(f"Total tests: {total}")
-print(f"✅ Passed: {test_results['passed']}")
-print(f"❌ Failed: {test_results['failed']}")
-print(f"⚠️  Warnings: {len(test_results['warnings'])}")
+print(f"[OK] Passed: {test_results['passed']}")
+print(f"[FAIL] Failed: {test_results['failed']}")
+print(f"[WARN]  Warnings: {len(test_results['warnings'])}")
 
 if test_results['errors']:
-    print("\n❌ ERRORS:")
+    print("\n[FAIL] ERRORS:")
     for error in test_results['errors']:
         print(f"  - {error['test']}: {error['error']}")
 
 if test_results['warnings']:
-    print("\n⚠️  WARNINGS:")
+    print("\n[WARN]  WARNINGS:")
     for warning in test_results['warnings']:
         print(f"  - {warning['test']}: {warning['warning']}")
 
@@ -625,10 +625,10 @@ print("=" * 70)
 
 if __name__ == "__main__":
     if test_results['failed'] == 0:
-        print("🎉 ALL TESTS PASSED! Product is ready for production!")
+        print("[CELEBRATE] ALL TESTS PASSED! Product is ready for production!")
         print("=" * 70)
         sys.exit(0)
     else:
-        print(f"⚠️  {test_results['failed']} test(s) failed - fixes needed")
+        print(f"[WARN]  {test_results['failed']} test(s) failed - fixes needed")
         print("=" * 70)
         sys.exit(1)

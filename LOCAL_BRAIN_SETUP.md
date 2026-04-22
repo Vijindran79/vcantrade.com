@@ -58,7 +58,7 @@ playwright install chromium
 curl http://localhost:11434/api/tags
 
 # Test local brain
-python -c "from core.swarm_consensus import call_local_brain; print(call_local_brain('What is 2+2?'))"
+python -c "from core.brain_swarm import call_local_brain; print(call_local_brain('What is 2+2?'))"
 
 # Test browser agent
 python -c "from core.browser_agent import BrowserAgent; print('Browser Agent OK')"

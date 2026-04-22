@@ -19,7 +19,7 @@ from core.models import (
     SignalAction,
     ConfidenceLevel,
 )
-from core.swarm_consensus import OllamaSwarmConsensus as SwarmConsensus
+from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +60,9 @@ class LLMAnalyzer:
             if loop_was_running:
                 # Loop already running, use run_coroutine_threadsafe
                 import concurrent.futures
+
                 future = asyncio.run_coroutine_threadsafe(
-                    self.swarm.run(market_data, news_context, chart_image_base64),
-                    loop
+                    self.swarm.run(market_data, news_context, chart_image_base64), loop
                 )
                 output, transcript = future.result(timeout=config.OLLAMA_TIMEOUT)
             else:

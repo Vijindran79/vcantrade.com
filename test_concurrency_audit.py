@@ -67,15 +67,15 @@ def test_concurrent_meta_analyzer():
         if thread.is_alive():
             results["concurrent_meta_analyzer"]["status"] = "FAILED"
             results["concurrent_meta_analyzer"]["errors"].append("Thread timed out (possible deadlock)")
-            logger.error("❌ FAILED: MetaAnalyzer thread timed out")
+            logger.error("[FAIL] FAILED: MetaAnalyzer thread timed out")
         else:
             results["concurrent_meta_analyzer"]["status"] = "PASSED"
-            logger.info("✅ PASSED: MetaAnalyzer ran concurrently without blocking")
+            logger.info("[OK] PASSED: MetaAnalyzer ran concurrently without blocking")
 
     except Exception as e:
         results["concurrent_meta_analyzer"]["status"] = "FAILED"
         results["concurrent_meta_analyzer"]["errors"].append(str(e))
-        logger.error(f"❌ FAILED: MetaAnalyzer concurrency error: {e}")
+        logger.error(f"[FAIL] FAILED: MetaAnalyzer concurrency error: {e}")
 
 
 def test_concurrent_visual_confirmation():
@@ -109,15 +109,15 @@ def test_concurrent_visual_confirmation():
         if thread.is_alive():
             results["concurrent_visual_confirmation"]["status"] = "FAILED"
             results["concurrent_visual_confirmation"]["errors"].append("Thread timed out")
-            logger.error("❌ FAILED: VisualConfirmation thread timed out")
+            logger.error("[FAIL] FAILED: VisualConfirmation thread timed out")
         else:
             results["concurrent_visual_confirmation"]["status"] = "PASSED"
-            logger.info("✅ PASSED: VisualConfirmation ran concurrently without blocking")
+            logger.info("[OK] PASSED: VisualConfirmation ran concurrently without blocking")
 
     except Exception as e:
         results["concurrent_visual_confirmation"]["status"] = "FAILED"
         results["concurrent_visual_confirmation"]["errors"].append(str(e))
-        logger.error(f"❌ FAILED: VisualConfirmation concurrency error: {e}")
+        logger.error(f"[FAIL] FAILED: VisualConfirmation concurrency error: {e}")
 
 
 def test_log_clogging():
@@ -156,13 +156,13 @@ def test_log_clogging():
         results["log_clogging_test"]["messages_after"] = "N/A (threads completed)"
 
         if all_joined:
-            logger.info("✅ PASSED: Activity log handled parallel threads without clogging")
+            logger.info("[OK] PASSED: Activity log handled parallel threads without clogging")
         else:
-            logger.error("❌ FAILED: Some threads hung, log may be clogged")
+            logger.error("[FAIL] FAILED: Some threads hung, log may be clogged")
 
     except Exception as e:
         results["log_clogging_test"]["status"] = "FAILED"
-        logger.error(f"❌ FAILED: Log clogging test error: {e}")
+        logger.error(f"[FAIL] FAILED: Log clogging test error: {e}")
 
 
 def test_shared_state_safety():
@@ -187,17 +187,17 @@ def test_shared_state_safety():
         assert meta2.alpha_score == 50.0, "meta2 should be unaffected by meta1 changes"
 
         results["shared_state_safety"]["status"] = "PASSED"
-        logger.info("✅ PASSED: No shared state conflicts detected")
+        logger.info("[OK] PASSED: No shared state conflicts detected")
 
     except AssertionError as e:
         results["shared_state_safety"]["status"] = "FAILED"
         results["shared_state_safety"]["conflicts"].append(str(e))
-        logger.error(f"❌ FAILED: Shared state conflict: {e}")
+        logger.error(f"[FAIL] FAILED: Shared state conflict: {e}")
 
     except Exception as e:
         results["shared_state_safety"]["status"] = "FAILED"
         results["shared_state_safety"]["conflicts"].append(str(e))
-        logger.error(f"❌ FAILED: Shared state safety error: {e}")
+        logger.error(f"[FAIL] FAILED: Shared state safety error: {e}")
 
 
 def test_file_io_safety():
@@ -252,24 +252,24 @@ def test_file_io_safety():
 
                 if trade_count == expected:
                     results["file_io_safety"]["status"] = "PASSED"
-                    logger.info(f"✅ PASSED: File I/O safe ({trade_count} trades written correctly)")
+                    logger.info(f"[OK] PASSED: File I/O safe ({trade_count} trades written correctly)")
                 else:
                     results["file_io_safety"]["status"] = "FAILED"
                     results["file_io_safety"]["conflicts"].append(
                         f"Expected {expected} trades, got {trade_count}"
                     )
-                    logger.error(f"❌ FAILED: File I/O conflict ({trade_count}/{expected} trades)")
+                    logger.error(f"[FAIL] FAILED: File I/O conflict ({trade_count}/{expected} trades)")
 
             # Cleanup
             os.remove(test_file)
         else:
             results["file_io_safety"]["status"] = "FAILED"
-            logger.error("❌ FAILED: Ledger file not created")
+            logger.error("[FAIL] FAILED: Ledger file not created")
 
     except Exception as e:
         results["file_io_safety"]["status"] = "FAILED"
         results["file_io_safety"]["conflicts"].append(str(e))
-        logger.error(f"❌ FAILED: File I/O safety error: {e}")
+        logger.error(f"[FAIL] FAILED: File I/O safety error: {e}")
 
 
 def run_audit():
@@ -299,14 +299,14 @@ def run_audit():
     pending = sum(1 for r in results.values() if r["status"] == "PENDING")
 
     logger.info(f"Total tests: {len(results)}")
-    logger.info(f"✅ Passed: {passed}")
-    logger.info(f"❌ Failed: {failed}")
-    logger.info(f"⏳ Pending: {pending}")
+    logger.info(f"[OK] Passed: {passed}")
+    logger.info(f"[FAIL] Failed: {failed}")
+    logger.info(f"[WAIT] Pending: {pending}")
     logger.info(f"Time elapsed: {elapsed:.2f}s")
 
     for test_name, result in results.items():
         status = result["status"]
-        emoji = "✅" if status == "PASSED" else "❌" if status == "FAILED" else "⏳"
+        emoji = "[OK]" if status == "PASSED" else "[FAIL]" if status == "FAILED" else "[WAIT]"
         logger.info(f"{emoji} {test_name}: {status}")
 
         if result.get("errors"):

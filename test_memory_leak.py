@@ -54,17 +54,17 @@ async def test_browser_cleanup():
 
             try:
                 await agent.start()
-                print(f"  ✅ Browser started")
+                print(f"  [OK] Browser started")
 
                 # Do some work
                 await asyncio.sleep(0.5)
 
                 # Clean shutdown
                 await agent.stop()
-                print(f"  ✅ Browser stopped")
+                print(f"  [OK] Browser stopped")
 
             except Exception as e:
-                print(f"  ⚠️ Browser #{i+1} failed (expected in test env): {e}")
+                print(f"  [WARN] Browser #{i+1} failed (expected in test env): {e}")
                 # Still try to cleanup
                 try:
                     await agent.stop()
@@ -84,17 +84,17 @@ async def test_browser_cleanup():
         # Allow some memory growth (Python caching, etc.)
         if memory_diff < 50:  # Less than 50 MB growth is acceptable
             results["browser_cleanup"]["status"] = "PASSED"
-            print(f"\n✅ PASSED: Memory leak within acceptable range (< 50 MB)")
+            print(f"\n[OK] PASSED: Memory leak within acceptable range (< 50 MB)")
         else:
             results["browser_cleanup"]["status"] = "FAILED"
-            print(f"\n❌ FAILED: Significant memory growth detected ({memory_diff:.2f} MB)")
+            print(f"\n[FAIL] FAILED: Significant memory growth detected ({memory_diff:.2f} MB)")
 
         results["browser_cleanup"]["memory_before"] = memory_before
         results["browser_cleanup"]["memory_after"] = memory_after
 
     except Exception as e:
         results["browser_cleanup"]["status"] = "FAILED"
-        print(f"❌ FAILED: Browser cleanup test error: {e}")
+        print(f"[FAIL] FAILED: Browser cleanup test error: {e}")
 
 
 async def test_playwright_cleanup():
@@ -125,7 +125,7 @@ async def test_playwright_cleanup():
         # Verify all are None
         if agent.browser is None and agent.context is None and agent.page is None:
             results["playwright_cleanup"]["status"] = "PASSED"
-            print(f"\n✅ PASSED: All Playwright resources cleaned up")
+            print(f"\n[OK] PASSED: All Playwright resources cleaned up")
         else:
             leaked = []
             if agent.browser: leaked.append("browser")
@@ -134,11 +134,11 @@ async def test_playwright_cleanup():
 
             results["playwright_cleanup"]["status"] = "FAILED"
             results["playwright_cleanup"]["contexts_leaked"] = len(leaked)
-            print(f"\n❌ FAILED: Leaked resources: {', '.join(leaked)}")
+            print(f"\n[FAIL] FAILED: Leaked resources: {', '.join(leaked)}")
 
     except Exception as e:
         results["playwright_cleanup"]["status"] = "FAILED"
-        print(f"❌ FAILED: Playwright cleanup test error: {e}")
+        print(f"[FAIL] FAILED: Playwright cleanup test error: {e}")
 
 
 async def test_ollama_cleanup():
@@ -170,19 +170,19 @@ async def test_ollama_cleanup():
                 )
 
                 output, transcript = analyzer.analyze_market(market_data)
-                print(f"  ✅ Analysis complete")
+                print(f"  [OK] Analysis complete")
             except Exception as e:
-                print(f"  ⚠️ Analysis failed (expected if Ollama not running): {e}")
+                print(f"  [WARN] Analysis failed (expected if Ollama not running): {e}")
 
         # Force GC
         gc.collect()
 
         results["ollama_cleanup"]["status"] = "PASSED"
-        print(f"\n✅ PASSED: Ollama connections properly managed")
+        print(f"\n[OK] PASSED: Ollama connections properly managed")
 
     except Exception as e:
         results["ollama_cleanup"]["status"] = "FAILED"
-        print(f"❌ FAILED: Ollama cleanup test error: {e}")
+        print(f"[FAIL] FAILED: Ollama cleanup test error: {e}")
 
 
 async def test_long_running_stability():
@@ -233,16 +233,16 @@ async def test_long_running_stability():
             # Allow up to 20% growth (Python caching, etc.)
             if growth_pct < 20:
                 results["long_running_stability"]["status"] = "PASSED"
-                print(f"\n✅ PASSED: Memory growth within acceptable range (< 20%)")
+                print(f"\n[OK] PASSED: Memory growth within acceptable range (< 20%)")
             else:
                 results["long_running_stability"]["status"] = "FAILED"
-                print(f"\n❌ FAILED: Significant memory growth ({growth_pct:.2f}%)")
+                print(f"\n[FAIL] FAILED: Significant memory growth ({growth_pct:.2f}%)")
 
             results["long_running_stability"]["memory_growth_pct"] = growth_pct
 
     except Exception as e:
         results["long_running_stability"]["status"] = "FAILED"
-        print(f"❌ FAILED: Long-running stability test error: {e}")
+        print(f"[FAIL] FAILED: Long-running stability test error: {e}")
 
 
 async def run_memory_audit():
@@ -270,13 +270,13 @@ async def run_memory_audit():
     failed = sum(1 for r in results.values() if r["status"] == "FAILED")
 
     print(f"Total tests: {len(results)}")
-    print(f"✅ Passed: {passed}")
-    print(f"❌ Failed: {failed}")
+    print(f"[OK] Passed: {passed}")
+    print(f"[FAIL] Failed: {failed}")
     print(f"Time elapsed: {elapsed:.2f}s")
 
     for test_name, result in results.items():
         status = result["status"]
-        emoji = "✅" if status == "PASSED" else "❌" if status == "FAILED" else "⏳"
+        emoji = "[OK]" if status == "PASSED" else "[FAIL]" if status == "FAILED" else "[WAIT]"
         print(f"{emoji} {test_name}: {status}")
 
     print("=" * 60)

@@ -40,13 +40,13 @@ class TradeJournal:
                     data = json.load(f)
                     self.trades = data.get("trades", [])
                     self.rejected_signals = data.get("rejected_signals", [])
-                logger.info(f"📚 Trade Journal loaded: {len(self.trades)} trades")
+                logger.info(f"[EMOJI] Trade Journal loaded: {len(self.trades)} trades")
             except Exception as e:
                 logger.error(f"Failed to load trade journal: {e}")
                 self.trades = []
                 self.rejected_signals = []
         else:
-            logger.info("📚 Trade Journal created (new)")
+            logger.info("[EMOJI] Trade Journal created (new)")
     
     def save(self):
         """Save trade journal to JSON file."""
@@ -57,7 +57,7 @@ class TradeJournal:
                     "rejected_signals": self.rejected_signals,
                     "last_updated": datetime.now().isoformat()
                 }, f, indent=2)
-            logger.info(f"📚 Trade Journal saved: {len(self.trades)} trades")
+            logger.info(f"[EMOJI] Trade Journal saved: {len(self.trades)} trades")
         except Exception as e:
             logger.error(f"Failed to save trade journal: {e}")
     
@@ -126,7 +126,7 @@ class MetaAnalyzer:
         self.hourly_performance: Dict[int, Dict] = {}  # Hour of day
         
         logger.info(
-            f"🧠 Meta Analyzer initialized: "
+            f"[BRAIN] Meta Analyzer initialized: "
             f"Review every {review_interval_hours}h, "
             f"Auto-apply: {auto_apply}"
         )
@@ -142,13 +142,13 @@ class MetaAnalyzer:
         Reviews last 7 days of trades and suggests adjustments.
         """
         self.total_reviews += 1
-        logger.info("🧠 Starting self-review (Meta-Cognition)...")
+        logger.info("[BRAIN] Starting self-review (Meta-Cognition)...")
         
         # Get recent trades
         recent_trades = self.journal.get_recent_trades(days=7)
         
         if len(recent_trades) < 5:
-            logger.info(f"🧠 Self-review skipped: Only {len(recent_trades)} trades (need 5+)")
+            logger.info(f"[BRAIN] Self-review skipped: Only {len(recent_trades)} trades (need 5+)")
             return {
                 "status": "INSUFFICIENT_DATA",
                 "trades_analyzed": len(recent_trades)
@@ -206,7 +206,7 @@ class MetaAnalyzer:
         }
         
         logger.info(
-            f"🧠 Self-review complete: "
+            f"[BRAIN] Self-review complete: "
             f"{len(recent_trades)} trades analyzed, "
             f"{len(adjustments)} adjustments suggested, "
             f"Alpha Score: {self.alpha_score:.1f}"
@@ -447,7 +447,7 @@ class MetaAnalyzer:
                     applied.append(adjustment)
                     
                     logger.info(
-                        f"✅ Adjustment applied: {adjustment['action']} "
+                        f"[OK] Adjustment applied: {adjustment['action']} "
                         f"({adjustment['priority']})"
                     )
                 except Exception as e:

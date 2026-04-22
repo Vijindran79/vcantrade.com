@@ -111,9 +111,9 @@ class ExchangeLimitExecutor:
             }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Professor Mode — ExchangeInterface
-# ─────────────────────────────────────────────────────────────────────────────
+# [EMOJI]
+# Professor Mode [DASH] ExchangeInterface
+# [EMOJI]
 
 class ExchangeInterface:
     """High-level trading interface used by Professor Mode.
@@ -123,7 +123,7 @@ class ExchangeInterface:
     supply valid ``api_key`` / ``api_secret`` to go live.
     """
 
-    PAPER_TRADING: bool = True  # ← Safety default; set False for live trading
+    PAPER_TRADING: bool = True  # <- Safety default; set False for live trading
 
     def __init__(
         self,
@@ -164,7 +164,7 @@ class ExchangeInterface:
                 "side": side,
                 "entry_price": entry_price,
                 "quantity": quantity,
-                "reason": "PAPER_TRADING=True — simulated limit order",
+                "reason": "PAPER_TRADING=True [DASH] simulated limit order",
                 "simulated": True,
             }
         return self._executor.place_limit_entry(symbol, side, quantity, entry_price)
@@ -308,7 +308,7 @@ class UnifiedTradeExecutor:
     """
     The Decision-to-Action Bridge.
 
-    ⚠️  RPA SAFETY IS ALWAYS ACTIVE:
+    [WARN]  RPA SAFETY IS ALWAYS ACTIVE:
     Even when user says "Buy now!" via Co-Pilot Command Bridge,
     this executor STILL runs Slippage Guard and Spread Check.
     The AI is the final safety switch - it cannot bypass these checks.
@@ -358,7 +358,7 @@ class UnifiedTradeExecutor:
         self.success_count = 0
         self.active_trades = {}  # ticker -> trade_data
 
-        logger.info("🚀 Unified Trade Executor initialized")
+        logger.info("[SUCCESS] Unified Trade Executor initialized")
 
     def _log(self, message: str):
         """Log to both logger and command center if available."""
@@ -400,13 +400,13 @@ class UnifiedTradeExecutor:
         self.execution_count += 1
         
         if force_execute:
-            self._log(f"⚡ FORCE MODE: Bypassing guards for {action} {ticker}")
+            self._log(f"[BOLT] FORCE MODE: Bypassing guards for {action} {ticker}")
         else:
-            self._log(f"📡 Processing {action} for {ticker}...")
+            self._log(f"[SAT] Processing {action} for {ticker}...")
 
         # === SAFETY STOP CHECK === (Never bypassed)
         if self.safety_stop_active and not force_execute:
-            msg = f"🛑 SAFETY STOP ACTIVE: {self.safety_stop_reason}"
+            msg = f"[STOP] SAFETY STOP ACTIVE: {self.safety_stop_reason}"
             self._log(msg)
             return ExecutionResult(
                 status=ExecutionStatus.BLOCKED_BY_SAFETY,
@@ -423,7 +423,7 @@ class UnifiedTradeExecutor:
         # === STEP 1: BRAIN CHECK - Confidence Threshold ===
         if not force_execute and confidence_val < config.SWARM_CONFIDENCE_THRESHOLD:
             msg = (
-                f"🛑 Execution Skipped: Confidence {confidence_val:.2f} "
+                f"[STOP] Execution Skipped: Confidence {confidence_val:.2f} "
                 f"below threshold {config.SWARM_CONFIDENCE_THRESHOLD}"
             )
             self._log(msg)
@@ -435,14 +435,14 @@ class UnifiedTradeExecutor:
                 error_message=msg,
             )
 
-        self._log(f"✅ Confidence check passed: {confidence_val:.2f}")
+        self._log(f"[OK] Confidence check passed: {confidence_val:.2f}")
 
         # === STEP 2: CHART NAVIGATION (Get the eyes on the target) ===
         try:
-            self._log(f"🌐 Navigating browser to {ticker} chart...")
+            self._log(f"[GLOBE] Navigating browser to {ticker} chart...")
             success = await self.browser_agent.navigate_to_chart(ticker)
             if not success:
-                self._log(f"⚠️ Browser navigation failed for {ticker} - attempting anyway")
+                self._log(f"[WARN] Browser navigation failed for {ticker} - attempting anyway")
                 # STAGE 4: Record browser error for self-heal
                 self.browser_error_count += 1
                 if hasattr(self.browser_agent, 'record_error'):
@@ -450,15 +450,15 @@ class UnifiedTradeExecutor:
 
                     # Trigger self-heal if threshold reached
                     if self.browser_error_count >= self.browser_error_threshold:
-                        self._log(f"🚨 Browser error threshold reached ({self.browser_error_count}). Triggering self-heal...")
+                        self._log(f"[SIREN] Browser error threshold reached ({self.browser_error_count}). Triggering self-heal...")
                         try:
                             await self.browser_agent.self_heal_restart()
                             self.browser_error_count = 0  # Reset counter after restart
-                            self._log("✅ Browser self-heal restart successful")
+                            self._log("[OK] Browser self-heal restart successful")
                         except Exception as restart_error:
-                            self._log(f"❌ Browser self-heal failed: {restart_error}")
+                            self._log(f"[FAIL] Browser self-heal failed: {restart_error}")
         except Exception as e:
-            self._log(f"⚠️ Browser navigation error: {e}")
+            self._log(f"[WARN] Browser navigation error: {e}")
             # STAGE 4: Record error for self-heal
             self.browser_error_count += 1
             if hasattr(self.browser_agent, 'record_error'):
@@ -469,7 +469,7 @@ class UnifiedTradeExecutor:
             import yfinance as yf
             import concurrent.futures
             
-            self._log(f"📊 Fetching live market price for {ticker}...")
+            self._log(f"[CHART] Fetching live market price for {ticker}...")
             
             def fetch_price():
                 """Fetch price using yfinance with timeout."""
@@ -485,10 +485,10 @@ class UnifiedTradeExecutor:
                 current_market_price = future.result(timeout=5.0)
             
             if current_market_price is None or current_market_price <= 0:
-                self._log(f"⚠️ yfinance returned no price - using signal price ${signal_price:.2f}")
+                self._log(f"[WARN] yfinance returned no price - using signal price ${signal_price:.2f}")
                 current_market_price = signal_price
             else:
-                self._log(f"📊 Live price: ${current_market_price:.2f}")
+                self._log(f"[CHART] Live price: ${current_market_price:.2f}")
             
             # Estimate bid/ask spread
             bid = current_market_price * 0.9995
@@ -501,19 +501,19 @@ class UnifiedTradeExecutor:
             spread_ok, spread_pct = self.slippage_guard.check_spread(bid, ask)
 
             self._log(
-                f"📊 Live Audit: Price: {current_market_price} | "
+                f"[CHART] Live Audit: Price: {current_market_price} | "
                 f"Slippage: {slippage_pct:.3f}% | "
                 f"Spread: {spread_pct:.3f}%"
             )
 
             # === STEP 4: GO/NO-GO DECISION ===
             if force_execute:
-                self._log(f"⚡ FORCE MODE: Bypassing slippage/spread checks")
+                self._log(f"[BOLT] FORCE MODE: Bypassing slippage/spread checks")
                 slippage_ok = True
                 spread_ok = True
             
             if not slippage_ok:
-                msg = f"❌ ABORT: Slippage ({slippage_pct:.2f}%) exceeds limit"
+                msg = f"[FAIL] ABORT: Slippage ({slippage_pct:.2f}%) exceeds limit"
                 self._log(msg)
                 return ExecutionResult(
                     status=ExecutionStatus.ABORTED_SLIPPAGE,
@@ -526,7 +526,7 @@ class UnifiedTradeExecutor:
                 )
 
             if not spread_ok:
-                msg = f"❌ ABORT: Spread ({spread_pct:.2f}%) exceeds limit"
+                msg = f"[FAIL] ABORT: Spread ({spread_pct:.2f}%) exceeds limit"
                 self._log(msg)
                 return ExecutionResult(
                     status=ExecutionStatus.ABORTED_SPREAD,
@@ -538,10 +538,10 @@ class UnifiedTradeExecutor:
                     error_message=msg,
                 )
 
-            self._log(f"✅ Slippage Guard passed")
+            self._log(f"[OK] Slippage Guard passed")
 
         except Exception as e:
-            msg = f"❌ Price check failed: {e}"
+            msg = f"[FAIL] Price check failed: {e}"
             self._log(msg)
             # STAGE 4: Record error for self-heal if browser-related
             if "browser" in str(e).lower() or "page" in str(e).lower():
@@ -558,7 +558,7 @@ class UnifiedTradeExecutor:
 
         # === STEP 5: DRY RUN MODE ===
         if not auto_execute or config.DRY_RUN:
-            self._log(f"⏸️ DRY RUN: Would execute {action} {ticker} @ {current_market_price}")
+            self._log(f"[PAUSE] DRY RUN: Would execute {action} {ticker} @ {current_market_price}")
             return ExecutionResult(
                 status=ExecutionStatus.SUCCESS,
                 ticker=ticker,
@@ -610,7 +610,7 @@ class UnifiedTradeExecutor:
                 order_id = f"rpa_{ticker}_{int(time.time())}"
                 self.success_count += 1
                 self.consecutive_failures = 0
-                self._log(f"✅ SUCCESS: RPA hand completed {action} for {ticker}")
+                self._log(f"[OK] SUCCESS: RPA hand completed {action} for {ticker}")
                 
                 # Start monitoring
                 self.start_trade_monitoring(ticker, action, current_market_price, trade_quantity, signal_price)
@@ -627,7 +627,7 @@ class UnifiedTradeExecutor:
             else:
                 self.consecutive_failures += 1
                 failure_reason = self.rpa_executor.last_failure_reason or f"RPA hand failed to execute {action} for {ticker}"
-                msg = f"❌ FAILURE: {failure_reason}"
+                msg = f"[FAIL] FAILURE: {failure_reason}"
                 self._log(msg)
                 self._check_safety_stop()
                 return ExecutionResult(
@@ -640,7 +640,7 @@ class UnifiedTradeExecutor:
 
         except Exception as e:
             self.consecutive_failures += 1
-            msg = f"❌ Execution error: {e}"
+            msg = f"[FAIL] Execution error: {e}"
             self._log(msg)
             # STAGE 4: Record error for self-heal if browser/RPA related
             error_str = str(e).lower()
@@ -651,13 +651,13 @@ class UnifiedTradeExecutor:
 
                 # Check if we need to trigger self-heal
                 if self.browser_error_count >= self.browser_error_threshold:
-                    self._log(f"🚨 Browser error threshold reached ({self.browser_error_count}). Triggering self-heal...")
+                    self._log(f"[SIREN] Browser error threshold reached ({self.browser_error_count}). Triggering self-heal...")
                     try:
                         await self.browser_agent.self_heal_restart()
                         self.browser_error_count = 0
-                        self._log("✅ Browser self-heal restart successful")
+                        self._log("[OK] Browser self-heal restart successful")
                     except Exception as restart_error:
-                        self._log(f"❌ Browser self-heal failed: {restart_error}")
+                        self._log(f"[FAIL] Browser self-heal failed: {restart_error}")
 
             self._check_safety_stop()
             return ExecutionResult(
@@ -701,7 +701,7 @@ class UnifiedTradeExecutor:
         self.active_trades[ticker] = trade_data
         
         self._log(
-            f"📊 Trade monitoring started: {ticker} | "
+            f"[CHART] Trade monitoring started: {ticker} | "
             f"Entry: {entry_price} | Qty: {quantity}"
         )
 
@@ -731,7 +731,7 @@ class UnifiedTradeExecutor:
     def close_trade(self, ticker: str, exit_price: float, reason: str = "Manual"):
         """Close an active trade and log results."""
         if ticker not in self.active_trades:
-            self._log(f"⚠️ No active trade found for {ticker}")
+            self._log(f"[WARN] No active trade found for {ticker}")
             return None
 
         trade = self.active_trades.pop(ticker)
@@ -751,7 +751,7 @@ class UnifiedTradeExecutor:
         trade["pnl_pct"] = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
 
         # Log result
-        pnl_emoji = "💰" if pnl >= 0 else "🔴"
+        pnl_emoji = "[MONEY]" if pnl >= 0 else "[RED]"
         self._log(
             f"{pnl_emoji} Trade closed: {ticker} | "
             f"P/L: ${pnl:.2f} ({trade['pnl_pct']:.2f}%) | "
@@ -776,13 +776,13 @@ class UnifiedTradeExecutor:
         3. Default to $1000 worth of the asset
 
         Examples:
-        - BTC @ $50,000 with $1000 investment → 0.02 BTC
-        - AAPL @ $180 with $1000 investment → 5.55 shares
-        - EURUSD @ 1.0850 with $1000 investment → 921.66 units
+        - BTC @ $50,000 with $1000 investment -> 0.02 BTC
+        - AAPL @ $180 with $1000 investment -> 5.55 shares
+        - EURUSD @ 1.0850 with $1000 investment -> 921.66 units
         """
         # If quantity is explicitly provided, use it
         if requested_quantity and requested_quantity > 0:
-            self._log(f"📏 Using explicit quantity: {requested_quantity}")
+            self._log(f"[RULER] Using explicit quantity: {requested_quantity}")
             return requested_quantity
 
         # Get dollar amount to invest
@@ -792,18 +792,18 @@ class UnifiedTradeExecutor:
         investment_mode = signal_data.get("investment_mode", "dollar")
         if investment_mode == "lots":
             quantity = signal_data.get("quantity", signal_data.get("lot_size", 1.0))
-            self._log(f"📏 Using lots mode: {quantity} units")
+            self._log(f"[RULER] Using lots mode: {quantity} units")
             return quantity
 
         # Dollar-based calculation
         if current_price <= 0:
-            self._log("⚠️ Current price is 0 - using signal price for quantity calc")
+            self._log("[WARN] Current price is 0 - using signal price for quantity calc")
             current_price = signal_data.get("entry_price", 1.0)
 
         quantity = dollar_amount / current_price
 
         self._log(
-            f"📏 Position Sizing: ${dollar_amount:.2f} / ${current_price:.2f} = {quantity:.4f} units"
+            f"[RULER] Position Sizing: ${dollar_amount:.2f} / ${current_price:.2f} = {quantity:.4f} units"
         )
 
         return quantity
@@ -837,8 +837,8 @@ class UnifiedTradeExecutor:
                 f"{self.consecutive_failures} consecutive failures detected. "
                 f"Auto-pausing to protect capital."
             )
-            self._log(f"🛑 SAFETY STOP ACTIVATED: {self.safety_stop_reason}")
-            self._log("⚠️ Manual intervention required - check browser/connection")
+            self._log(f"[STOP] SAFETY STOP ACTIVATED: {self.safety_stop_reason}")
+            self._log("[WARN] Manual intervention required - check browser/connection")
             
             if self.ai_narrator:
                 self.ai_narrator.notify_error(f"Safety Stop: {self.consecutive_failures} failures")
@@ -849,4 +849,4 @@ class UnifiedTradeExecutor:
         self.consecutive_failures = 0
         self.safety_stop_active = False
         self.safety_stop_reason = ""
-        self._log(f"✅ Safety stop reset (had {old_failures} consecutive failures)")
+        self._log(f"[OK] Safety stop reset (had {old_failures} consecutive failures)")

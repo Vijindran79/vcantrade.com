@@ -34,7 +34,7 @@ print("1. Open TradingView in your browser.")
 print("2. Open a paper trade order dialog so the Confirm button is visible.")
 print("3. Come back here and press ENTER when ready.")
 input("\nPress ENTER to start capture (you have 3 seconds) ...")
-print("Capturing in 3 seconds — move your mouse to the TOP-LEFT of the Confirm button ...")
+print("Capturing in 3 seconds [DASH] move your mouse to the TOP-LEFT of the Confirm button ...")
 time.sleep(3)
 
 x1, y1 = pyautogui.position()
@@ -56,5 +56,5 @@ if right - left < 5 or bottom - top < 5:
 PAD = 4
 img = ImageGrab.grab(bbox=(left - PAD, top - PAD, right + PAD, bottom + PAD))
 img.save(SAVE_PATH)
-print(f"\n✅ Saved: {SAVE_PATH}  ({img.width}x{img.height} px)")
+print(f"\n[OK] Saved: {SAVE_PATH}  ({img.width}x{img.height} px)")
 print("The RPAExecutor will now use this image to visually find the Confirm button.")

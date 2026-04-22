@@ -22,7 +22,7 @@ import yfinance as yf
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from core.swarm_consensus import OllamaSwarmConsensus
+from core.brain_swarm import OllamaSwarmConsensus
 from core.models import MarketDataPoint
 
 # Setup logging
@@ -78,7 +78,7 @@ class DataScout:
 
         self.active_debate = True
         logger.info(
-            f"🚀 VOLATILITY DETECTED ({change * 100:.2f}%): Starting Swarm for {ticker} @ {current_price}"
+            f"[SUCCESS] VOLATILITY DETECTED ({change * 100:.2f}%): Starting Swarm for {ticker} @ {current_price}"
         )
 
         try:
@@ -104,14 +104,14 @@ class DataScout:
                 "SELL",
             ]:
                 logger.info(
-                    f"🔥 HIGH CONVICTION SIGNAL: {analysis.action.value} {ticker} ({confidence})"
+                    f"[FIRE] HIGH CONVICTION SIGNAL: {analysis.action.value} {ticker} ({confidence})"
                 )
                 self.dispatch_signal(
                     ticker, analysis.action.value, confidence, analysis.reason
                 )
             else:
                 logger.info(
-                    f"⚖️ SWARM VERDICT: {analysis.action.value} {ticker} (Confidence: {confidence}) - No trade."
+                    f"[EMOJI] SWARM VERDICT: {analysis.action.value} {ticker} (Confidence: {confidence}) - No trade."
                 )
 
         except Exception as e:
@@ -129,19 +129,19 @@ class DataScout:
             "timestamp": time.time(),
         }
         try:
-            logger.info(f"📡 Dispatching signal to laptop: {ticker} {action}")
+            logger.info(f"[SAT] Dispatching signal to laptop: {ticker} {action}")
             response = requests.post(TUNNEL_URL, json=payload, timeout=10)
             if response.status_code == 200:
-                logger.info("✅ Signal received by laptop.")
+                logger.info("[OK] Signal received by laptop.")
             else:
-                logger.error(f"❌ Laptop returned status {response.status_code}")
+                logger.error(f"[FAIL] Laptop returned status {response.status_code}")
         except Exception as e:
-            logger.error(f"❌ Failed to dispatch signal: {e}")
+            logger.error(f"[FAIL] Failed to dispatch signal: {e}")
 
     async def scan_loop(self):
         """Main market scanning loop."""
         logger.info(
-            f"📡 Data Scout Online. Monitoring {len(TICKERS)} assets every {SCAN_INTERVAL}s."
+            f"[SAT] Data Scout Online. Monitoring {len(TICKERS)} assets every {SCAN_INTERVAL}s."
         )
         logger.info(f"Target Tunnel: {TUNNEL_URL}")
 
@@ -151,7 +151,7 @@ class DataScout:
                 vram_usage = self.get_gpu_usage()
                 if vram_usage > 0.90:
                     logger.warning(
-                        f"⚠️ GPU VRAM CRITICAL ({vram_usage * 100:.1f}%). Throttling 30s..."
+                        f"[WARN] GPU VRAM CRITICAL ({vram_usage * 100:.1f}%). Throttling 30s..."
                     )
                     await asyncio.sleep(30)
                     continue

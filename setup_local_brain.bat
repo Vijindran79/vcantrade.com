@@ -31,7 +31,7 @@ echo.
 
 echo Step 5: Verifying installation...
 python -c "from core.browser_agent import BrowserAgent; print('Browser Agent OK')"
-python -c "from core.swarm_consensus import call_local_brain; print('Local Brain OK')"
+python -c "from core.brain_swarm import call_local_brain; print('Local Brain OK')"
 echo.
 
 echo ========================================

@@ -32,7 +32,7 @@ class LooseATRStops:
         self.multiplier = multiplier
         self.atr_history = []  # Store recent ATR values
         
-        logger.info(f"📏 Loose ATR Stops initialized: Period={atr_period}, Multiplier={multiplier}x")
+        logger.info(f"[RULER] Loose ATR Stops initialized: Period={atr_period}, Multiplier={multiplier}x")
 
     def calculate_atr(self, highs: List[float], lows: List[float], closes: List[float]) -> float:
         """
@@ -99,7 +99,7 @@ class LooseATRStops:
             stop_loss = entry_price + stop_distance
         
         logger.info(
-            f"📏 Loose ATR Stop: Entry=${entry_price:.2f}, ATR={atr:.2f}, "
+            f"[RULER] Loose ATR Stop: Entry=${entry_price:.2f}, ATR={atr:.2f}, "
             f"Multiplier={mult}x, Stop=${stop_loss:.2f} (Distance: ${stop_distance:.2f})"
         )
         
@@ -133,7 +133,7 @@ class LooseATRStops:
             take_profit = entry_price - tp_distance
         
         logger.info(
-            f"🎯 ATR Take Profit: Entry=${entry_price:.2f}, "
+            f"[TARGET] ATR Take Profit: Entry=${entry_price:.2f}, "
             f"R:R={risk_reward_ratio}:1, TP=${take_profit:.2f}"
         )
         

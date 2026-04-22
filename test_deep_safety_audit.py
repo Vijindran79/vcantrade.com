@@ -128,22 +128,22 @@ async def test_adversarial_logic():
         }
 
         if all_correct:
-            logger.info("\n✅ PASSED: Adversarial logic correctly weighted")
-            logger.info(f"  ✓ Weak alpha blocked by DXY penalty")
-            logger.info(f"  ✓ Strong alpha overcame DXY penalty")
-            logger.info(f"  ✓ SHORT had no penalty (DXY UP favorable)")
+            logger.info("\n[OK] PASSED: Adversarial logic correctly weighted")
+            logger.info(f"  [OK] Weak alpha blocked by DXY penalty")
+            logger.info(f"  [OK] Strong alpha overcame DXY penalty")
+            logger.info(f"  [OK] SHORT had no penalty (DXY UP favorable)")
         else:
-            logger.error("\n❌ FAILED: Adversarial logic misconfigured")
+            logger.error("\n[FAIL] FAILED: Adversarial logic misconfigured")
             if not weak_correct:
-                logger.error("  ✗ Weak alpha should have been blocked")
+                logger.error("  [FAIL] Weak alpha should have been blocked")
             if not strong_correct:
-                logger.error("  ✗ Strong alpha should have traded")
+                logger.error("  [FAIL] Strong alpha should have traded")
             if not short_correct:
-                logger.error("  ✗ SHORT should have no penalty")
+                logger.error("  [FAIL] SHORT should have no penalty")
 
     except Exception as e:
         results["adversarial_logic"]["status"] = "FAILED"
-        logger.error(f"❌ FAILED: Adversarial logic test error: {e}")
+        logger.error(f"[FAIL] FAILED: Adversarial logic test error: {e}")
 
 
 # ============================================================================
@@ -185,7 +185,7 @@ async def test_self_heal_verification():
 
             try:
                 await agent.self_heal_restart()
-                logger.info(f"  ✅ Self-heal restart successful")
+                logger.info(f"  [OK] Self-heal restart successful")
                 logger.info(f"  Error count reset: {agent.error_count}")
                 logger.info(f"  Restart count: {agent.restart_count}")
 
@@ -196,28 +196,28 @@ async def test_self_heal_verification():
                 if is_running:
                     results["self_heal_verification"]["status"] = "PASSED"
                     results["self_heal_verification"]["restarts_successful"] = 1
-                    logger.info("\n✅ PASSED: Self-healing browser restart verified")
-                    logger.info("  ✓ Error threshold triggered (3 errors)")
-                    logger.info("  ✓ Browser stopped and restarted")
-                    logger.info("  ✓ Error counter reset to 0")
-                    logger.info("  ✓ Browser ready for TradingView re-injection")
+                    logger.info("\n[OK] PASSED: Self-healing browser restart verified")
+                    logger.info("  [OK] Error threshold triggered (3 errors)")
+                    logger.info("  [OK] Browser stopped and restarted")
+                    logger.info("  [OK] Error counter reset to 0")
+                    logger.info("  [OK] Browser ready for TradingView re-injection")
                 else:
                     results["self_heal_verification"]["status"] = "FAILED"
-                    logger.error("\n❌ FAILED: Browser not running after self-heal")
+                    logger.error("\n[FAIL] FAILED: Browser not running after self-heal")
 
             except Exception as e:
                 results["self_heal_verification"]["status"] = "FAILED"
-                logger.error(f"\n❌ FAILED: Self-heal restart failed: {e}")
+                logger.error(f"\n[FAIL] FAILED: Self-heal restart failed: {e}")
         else:
             results["self_heal_verification"]["status"] = "FAILED"
-            logger.error("❌ FAILED: Self-heal trigger not activated")
+            logger.error("[FAIL] FAILED: Self-heal trigger not activated")
 
         # Cleanup
         await agent.stop()
 
     except Exception as e:
         results["self_heal_verification"]["status"] = "FAILED"
-        logger.error(f"❌ FAILED: Self-heal verification test error: {e}")
+        logger.error(f"[FAIL] FAILED: Self-heal verification test error: {e}")
 
 
 # ============================================================================
@@ -272,17 +272,17 @@ def test_rpa_normalization():
                 in_bounds = in_bounds_x and in_bounds_y
 
                 if not in_bounds:
-                    logger.error(f"  ❌ Click ({logical_x:.2f}, {logical_y:.2f}) -> ({actual_x}, {actual_y}) OUT OF BOUNDS")
+                    logger.error(f"  [FAIL] Click ({logical_x:.2f}, {logical_y:.2f}) -> ({actual_x}, {actual_y}) OUT OF BOUNDS")
                     resolution_passed = False
                     all_passed = False
                 else:
-                    logger.info(f"  ✓ Click ({logical_x:.2f}, {logical_y:.2f}) -> ({actual_x}, {actual_y})")
+                    logger.info(f"  [OK] Click ({logical_x:.2f}, {logical_y:.2f}) -> ({actual_x}, {actual_y})")
 
             if resolution_passed:
                 tested_resolutions.append(label)
-                logger.info(f"  ✅ {label} PASSED: All clicks normalized correctly")
+                logger.info(f"  [OK] {label} PASSED: All clicks normalized correctly")
             else:
-                logger.error(f"  ❌ {label} FAILED: Some clicks out of bounds")
+                logger.error(f"  [FAIL] {label} FAILED: Some clicks out of bounds")
 
         # Test the actual calibration module if it exists
         logger.info("\nChecking calibration module...")
@@ -298,31 +298,31 @@ def test_rpa_normalization():
                 logger.info(f"  CalibrationModule.normalize_coordinates: ({test_x}, {test_y})")
 
                 if 0 <= test_x < 1920 and 0 <= test_y < 1080:
-                    logger.info("  ✅ Calibration module normalization working")
+                    logger.info("  [OK] Calibration module normalization working")
                 else:
-                    logger.error("  ❌ Calibration module normalization broken")
+                    logger.error("  [FAIL] Calibration module normalization broken")
                     all_passed = False
             else:
-                logger.warning("  ⚠️ CalibrationModule.normalize_coordinates not found")
+                logger.warning("  [WARN] CalibrationModule.normalize_coordinates not found")
 
         except ImportError:
-            logger.warning("  ⚠️ Calibration module not found (using manual normalization)")
+            logger.warning("  [WARN] Calibration module not found (using manual normalization)")
 
         # Final result
         if all_passed:
             results["rpa_normalization"]["status"] = "PASSED"
             results["rpa_normalization"]["resolutions_tested"] = tested_resolutions
-            logger.info("\n✅ PASSED: RPA normalization works for all resolutions")
-            logger.info(f"  ✓ Tested: {', '.join(tested_resolutions)}")
-            logger.info("  ✓ All clicks within screen bounds")
-            logger.info("  ✓ Coordinate normalization functional")
+            logger.info("\n[OK] PASSED: RPA normalization works for all resolutions")
+            logger.info(f"  [OK] Tested: {', '.join(tested_resolutions)}")
+            logger.info("  [OK] All clicks within screen bounds")
+            logger.info("  [OK] Coordinate normalization functional")
         else:
             results["rpa_normalization"]["status"] = "FAILED"
-            logger.error("\n❌ FAILED: RPA normalization has issues")
+            logger.error("\n[FAIL] FAILED: RPA normalization has issues")
 
     except Exception as e:
         results["rpa_normalization"]["status"] = "FAILED"
-        logger.error(f"❌ FAILED: RPA normalization test error: {e}")
+        logger.error(f"[FAIL] FAILED: RPA normalization test error: {e}")
 
 
 # ============================================================================
@@ -353,13 +353,13 @@ async def run_deep_audit():
     failed = sum(1 for r in results.values() if r["status"] == "FAILED")
 
     logger.info(f"Total tests: {len(results)}")
-    logger.info(f"✅ Passed: {passed}")
-    logger.info(f"❌ Failed: {failed}")
+    logger.info(f"[OK] Passed: {passed}")
+    logger.info(f"[FAIL] Failed: {failed}")
     logger.info(f"Time elapsed: {elapsed:.2f}s")
 
     for test_name, result in results.items():
         status = result["status"]
-        emoji = "✅" if status == "PASSED" else "❌" if status == "FAILED" else "⏳"
+        emoji = "[OK]" if status == "PASSED" else "[FAIL]" if status == "FAILED" else "[WAIT]"
         logger.info(f"{emoji} {test_name}: {status}")
 
         if result.get("details"):

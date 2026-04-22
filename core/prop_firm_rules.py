@@ -143,13 +143,13 @@ class ComplianceState:
         # 1. Check daily loss limit
         if self.daily_pnl <= -self.rules.max_daily_loss:
             violations.append(
-                f"❌ DAILY LOSS LIMIT: ${abs(self.daily_pnl):.2f} / ${self.rules.max_daily_loss:.2f}"
+                f"[FAIL] DAILY LOSS LIMIT: ${abs(self.daily_pnl):.2f} / ${self.rules.max_daily_loss:.2f}"
             )
         
         # 2. Check trailing drawdown
         if self.max_drawdown_from_peak >= self.rules.max_trailing_drawdown:
             violations.append(
-                f"❌ MAX DRAWDOWN: ${self.max_drawdown_from_peak:.2f} / ${self.rules.max_trailing_drawdown:.2f}"
+                f"[FAIL] MAX DRAWDOWN: ${self.max_drawdown_from_peak:.2f} / ${self.rules.max_trailing_drawdown:.2f}"
             )
         
         # 3. Check max positions
@@ -164,14 +164,14 @@ class ComplianceState:
         days_traded = len(self.trading_days)
         if days_traded < self.rules.min_trading_days:
             violations.append(
-                f"⚠️ PAYOUT: Need {self.rules.min_trading_days} trading days for payout (currently {days_traded})"
+                f"[WARN] PAYOUT: Need {self.rules.min_trading_days} trading days for payout (currently {days_traded})"
             )
             # Don't block trading - this is just a warning for payout eligibility
-            violations = [v for v in violations if not v.startswith("⚠️ PAYOUT")]
+            violations = [v for v in violations if not v.startswith("[WARN] PAYOUT")]
 
         # 6. Check profit target achieved (for phase completion)
         if self.total_pnl >= self.rules.profit_target_phase1:
-            logger.info(f"🎉 PROFIT TARGET HIT: ${self.total_pnl:.2f} / ${self.rules.profit_target_phase1:.2f}")
+            logger.info(f"[CELEBRATE] PROFIT TARGET HIT: ${self.total_pnl:.2f} / ${self.rules.profit_target_phase1:.2f}")
 
         can_trade = len(violations) == 0
         return can_trade, violations
@@ -312,7 +312,7 @@ class PropFirmRuleEngine:
             new_daily_pnl = self.compliance.daily_pnl - potential_loss
             if new_daily_pnl < -self.rules.max_daily_loss:
                 violations.append(
-                    f"❌ TRADE WOULD EXCEED DAILY LIMIT: "
+                    f"[FAIL] TRADE WOULD EXCEED DAILY LIMIT: "
                     f"-${potential_loss:.2f} would put you at ${new_daily_pnl:.2f}"
                 )
                 can_trade = False
@@ -321,7 +321,7 @@ class PropFirmRuleEngine:
             new_drawdown = self.compliance.max_drawdown_from_peak + potential_loss
             if new_drawdown >= self.rules.max_trailing_drawdown:
                 violations.append(
-                    f"❌ TRADE WOULD EXCEED DRAWDOWN LIMIT: "
+                    f"[FAIL] TRADE WOULD EXCEED DRAWDOWN LIMIT: "
                     f"${new_drawdown:.2f} would exceed ${self.rules.max_trailing_drawdown:.2f}"
                 )
                 can_trade = False

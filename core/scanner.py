@@ -28,7 +28,7 @@ from core.brain import GeminiBrain
 from core.code_architect import CodeArchitect
 from core.settings import settings_manager
 from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
-from core.swarm_consensus import OllamaSwarmConsensus as SwarmConsensus
+from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
 from core.market_sessions import MarketSessionDetector
 
 logger = logging.getLogger(__name__)
@@ -36,10 +36,14 @@ logger = logging.getLogger(__name__)
 
 class TechnicalSignal:
     """Represents a detected technical signal."""
-    
-    def __init__(self, ticker: str, signal_type: str, strength: float, metadata: dict = None):
+
+    def __init__(
+        self, ticker: str, signal_type: str, strength: float, metadata: dict = None
+    ):
         self.ticker = ticker
-        self.signal_type = signal_type  # "VOLUME_SPIKE", "RSI_OVERSOLD", "RSI_OVERBOUGHT", "SMA_CROSS"
+        self.signal_type = (
+            signal_type  # "VOLUME_SPIKE", "RSI_OVERSOLD", "RSI_OVERBOUGHT", "SMA_CROSS"
+        )
         self.strength = strength  # 0.0-1.0
         self.metadata = metadata or {}
         self.timestamp = datetime.utcnow()
@@ -49,7 +53,7 @@ class CloudScanner:
     """
     Cloud-based market scanner that monitors 10 tickers using yfinance.
     Detects technical signals and triggers Swarm Debate when conditions met.
-    
+
     NOW WITH MARKET SESSION AWARENESS:
     - Auto-filters tickers based on day of week (Sunday = Crypto only)
     - Detects active trading sessions (Asian/London/US)
@@ -67,7 +71,7 @@ class CloudScanner:
         self.status_callback = None
         self.market_data_cache: Dict[Tuple[str, str, str], pd.DataFrame] = {}
         self.last_close_cache: Dict[str, float] = {}
-        
+
         # Circuit Breaker - prevents silent failures during API outages
         self.consecutive_errors = 0
         self.max_consecutive_errors = 20  # ~10 minutes of errors before alert
@@ -83,10 +87,14 @@ class CloudScanner:
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
 
-        logger.info("☁️ Cloud Scanner initialized with Market Session Awareness")
-        logger.info(f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert")
+        logger.info("[CLOUD] Cloud Scanner initialized with Market Session Awareness")
+        logger.info(
+            f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert"
+        )
 
-    def set_runtime_context(self, mode: str, dashboard_tickers: Optional[List[str]] = None):
+    def set_runtime_context(
+        self, mode: str, dashboard_tickers: Optional[List[str]] = None
+    ):
         """Keep session awareness aligned with the operator's live dashboard state."""
         self.session_detector.set_runtime_context(mode, dashboard_tickers)
 
@@ -132,7 +140,9 @@ class CloudScanner:
             path = f"{path}/signal"
         else:
             path = f"{path}/api/signal"
-        return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, path, parts.query, parts.fragment)
+        )
 
     def _urls_equivalent(self, left: str, right: str) -> bool:
         """Treat localhost aliases on the same port/path as the same dispatch endpoint."""
@@ -145,9 +155,8 @@ class CloudScanner:
         left_host = (left_parts.hostname or "").lower()
         right_host = (right_parts.hostname or "").lower()
         localhost_aliases = {"localhost", "127.0.0.1", "::1"}
-        hosts_match = (
-            left_host == right_host
-            or (left_host in localhost_aliases and right_host in localhost_aliases)
+        hosts_match = left_host == right_host or (
+            left_host in localhost_aliases and right_host in localhost_aliases
         )
         return (
             left_parts.scheme == right_parts.scheme
@@ -159,23 +168,33 @@ class CloudScanner:
     def _get_dispatch_targets(self) -> List[Tuple[str, str]]:
         """Return ordered dispatch targets with bridge priority and localhost fallback."""
         targets: List[Tuple[str, str]] = []
-        public_url = self._build_signal_endpoint(getattr(config, "PUBLIC_SIGNAL_URL", ""))
+        public_url = self._build_signal_endpoint(
+            getattr(config, "PUBLIC_SIGNAL_URL", "")
+        )
         local_host = getattr(config, "LOCAL_LISTENER_HEALTH_HOST", "127.0.0.1")
-        local_url = self._build_signal_endpoint(f"http://{local_host}:{config.LOCAL_LISTENER_PORT}")
+        local_url = self._build_signal_endpoint(
+            f"http://{local_host}:{config.LOCAL_LISTENER_PORT}"
+        )
         now = time.time()
 
         if public_url and now >= self.public_dispatch_retry_after_ts:
             targets.append(("bridge", public_url))
 
-        if local_url and not any(self._urls_equivalent(local_url, url) for _, url in targets):
+        if local_url and not any(
+            self._urls_equivalent(local_url, url) for _, url in targets
+        ):
             targets.append(("local", local_url))
 
-        legacy_url = self._build_signal_endpoint(getattr(config, "CLOUD_SCANNER_URL", ""))
-        if legacy_url and not any(self._urls_equivalent(legacy_url, url) for _, url in targets):
+        legacy_url = self._build_signal_endpoint(
+            getattr(config, "CLOUD_SCANNER_URL", "")
+        )
+        if legacy_url and not any(
+            self._urls_equivalent(legacy_url, url) for _, url in targets
+        ):
             targets.append(("legacy", legacy_url))
 
         return targets
-        
+
     async def scan_all_tickers(self) -> List[TechnicalSignal]:
         """Scan all tickers and return detected signals."""
         signals = []
@@ -183,26 +202,26 @@ class CloudScanner:
         # Apply sniper priority list first; otherwise normal session filtering.
         active_tickers = self._get_active_scan_list()
         session_context = self.session_detector.get_session_context()
-        
+
         # Log session info
         if self.priority_scan_list:
             logger.info(
-                f"🎯 [SNIPER MODE] Priority list active. "
+                f"[TARGET] [SNIPER MODE] Priority list active. "
                 f"Scanning only: {', '.join(active_tickers)}"
             )
         elif session_context.get("dashboard_override_active"):
             logger.info(
-                "🕐 [OVERRIDE MODE] Weekend silence bypassed. Scanning dashboard tickers: %s",
+                "[CLOCK] [OVERRIDE MODE] Weekend silence bypassed. Scanning dashboard tickers: %s",
                 ", ".join(active_tickers),
             )
         elif self.session_detector.is_weekend():
             logger.info(
-                f"🕐 [WEEKEND MODE] Markets closed. "
+                f"[CLOCK] [WEEKEND MODE] Markets closed. "
                 f"Scanning {len(active_tickers)} crypto tickers only."
             )
         else:
             logger.debug(
-                f"🕐 [SESSION] {session_context['primary_session']} | "
+                f"[CLOCK] [SESSION] {session_context['primary_session']} | "
                 f"Scanning {len(active_tickers)} tickers"
             )
 
@@ -215,16 +234,16 @@ class CloudScanner:
                 logger.error(f"Failed to scan {ticker}: {e}")
 
         return signals
-    
+
     async def _scan_single_ticker(self, ticker: str) -> List[TechnicalSignal]:
         """Scan a single ticker for technical signals."""
         signals = []
-        
+
         # Fetch 1-minute data for last day
         df = await self._fetch_market_data(ticker)
         if df is None or df.empty:
             return signals
-        
+
         # Calculate technical indicators
         df = self._calculate_indicators(df)
         direction, price_change_pct = self._compute_directional_bias(df)
@@ -246,26 +265,26 @@ class CloudScanner:
             liquidity_signal.metadata.update(brain_package)
             liquidity_signal.metadata["liquidity_zone"] = liquidity_zone
             signals.append(liquidity_signal)
-        
+
         # Detect signals
         volume_spike = self._detect_volume_spike(df, ticker)
         if volume_spike:
             volume_spike.metadata.update(brain_package)
             volume_spike.metadata["liquidity_zone"] = liquidity_zone
             signals.append(volume_spike)
-        
+
         rsi_signal = self._detect_rsi_signal(df, ticker)
         if rsi_signal:
             rsi_signal.metadata.update(brain_package)
             rsi_signal.metadata["liquidity_zone"] = liquidity_zone
             signals.append(rsi_signal)
-        
+
         sma_signal = self._detect_sma_cross(df, ticker)
         if sma_signal:
             sma_signal.metadata.update(brain_package)
             sma_signal.metadata["liquidity_zone"] = liquidity_zone
             signals.append(sma_signal)
-        
+
         return signals
 
     def _compute_directional_bias(self, df: pd.DataFrame) -> Tuple[str, float]:
@@ -351,7 +370,7 @@ class CloudScanner:
 
         if best_zone:
             logger.info(
-                "💧 Liquidity zone detected for %s: %s @ %.4f",
+                "[DROP] Liquidity zone detected for %s: %s @ %.4f",
                 ticker,
                 best_zone["type"],
                 best_zone["level"],
@@ -422,22 +441,28 @@ class CloudScanner:
         rsi_value = float(last.get("RSI", 50.0) or 50.0)
         atr_value = float(last.get("ATR", 0.0) or 0.0)
         distance_ratio = abs(candle["close"] - zone_level) / max(abs(zone_level), 1.0)
-        zone_width = max(abs(zone_level) * 0.0015, atr_value * 0.25 if atr_value > 0 else 0.0, 0.5)
+        zone_width = max(
+            abs(zone_level) * 0.0015, atr_value * 0.25 if atr_value > 0 else 0.0, 0.5
+        )
 
         demand_zones = []
         supply_zones = []
         if zone_type == "equal_highs":
-            supply_zones.append({
-                "low": zone_level - zone_width,
-                "high": zone_level + zone_width,
-                "strength": 0.7,
-            })
+            supply_zones.append(
+                {
+                    "low": zone_level - zone_width,
+                    "high": zone_level + zone_width,
+                    "strength": 0.7,
+                }
+            )
         else:
-            demand_zones.append({
-                "low": zone_level - zone_width,
-                "high": zone_level + zone_width,
-                "strength": 0.7,
-            })
+            demand_zones.append(
+                {
+                    "low": zone_level - zone_width,
+                    "high": zone_level + zone_width,
+                    "strength": 0.7,
+                }
+            )
 
         sweep = self.code_architect.detect_liquidity_sweep(
             candle=candle,
@@ -456,8 +481,16 @@ class CloudScanner:
             signal_type = f"LIQUIDITY_SWEEP_{bias}"
             strength = max(0.65, float(sweep.get("conviction", 0.65) or 0.65))
         else:
-            near_supply = zone_type == "equal_highs" and candle["high"] >= (zone_level - zone_width) and candle["close"] < candle["open"]
-            near_demand = zone_type == "swing_lows" and candle["low"] <= (zone_level + zone_width) and candle["close"] > candle["open"]
+            near_supply = (
+                zone_type == "equal_highs"
+                and candle["high"] >= (zone_level - zone_width)
+                and candle["close"] < candle["open"]
+            )
+            near_demand = (
+                zone_type == "swing_lows"
+                and candle["low"] <= (zone_level + zone_width)
+                and candle["close"] > candle["open"]
+            )
             if near_supply:
                 bias = "SELL"
                 signal_type = "LIQUIDITY_REJECTION_SELL"
@@ -470,7 +503,7 @@ class CloudScanner:
             strength = max(0.60, min(0.85, 0.85 - (distance_ratio * 100)))
 
         logger.info(
-            "🎯 Liquidity trigger armed for %s: %s near %s",
+            "[TARGET] Liquidity trigger armed for %s: %s near %s",
             ticker,
             signal_type,
             self._format_liquidity_zone_label(liquidity_zone),
@@ -486,10 +519,12 @@ class CloudScanner:
                 "atr": atr_value,
                 "liquidity_bias": bias,
                 "liquidity_sweep": sweep,
-                "liquidity_zone_label": self._format_liquidity_zone_label(liquidity_zone),
+                "liquidity_zone_label": self._format_liquidity_zone_label(
+                    liquidity_zone
+                ),
             },
         )
-    
+
     async def _fetch_market_data(
         self,
         ticker: str,
@@ -502,14 +537,14 @@ class CloudScanner:
 
         market_ticker = self._canonical_market_ticker(ticker)
         cache_key = (market_ticker, period, interval)
-        
+
         max_retries = 3
         retry_delay = 2  # seconds
-        
+
         for attempt in range(max_retries):
             try:
                 symbol = yf.Ticker(market_ticker)
-                
+
                 def fetch_data():
                     return symbol.history(period=period, interval=interval)
 
@@ -519,50 +554,74 @@ class CloudScanner:
                     df = future.result(timeout=15)
 
                 # Validate data quality
-                if df is None or df.empty or df['Close'].iloc[-1] is None:
+                if df is None or df.empty or df["Close"].iloc[-1] is None:
                     if attempt < max_retries - 1:
-                        logger.warning(f"Empty data for {ticker} via {market_ticker} (attempt {attempt+1}/{max_retries}) - retrying...")
+                        logger.warning(
+                            f"Empty data for {ticker} via {market_ticker} (attempt {attempt + 1}/{max_retries}) - retrying..."
+                        )
                         time.sleep(retry_delay)
                         continue
                     else:
-                        fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                        fallback = self._fallback_market_data(
+                            ticker, market_ticker, period, interval, cache_key
+                        )
                         if fallback is not None:
                             return fallback
-                        logger.error(f"⚠️ Market Data Timeout - Skipping Cycle for {ticker}")
+                        logger.error(
+                            f"[WARN] Market Data Timeout - Skipping Cycle for {ticker}"
+                        )
                         return None
 
                 sanitized = df.copy()
                 self.market_data_cache[cache_key] = sanitized
-                last_close = sanitized['Close'].dropna().iloc[-1] if 'Close' in sanitized and not sanitized['Close'].dropna().empty else None
+                last_close = (
+                    sanitized["Close"].dropna().iloc[-1]
+                    if "Close" in sanitized and not sanitized["Close"].dropna().empty
+                    else None
+                )
                 if last_close is not None:
                     self.last_close_cache[market_ticker] = float(last_close)
 
                 return sanitized
-                
+
             except concurrent.futures.TimeoutError:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Timeout fetching data for {ticker} (attempt {attempt+1}/{max_retries}) - retrying...")
+                    logger.warning(
+                        f"Timeout fetching data for {ticker} (attempt {attempt + 1}/{max_retries}) - retrying..."
+                    )
                     time.sleep(retry_delay)
                     continue
                 else:
-                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                    fallback = self._fallback_market_data(
+                        ticker, market_ticker, period, interval, cache_key
+                    )
                     if fallback is not None:
                         return fallback
-                    logger.error(f"⚠️ Market Data Timeout - Skipping Cycle for {ticker}")
+                    logger.error(f"[WARN] Market Data Timeout - Skipping Cycle for {ticker}")
                     return None
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Error fetching data for {ticker}: {e} (attempt {attempt+1}/{max_retries}) - retrying...")
+                    logger.warning(
+                        f"Error fetching data for {ticker}: {e} (attempt {attempt + 1}/{max_retries}) - retrying..."
+                    )
                     time.sleep(retry_delay)
                     continue
                 else:
-                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                    fallback = self._fallback_market_data(
+                        ticker, market_ticker, period, interval, cache_key
+                    )
                     if fallback is not None:
-                        logger.warning("Using fallback market data for %s after fetch failure: %s", ticker, e)
+                        logger.warning(
+                            "Using fallback market data for %s after fetch failure: %s",
+                            ticker,
+                            e,
+                        )
                         return fallback
-                    logger.error(f"⚠️ Market Data Timeout - Skipping Cycle for {ticker}: {e}")
+                    logger.error(
+                        f"[WARN] Market Data Timeout - Skipping Cycle for {ticker}: {e}"
+                    )
                     return None
-        
+
         return None
 
     def _fallback_market_data(
@@ -576,7 +635,9 @@ class CloudScanner:
         """Return cached bars or synthesize intraday bars from last known close/daily history."""
         cached = self.market_data_cache.get(cache_key)
         if cached is not None and not cached.empty:
-            logger.warning("Using cached market data for %s (%s/%s)", ticker, period, interval)
+            logger.warning(
+                "Using cached market data for %s (%s/%s)", ticker, period, interval
+            )
             return cached.copy()
 
         try:
@@ -586,8 +647,14 @@ class CloudScanner:
             logger.debug("Daily fallback fetch failed for %s: %s", ticker, e)
 
         close_values: List[float] = []
-        if daily_history is not None and not daily_history.empty and "Close" in daily_history:
-            close_values = [float(value) for value in daily_history["Close"].dropna().tolist()]
+        if (
+            daily_history is not None
+            and not daily_history.empty
+            and "Close" in daily_history
+        ):
+            close_values = [
+                float(value) for value in daily_history["Close"].dropna().tolist()
+            ]
 
         if not close_values and market_ticker in self.last_close_cache:
             close_values = [self.last_close_cache[market_ticker]]
@@ -601,10 +668,14 @@ class CloudScanner:
 
         self.market_data_cache[cache_key] = fallback.copy()
         self.last_close_cache[market_ticker] = float(fallback["Close"].iloc[-1])
-        logger.warning("Synthesized fallback bars for %s from last known close data", ticker)
+        logger.warning(
+            "Synthesized fallback bars for %s from last known close data", ticker
+        )
         return fallback
 
-    def _build_synthetic_intraday_frame(self, close_values: List[float], interval: str) -> Optional[pd.DataFrame]:
+    def _build_synthetic_intraday_frame(
+        self, close_values: List[float], interval: str
+    ) -> Optional[pd.DataFrame]:
         """Build flat-to-gently-trended candles so weekend fetch failures don't abort analysis."""
         normalized = [float(value) for value in close_values if value is not None]
         if not normalized:
@@ -649,9 +720,13 @@ class CloudScanner:
             rows.append((row_open, row_high, row_low, close_price, 0.0))
             previous_close = close_price
 
-        return pd.DataFrame(rows, index=index, columns=["Open", "High", "Low", "Close", "Volume"])
+        return pd.DataFrame(
+            rows, index=index, columns=["Open", "High", "Low", "Close", "Volume"]
+        )
 
-    async def _evaluate_timeframe_alignment(self, ticker: str, action: str) -> Tuple[bool, Dict[str, str]]:
+    async def _evaluate_timeframe_alignment(
+        self, ticker: str, action: str
+    ) -> Tuple[bool, Dict[str, str]]:
         """Evaluate 5m/3m/1m alignment with a more aggressive autonomous-mode sniper gate."""
         action = str(action or "").upper()
         if action not in {"BUY", "SELL"}:
@@ -683,10 +758,14 @@ class CloudScanner:
 
         for label, period, interval in timeframe_config:
             if interval == "3m":
-                one_min_df = await self._fetch_market_data(ticker, period=period, interval="1m")
+                one_min_df = await self._fetch_market_data(
+                    ticker, period=period, interval="1m"
+                )
                 df = _resample_to_3m(one_min_df)
             else:
-                df = await self._fetch_market_data(ticker, period=period, interval=interval)
+                df = await self._fetch_market_data(
+                    ticker, period=period, interval=interval
+                )
             if df is None or len(df) < 30:
                 votes[label] = "WAIT"
                 continue
@@ -697,7 +776,9 @@ class CloudScanner:
                 continue
 
             if df[list(required_cols)].tail(1).isnull().any(axis=1).iloc[0]:
-                logger.info("⏳ MTF wait-mode: %s %s has partial candle data", ticker, label)
+                logger.info(
+                    "[WAIT] MTF wait-mode: %s %s has partial candle data", ticker, label
+                )
                 votes[label] = "WAIT"
                 continue
 
@@ -717,7 +798,12 @@ class CloudScanner:
             else:
                 votes[label] = "WAIT"
 
-        runtime_mode = str(self.session_detector.get_session_context().get("runtime_mode", "AUTONOMOUS") or "AUTONOMOUS").upper()
+        runtime_mode = str(
+            self.session_detector.get_session_context().get(
+                "runtime_mode", "AUTONOMOUS"
+            )
+            or "AUTONOMOUS"
+        ).upper()
         one_min_match = votes.get("1m") == action
         aligned_helpers = sum(1 for tf in ["5m", "3m"] if votes.get(tf) == action)
 
@@ -725,14 +811,14 @@ class CloudScanner:
             aligned = one_min_match
             if aligned and aligned_helpers == 0:
                 logger.warning(
-                    "🎯 AUTONOMOUS SNIPER OVERRIDE: %s %s triggered from 1m alone | votes=%s",
+                    "[TARGET] AUTONOMOUS SNIPER OVERRIDE: %s %s triggered from 1m alone | votes=%s",
                     action,
                     ticker,
                     votes,
                 )
             elif aligned:
                 logger.info(
-                    "🎯 AUTONOMOUS SNIPER: %s %s confirmed by 1m + %s helper timeframe(s) | votes=%s",
+                    "[TARGET] AUTONOMOUS SNIPER: %s %s confirmed by 1m + %s helper timeframe(s) | votes=%s",
                     action,
                     ticker,
                     aligned_helpers,
@@ -741,32 +827,36 @@ class CloudScanner:
         else:
             aligned = all(votes.get(tf) == action for tf in ["5m", "3m", "1m"])
         return aligned, votes
-    
+
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators (RSI, SMA, etc.)."""
         # RSI (14-period)
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-        
+        df["RSI"] = ta.rsi(df["Close"], length=14)
+
         # SMA (20 and 50 period)
-        df['SMA_FAST'] = ta.sma(df['Close'], length=config.SMA_FAST)
-        df['SMA_SLOW'] = ta.sma(df['Close'], length=config.SMA_SLOW)
-        
+        df["SMA_FAST"] = ta.sma(df["Close"], length=config.SMA_FAST)
+        df["SMA_SLOW"] = ta.sma(df["Close"], length=config.SMA_SLOW)
+
         # Volume moving average
-        df['VOL_MA'] = ta.sma(df['Volume'], length=20)
+        df["VOL_MA"] = ta.sma(df["Volume"], length=20)
 
         # ATR (14-period) for Gemini data package
-        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-        
+        df["ATR"] = ta.atr(df["High"], df["Low"], df["Close"], length=14)
+
         return df
 
-    def _build_brain_package(self, df: pd.DataFrame, liquidity_zone: Optional[dict]) -> dict:
+    def _build_brain_package(
+        self, df: pd.DataFrame, liquidity_zone: Optional[dict]
+    ) -> dict:
         """Build the Gemini data package from the latest candles and liquidity geometry."""
         recent = df.tail(10).copy() if df is not None else pd.DataFrame()
         recent_ohlcv = []
         recent_lines = []
         for index, row in recent.iterrows():
             candle = {
-                "timestamp": index.isoformat() if hasattr(index, "isoformat") else str(index),
+                "timestamp": index.isoformat()
+                if hasattr(index, "isoformat")
+                else str(index),
                 "open": float(row.get("Open", 0.0) or 0.0),
                 "high": float(row.get("High", 0.0) or 0.0),
                 "low": float(row.get("Low", 0.0) or 0.0),
@@ -798,7 +888,9 @@ class CloudScanner:
                         "level": float(liquidity_zone.get("level", 0.0) or 0.0),
                     },
                     "distance": float(liquidity_zone.get("distance", 0.0) or 0.0),
-                    "current_price": float(liquidity_zone.get("current_price", 0.0) or 0.0),
+                    "current_price": float(
+                        liquidity_zone.get("current_price", 0.0) or 0.0
+                    ),
                 }
             )
 
@@ -809,20 +901,22 @@ class CloudScanner:
             "atr": atr_value,
             "liquidity_zones": liquidity_zones,
         }
-    
-    def _detect_volume_spike(self, df: pd.DataFrame, ticker: str) -> Optional[TechnicalSignal]:
+
+    def _detect_volume_spike(
+        self, df: pd.DataFrame, ticker: str
+    ) -> Optional[TechnicalSignal]:
         """Detect volume spike (>3x average)."""
         if len(df) < 2:
             return None
-        
-        last_vol = df['Volume'].iloc[-1]
-        avg_vol = df['VOL_MA'].iloc[-1]
-        
+
+        last_vol = df["Volume"].iloc[-1]
+        avg_vol = df["VOL_MA"].iloc[-1]
+
         if pd.isna(avg_vol) or avg_vol == 0:
             return None
-        
+
         volume_ratio = last_vol / avg_vol
-        
+
         if volume_ratio > config.VOLUME_SPIKE_MULTIPLIER:
             strength = min(1.0, volume_ratio / 10.0)  # Normalize to 0-1
             return TechnicalSignal(
@@ -833,62 +927,60 @@ class CloudScanner:
                     "volume_ratio": volume_ratio,
                     "last_volume": last_vol,
                     "avg_volume": avg_vol,
-                    "price": df['Close'].iloc[-1]
-                }
+                    "price": df["Close"].iloc[-1],
+                },
             )
-        
+
         return None
-    
-    def _detect_rsi_signal(self, df: pd.DataFrame, ticker: str) -> Optional[TechnicalSignal]:
+
+    def _detect_rsi_signal(
+        self, df: pd.DataFrame, ticker: str
+    ) -> Optional[TechnicalSignal]:
         """Detect RSI overbought/oversold conditions."""
         if len(df) < 2:
             return None
-        
-        current_rsi = df['RSI'].iloc[-1]
-        prev_rsi = df['RSI'].iloc[-2]
-        
+
+        current_rsi = df["RSI"].iloc[-1]
+        prev_rsi = df["RSI"].iloc[-2]
+
         if pd.isna(current_rsi) or pd.isna(prev_rsi):
             return None
-        
+
         # RSI crosses below oversold (bullish)
         if prev_rsi >= config.RSI_OVERSOLD and current_rsi < config.RSI_OVERSOLD:
             return TechnicalSignal(
                 ticker=ticker,
                 signal_type="RSI_OVERSOLD",
                 strength=0.75,
-                metadata={
-                    "rsi": current_rsi,
-                    "price": df['Close'].iloc[-1]
-                }
+                metadata={"rsi": current_rsi, "price": df["Close"].iloc[-1]},
             )
-        
+
         # RSI crosses above overbought (bearish)
         if prev_rsi <= config.RSI_OVERBOUGHT and current_rsi > config.RSI_OVERBOUGHT:
             return TechnicalSignal(
                 ticker=ticker,
                 signal_type="RSI_OVERBOUGHT",
                 strength=0.75,
-                metadata={
-                    "rsi": current_rsi,
-                    "price": df['Close'].iloc[-1]
-                }
+                metadata={"rsi": current_rsi, "price": df["Close"].iloc[-1]},
             )
-        
+
         return None
-    
-    def _detect_sma_cross(self, df: pd.DataFrame, ticker: str) -> Optional[TechnicalSignal]:
+
+    def _detect_sma_cross(
+        self, df: pd.DataFrame, ticker: str
+    ) -> Optional[TechnicalSignal]:
         """Detect SMA fast/slow cross (Golden Cross / Death Cross)."""
         if len(df) < 2:
             return None
-        
-        current_fast = df['SMA_FAST'].iloc[-1]
-        current_slow = df['SMA_SLOW'].iloc[-1]
-        prev_fast = df['SMA_FAST'].iloc[-2]
-        prev_slow = df['SMA_SLOW'].iloc[-2]
-        
+
+        current_fast = df["SMA_FAST"].iloc[-1]
+        current_slow = df["SMA_SLOW"].iloc[-1]
+        prev_fast = df["SMA_FAST"].iloc[-2]
+        prev_slow = df["SMA_SLOW"].iloc[-2]
+
         if any(pd.isna([current_fast, current_slow, prev_fast, prev_slow])):
             return None
-        
+
         # Golden Cross (bullish)
         if prev_fast <= prev_slow and current_fast > current_slow:
             return TechnicalSignal(
@@ -898,10 +990,10 @@ class CloudScanner:
                 metadata={
                     "sma_fast": current_fast,
                     "sma_slow": current_slow,
-                    "price": df['Close'].iloc[-1]
-                }
+                    "price": df["Close"].iloc[-1],
+                },
             )
-        
+
         # Death Cross (bearish)
         if prev_fast >= prev_slow and current_fast < current_slow:
             return TechnicalSignal(
@@ -911,12 +1003,12 @@ class CloudScanner:
                 metadata={
                     "sma_fast": current_fast,
                     "sma_slow": current_slow,
-                    "price": df['Close'].iloc[-1]
-                }
+                    "price": df["Close"].iloc[-1],
+                },
             )
-        
+
         return None
-    
+
     def _is_signal_cooldown(self, ticker: str, signal_type: str) -> bool:
         """Check if signal is within cooldown period."""
         key = f"{ticker}:{signal_type}"
@@ -924,12 +1016,12 @@ class CloudScanner:
             elapsed = (datetime.utcnow() - self.recent_signals[key]).total_seconds()
             return elapsed < self.signal_cooldown
         return False
-    
+
     def _record_signal(self, ticker: str, signal_type: str):
         """Record signal timestamp for cooldown tracking."""
         key = f"{ticker}:{signal_type}"
         self.recent_signals[key] = datetime.utcnow()
-    
+
     async def process_signals(self, signals: List[TechnicalSignal]) -> Optional[dict]:
         """
         Process detected signals through Swarm Debate.
@@ -946,7 +1038,7 @@ class CloudScanner:
                 continue
 
             logger.info(
-                f"🔥 Signal detected: {signal.signal_type} on {signal.ticker} "
+                f"[FIRE] Signal detected: {signal.signal_type} on {signal.ticker} "
                 f"(strength: {signal.strength:.2f})"
             )
 
@@ -957,16 +1049,20 @@ class CloudScanner:
             try:
                 analysis, transcript = await self.consensus.run(market_data)
 
-                # 🔥 NUCLEAR FIX: Override HOLD action if technical signal is strong
+                # [FIRE] NUCLEAR FIX: Override HOLD action if technical signal is strong
                 # and agents are aligned (Technical Sniper + Risk Manager agree)
                 if analysis.action.value == "HOLD" and signal.strength >= 0.60:
                     # Check if agents support a trade direction
-                    tech_action = transcript.technical_sniper.action if transcript else "HOLD"
-                    risk_verdict = transcript.risk_manager.verdict if transcript else "HOLD"
-                    
+                    tech_action = (
+                        transcript.technical_sniper.action if transcript else "HOLD"
+                    )
+                    risk_verdict = (
+                        transcript.risk_manager.verdict if transcript else "HOLD"
+                    )
+
                     if tech_action in ["BUY", "SELL"] and risk_verdict == "APPROVE":
                         logger.info(
-                            f"🔥 NUCLEAR OVERRIDE: LLM returned HOLD but technical signal "
+                            f"[FIRE] NUCLEAR OVERRIDE: LLM returned HOLD but technical signal "
                             f"strong ({signal.strength:.2f}) and agents aligned "
                             f"(Tech: {tech_action}, Risk: {risk_verdict})"
                         )
@@ -975,7 +1071,9 @@ class CloudScanner:
                         analysis.reason = f"Strong technical {signal.signal_type} signal (strength: {signal.strength:.2f}) with agent alignment"
 
                 # Calculate confidence score (0.0-1.0)
-                confidence_score = self._calculate_confidence(analysis, transcript, signal.strength)
+                confidence_score = self._calculate_confidence(
+                    analysis, transcript, signal.strength
+                )
 
                 logger.info(f"Swarm consensus: {confidence_score:.2f} confidence")
 
@@ -984,7 +1082,9 @@ class CloudScanner:
 
                 # FILTER: Only dispatch BUY/SELL signals (skip HOLD)
                 if analysis.action.value == "HOLD":
-                    logger.info(f"⏸️ HOLD signal for {signal.ticker} - not dispatching (no trade)")
+                    logger.info(
+                        f"[PAUSE] HOLD signal for {signal.ticker} - not dispatching (no trade)"
+                    )
                     self._emit_status(signal.ticker, "trade_rejected")
                     continue  # Skip to next signal
 
@@ -995,7 +1095,7 @@ class CloudScanner:
                 )
                 if not mtf_ok:
                     logger.info(
-                        "🎯 MTF block: %s %s rejected by 5m/3m/1m alignment %s",
+                        "[TARGET] MTF block: %s %s rejected by 5m/3m/1m alignment %s",
                         analysis.action.value,
                         signal.ticker,
                         mtf_votes,
@@ -1010,10 +1110,18 @@ class CloudScanner:
                     signal.ticker,
                     analysis.action.value,
                 )
-                self._emit_status(signal.ticker, f"brain_reasoning:{analysis.action.value}")
-                brain_decision = await self._request_brain_verdict(signal, analysis.action.value)
-                brain_verdict = str(brain_decision.get("verdict", "[SIGNAL] WAIT") or "[SIGNAL] WAIT").upper()
-                brain_used = str(brain_decision.get("brain_used", "OPENROUTER") or "OPENROUTER").upper()
+                self._emit_status(
+                    signal.ticker, f"brain_reasoning:{analysis.action.value}"
+                )
+                brain_decision = await self._request_brain_verdict(
+                    signal, analysis.action.value
+                )
+                brain_verdict = str(
+                    brain_decision.get("verdict", "[SIGNAL] WAIT") or "[SIGNAL] WAIT"
+                ).upper()
+                brain_used = str(
+                    brain_decision.get("brain_used", "OPENROUTER") or "OPENROUTER"
+                ).upper()
                 fallback_mode = bool(brain_decision.get("fallback_mode"))
                 if fallback_mode:
                     self._emit_status(signal.ticker, f"brain_fallback:{brain_used}")
@@ -1031,7 +1139,7 @@ class CloudScanner:
                     self._emit_status(signal.ticker, "trade_rejected")
                     continue
 
-                # 🔥 FIX: Ensure entry/stop/tp are set (use signal price if LLM returned 0)
+                # [FIRE] FIX: Ensure entry/stop/tp are set (use signal price if LLM returned 0)
                 signal_price = signal.metadata.get("price", market_data.price)
                 if analysis.entry_price == 0.0 or analysis.entry_price is None:
                     analysis.entry_price = signal_price
@@ -1058,7 +1166,10 @@ class CloudScanner:
                     "mtf_check": mtf_votes,
                     "brain_verdict": brain_verdict,
                     "brain_reasoning": str(brain_decision.get("reasoning", "") or ""),
-                    "brain_model": str(brain_decision.get("model", self.brain.model) or self.brain.model),
+                    "brain_model": str(
+                        brain_decision.get("model", self.brain.model)
+                        or self.brain.model
+                    ),
                     "brain_used": brain_used,
                     "fallback_mode": fallback_mode,
                     "force_execute": brain_verdict in {"[SIGNAL] BUY", "[SIGNAL] SELL"},
@@ -1081,12 +1192,18 @@ class CloudScanner:
                             "conviction": transcript.risk_manager.conviction,
                         },
                         "devils_advocate": {
-                            "rating": transcript.devils_advocate.get("rating", "NEUTRAL"),
-                            "rejection_reasons": transcript.devils_advocate.get("rejection_reasons", []),
-                            "hidden_risks": transcript.devils_advocate.get("hidden_risks", "Unknown"),
+                            "rating": transcript.devils_advocate.get(
+                                "rating", "NEUTRAL"
+                            ),
+                            "rejection_reasons": transcript.devils_advocate.get(
+                                "rejection_reasons", []
+                            ),
+                            "hidden_risks": transcript.devils_advocate.get(
+                                "hidden_risks", "Unknown"
+                            ),
                         },
                         "ceo_verdict": transcript.ceo_verdict,
-                    }
+                    },
                 }
 
             except Exception as e:
@@ -1094,15 +1211,18 @@ class CloudScanner:
                 continue
 
         return None
-    
+
     def _build_market_data(self, signal: TechnicalSignal) -> MarketDataPoint:
         """Build MarketDataPoint from technical signal."""
         price = signal.metadata.get("price", 0.0)
         volume = signal.metadata.get("last_volume", 0.0)
         runtime_mode = str(
-            self.session_detector.get_session_context().get("runtime_mode", "AUTONOMOUS") or "AUTONOMOUS"
+            self.session_detector.get_session_context().get(
+                "runtime_mode", "AUTONOMOUS"
+            )
+            or "AUTONOMOUS"
         ).upper()
-        
+
         return MarketDataPoint(
             asset=signal.ticker,
             price=price,
@@ -1114,16 +1234,23 @@ class CloudScanner:
                 "ATR": signal.metadata.get("atr", 0.0),
                 "SIGNAL_TYPE": signal.signal_type,
                 "SIGNAL_STRENGTH": signal.strength,
-                "LIQUIDITY_ZONE": signal.metadata.get("liquidity_zone_label", self._format_liquidity_zone_label(signal.metadata.get("liquidity_zone"))),
+                "LIQUIDITY_ZONE": signal.metadata.get(
+                    "liquidity_zone_label",
+                    self._format_liquidity_zone_label(
+                        signal.metadata.get("liquidity_zone")
+                    ),
+                ),
                 "LIQUIDITY_SWEEP": signal.metadata.get("liquidity_sweep") or {},
                 "RUNTIME_MODE": runtime_mode,
                 "RECENT_CANDLES": signal.metadata.get("recent_candle_lines", []),
                 "RECENT_OHLCV": signal.metadata.get("recent_ohlcv", []),
                 "LIQUIDITY_ZONES": signal.metadata.get("liquidity_zones", []),
-            }
+            },
         )
 
-    async def _request_brain_verdict(self, signal: TechnicalSignal, proposed_action: str) -> dict:
+    async def _request_brain_verdict(
+        self, signal: TechnicalSignal, proposed_action: str
+    ) -> dict:
         """Ask OpenRouter for the final approval after triple alignment passes."""
         package = {
             "asset": signal.ticker,
@@ -1131,36 +1258,54 @@ class CloudScanner:
             "rsi": signal.metadata.get("rsi", 50.0),
             "atr": signal.metadata.get("atr", 0.0),
             "liquidity_zones": signal.metadata.get("liquidity_zones", []),
-            "liquidity_zone_label": signal.metadata.get("liquidity_zone_label", self._format_liquidity_zone_label(signal.metadata.get("liquidity_zone"))),
+            "liquidity_zone_label": signal.metadata.get(
+                "liquidity_zone_label",
+                self._format_liquidity_zone_label(
+                    signal.metadata.get("liquidity_zone")
+                ),
+            ),
             "signal_type": signal.signal_type,
         }
 
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self.brain.request_decision, proposed_action, package),
+                asyncio.to_thread(
+                    self.brain.request_decision, proposed_action, package
+                ),
                 timeout=max(1, int(config.GEMINI_TIMEOUT)),
             )
         except asyncio.TimeoutError:
-            logger.warning("OpenRouter brain timeout for %s %s - switching to local Predator", proposed_action, signal.ticker)
+            logger.warning(
+                "OpenRouter brain timeout for %s %s - switching to local Predator",
+                proposed_action,
+                signal.ticker,
+            )
             return await asyncio.to_thread(
                 self.brain.predator.request_decision,
                 proposed_action,
                 package,
             )
         except Exception as exc:
-            logger.warning("OpenRouter brain request failed for %s %s: %s - switching to local Predator", proposed_action, signal.ticker, exc)
+            logger.warning(
+                "OpenRouter brain request failed for %s %s: %s - switching to local Predator",
+                proposed_action,
+                signal.ticker,
+                exc,
+            )
             return await asyncio.to_thread(
                 self.brain.predator.request_decision,
                 proposed_action,
                 package,
             )
-    
-    def _calculate_confidence(self, analysis, transcript, signal_strength: float = 0.5) -> float:
+
+    def _calculate_confidence(
+        self, analysis, transcript, signal_strength: float = 0.5
+    ) -> float:
         """
         Calculate numerical confidence score (0.0-1.0) from Swarm output.
         Maps ConfidenceLevel enum to numerical values.
         Applies Devil's Advocate penalty if risks identified.
-        
+
         NUCLEAR FIX: Forces minimum MEDIUM for strong technical signals to prevent
         the system from being paralyzed by over-conservative LLM responses.
         """
@@ -1168,16 +1313,16 @@ class CloudScanner:
             ConfidenceLevel.LOW: 0.40,
             ConfidenceLevel.MEDIUM: 0.60,
             ConfidenceLevel.HIGH: 0.80,
-            ConfidenceLevel.VERY_HIGH: 0.95
+            ConfidenceLevel.VERY_HIGH: 0.95,
         }
 
         base_confidence = confidence_map.get(analysis.confidence, 0.50)
-        
-        # 🔥 NUCLEAR FIX: Force minimum MEDIUM (0.60) for strong technical signals
+
+        # [FIRE] NUCLEAR FIX: Force minimum MEDIUM (0.60) for strong technical signals
         # If technical signal is strong (strength > 0.6) but LLM returned LOW, boost to MEDIUM
         if base_confidence < 0.60 and signal_strength >= 0.60:
             logger.info(
-                f"🔥 NUCLEAR OVERRIDE: Technical signal strong ({signal_strength:.2f}), "
+                f"[FIRE] NUCLEAR OVERRIDE: Technical signal strong ({signal_strength:.2f}), "
                 f"boosting LLM LOW to MEDIUM minimum"
             )
             base_confidence = max(base_confidence, 0.60)
@@ -1198,8 +1343,11 @@ class CloudScanner:
             if transcript.macro_analyst.action in ["BULLISH", "BEARISH"]:
                 total_agents += 1
                 macro_aligned = (
-                    (transcript.macro_analyst.action == "BULLISH" and analysis.action == SignalAction.BUY) or
-                    (transcript.macro_analyst.action == "BEARISH" and analysis.action == SignalAction.SELL)
+                    transcript.macro_analyst.action == "BULLISH"
+                    and analysis.action == SignalAction.BUY
+                ) or (
+                    transcript.macro_analyst.action == "BEARISH"
+                    and analysis.action == SignalAction.SELL
                 )
                 if macro_aligned:
                     agents_aligned += 1
@@ -1216,20 +1364,29 @@ class CloudScanner:
         # Include signal strength
         signal_weight = 0.05  # Small weight for technical signal strength
 
-        # 😈 Devil's Advocate Penalty - Reduce confidence if risks identified
+        # [DEVIL] Devil's Advocate Penalty - Reduce confidence if risks identified
         devils_penalty = 0.0
-        if transcript and hasattr(transcript, 'devils_advocate') and transcript.devils_advocate:
+        if (
+            transcript
+            and hasattr(transcript, "devils_advocate")
+            and transcript.devils_advocate
+        ):
             devils_penalty = transcript.devils_advocate.get("confidence_penalty", 0.0)
             rating = transcript.devils_advocate.get("rating", "NEUTRAL")
             if rating in ["STRONG_AVOID", "CAUTIOUS"]:
                 logger.warning(
-                    f"😈 Devil's Advocate applied {devils_penalty:.2f} penalty "
+                    f"[DEVIL] Devil's Advocate applied {devils_penalty:.2f} penalty "
                     f"(rating: {rating})"
                 )
 
-        final_confidence = max(0.0, min(1.0, base_confidence + alignment_bonus + signal_weight + devils_penalty))
+        final_confidence = max(
+            0.0,
+            min(
+                1.0, base_confidence + alignment_bonus + signal_weight + devils_penalty
+            ),
+        )
         return round(final_confidence, 2)
-    
+
     async def dispatch_to_local(self, signal_data: dict) -> bool:
         """
         Dispatch trade signal to local laptop executor via HTTP.
@@ -1238,7 +1395,9 @@ class CloudScanner:
         timeout = float(getattr(config, "LOCAL_EXECUTION_TIMEOUT", 30.0) or 30.0)
         headers = {"Content-Type": "application/json"}
         if getattr(config, "SIGNAL_API_KEY", ""):
-            headers[getattr(config, "SIGNAL_API_HEADER", "X-Signal-Key")] = config.SIGNAL_API_KEY
+            headers[getattr(config, "SIGNAL_API_HEADER", "X-Signal-Key")] = (
+                config.SIGNAL_API_KEY
+            )
 
         payload = dict(signal_data)
         if getattr(config, "SIGNAL_API_KEY", ""):
@@ -1249,17 +1408,21 @@ class CloudScanner:
             self.dispatch_failure_streak += 1
             self.last_dispatch_status_code = None
             self.last_dispatch_target = "none"
-            self.last_dispatch_error_message = "Signal dispatch failed: no configured dispatch targets"
-            logger.error("❌ %s", self.last_dispatch_error_message)
+            self.last_dispatch_error_message = (
+                "Signal dispatch failed: no configured dispatch targets"
+            )
+            logger.error("[FAIL] %s", self.last_dispatch_error_message)
             return False
 
         bridge_failure: Optional[str] = None
-        bridge_retry_seconds = max(30.0, float(getattr(config, "SCAN_INTERVAL", 10)) * 12.0)
+        bridge_retry_seconds = max(
+            30.0, float(getattr(config, "SCAN_INTERVAL", 10)) * 12.0
+        )
 
         for target_name, target_url in targets:
             try:
                 logger.info(
-                    "📡 Dispatch attempt via %s -> %s | %s %s (confidence: %.2f)",
+                    "[SAT] Dispatch attempt via %s -> %s | %s %s (confidence: %.2f)",
                     target_name,
                     target_url,
                     signal_data.get("action"),
@@ -1284,7 +1447,7 @@ class CloudScanner:
                     self.last_dispatch_error_message = ""
                     if target_name == "bridge":
                         self.public_dispatch_retry_after_ts = 0.0
-                    logger.info("✅ Signal dispatched successfully via %s", target_name)
+                    logger.info("[OK] Signal dispatched successfully via %s", target_name)
                     return True
 
                 failure_message = (
@@ -1294,11 +1457,15 @@ class CloudScanner:
                 self.last_dispatch_status_code = status_code
                 self.last_dispatch_target = target_name
 
-                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                if target_name == "bridge" and any(
+                    name == "local" for name, _ in targets
+                ):
                     bridge_failure = failure_message
-                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    self.public_dispatch_retry_after_ts = (
+                        time.time() + bridge_retry_seconds
+                    )
                     logger.warning(
-                        "🌉 Bridge dispatch unavailable (%s). Falling back to localhost for %.0fs.",
+                        "[EMOJI] Bridge dispatch unavailable (%s). Falling back to localhost for %.0fs.",
                         f"HTTP {status_code}",
                         bridge_retry_seconds,
                     )
@@ -1306,26 +1473,32 @@ class CloudScanner:
 
                 self.dispatch_failure_streak += 1
                 self.last_dispatch_error_message = failure_message
-                logger.error("❌ %s", failure_message)
+                logger.error("[FAIL] %s", failure_message)
                 return False
 
             except requests.exceptions.ConnectionError:
-                failure_message = f"Signal dispatch failed via {target_name}: connection refused"
+                failure_message = (
+                    f"Signal dispatch failed via {target_name}: connection refused"
+                )
                 self.last_dispatch_status_code = None
                 self.last_dispatch_target = target_name
 
-                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                if target_name == "bridge" and any(
+                    name == "local" for name, _ in targets
+                ):
                     bridge_failure = failure_message
-                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    self.public_dispatch_retry_after_ts = (
+                        time.time() + bridge_retry_seconds
+                    )
                     logger.info(
-                        "🌉 Bridge offline. Falling back to localhost for %.0fs.",
+                        "[EMOJI] Bridge offline. Falling back to localhost for %.0fs.",
                         bridge_retry_seconds,
                     )
                     continue
 
                 self.dispatch_failure_streak += 1
                 self.last_dispatch_error_message = failure_message
-                logger.error("❌ %s", failure_message)
+                logger.error("[FAIL] %s", failure_message)
                 return False
 
             except requests.exceptions.Timeout:
@@ -1333,30 +1506,40 @@ class CloudScanner:
                 self.last_dispatch_status_code = None
                 self.last_dispatch_target = target_name
 
-                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                if target_name == "bridge" and any(
+                    name == "local" for name, _ in targets
+                ):
                     bridge_failure = failure_message
-                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    self.public_dispatch_retry_after_ts = (
+                        time.time() + bridge_retry_seconds
+                    )
                     logger.warning(
-                        "🌉 Bridge timed out. Falling back to localhost for %.0fs.",
+                        "[EMOJI] Bridge timed out. Falling back to localhost for %.0fs.",
                         bridge_retry_seconds,
                     )
                     continue
 
                 self.dispatch_failure_streak += 1
                 self.last_dispatch_error_message = failure_message
-                logger.error("❌ %s", failure_message)
+                logger.error("[FAIL] %s", failure_message)
                 return False
 
             except Exception as e:
-                failure_message = f"Signal dispatch failed via {target_name}: {type(e).__name__}: {e}"
+                failure_message = (
+                    f"Signal dispatch failed via {target_name}: {type(e).__name__}: {e}"
+                )
                 self.last_dispatch_status_code = None
                 self.last_dispatch_target = target_name
 
-                if target_name == "bridge" and any(name == "local" for name, _ in targets):
+                if target_name == "bridge" and any(
+                    name == "local" for name, _ in targets
+                ):
                     bridge_failure = failure_message
-                    self.public_dispatch_retry_after_ts = time.time() + bridge_retry_seconds
+                    self.public_dispatch_retry_after_ts = (
+                        time.time() + bridge_retry_seconds
+                    )
                     logger.warning(
-                        "🌉 Bridge dispatch raised %s. Falling back to localhost for %.0fs.",
+                        "[EMOJI] Bridge dispatch raised %s. Falling back to localhost for %.0fs.",
                         type(e).__name__,
                         bridge_retry_seconds,
                     )
@@ -1364,21 +1547,25 @@ class CloudScanner:
 
                 self.dispatch_failure_streak += 1
                 self.last_dispatch_error_message = failure_message
-                logger.error("❌ %s", failure_message)
+                logger.error("[FAIL] %s", failure_message)
                 return False
 
         self.dispatch_failure_streak += 1
         self.last_dispatch_status_code = self.last_dispatch_status_code
-        self.last_dispatch_error_message = bridge_failure or "Signal dispatch failed after exhausting all targets"
-        logger.error("❌ %s", self.last_dispatch_error_message)
+        self.last_dispatch_error_message = (
+            bridge_failure or "Signal dispatch failed after exhausting all targets"
+        )
+        logger.error("[FAIL] %s", self.last_dispatch_error_message)
         return False
-    
+
     async def run_scanner(self):
         """Main scanner loop - continuous scanning with circuit breaker."""
-        logger.info(f"☁️ Cloud Scanner started - monitoring {len(self.tickers)} tickers")
+        logger.info(f"[CLOUD] Cloud Scanner started - monitoring {len(self.tickers)} tickers")
         logger.info(f"Tickers: {', '.join(self.tickers)}")
         logger.info(f"Confidence threshold: {config.SWARM_CONFIDENCE_THRESHOLD}")
-        logger.info(f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert")
+        logger.info(
+            f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert"
+        )
 
         while True:
             try:
@@ -1394,9 +1581,9 @@ class CloudScanner:
                         success = await self.dispatch_to_local(trade_signal)
 
                         if success:
-                            logger.info(f"✅ Trade signal executed: {trade_signal}")
+                            logger.info(f"[OK] Trade signal executed: {trade_signal}")
                         else:
-                            logger.warning(f"⚠️ Trade signal dispatch failed")
+                            logger.warning(f"[WARN] Trade signal dispatch failed")
 
                 # Success - reset error counter
                 self.consecutive_errors = 0
@@ -1406,34 +1593,37 @@ class CloudScanner:
                 await asyncio.sleep(self.get_scan_interval())
 
             except KeyboardInterrupt:
-                logger.info("🛑 Scanner stopped by user")
+                logger.info("[STOP] Scanner stopped by user")
                 break
             except Exception as e:
                 self.consecutive_errors += 1
-                logger.error(f"❌ Scanner error ({self.consecutive_errors}/{self.max_consecutive_errors}): {type(e).__name__}: {e}")
-                
+                logger.error(
+                    f"[FAIL] Scanner error ({self.consecutive_errors}/{self.max_consecutive_errors}): {type(e).__name__}: {e}"
+                )
+
                 # Alert user if threshold exceeded
                 if self.consecutive_errors >= self.error_alert_threshold:
                     logger.critical(
-                        f"🚨 SCANNER ALERT: {self.consecutive_errors} consecutive errors! "
+                        f"[SIREN] SCANNER ALERT: {self.consecutive_errors} consecutive errors! "
                         f"Last success: {self.last_successful_scan}. "
                         f"Check API connectivity, API keys, and network status."
                     )
-                
+
                 # Circuit breaker - suggest manual intervention
                 if self.consecutive_errors >= self.max_consecutive_errors:
                     logger.critical(
-                        f"🛑 CIRCUIT BREAKER TRIGGERED: {self.max_consecutive_errors} consecutive errors. "
+                        f"[STOP] CIRCUIT BREAKER TRIGGERED: {self.max_consecutive_errors} consecutive errors. "
                     )
                     # Still wait, but log more aggressively
                     await asyncio.sleep(10)  # Longer wait when in error state
                 else:
                     await asyncio.sleep(5)  # Normal retry delay
 
+
 def run_cloud_scanner():
     """Entry point for cloud scanner (runs on Vast.ai server)."""
     import sys
-    
+
     print("=" * 60)
     print("VcanTrade AI - Cloud Market Scanner")
     print("=" * 60)
@@ -1443,9 +1633,9 @@ def run_cloud_scanner():
     print(f"Scan interval: {config.SCAN_INTERVAL}s")
     print(f"Confidence threshold: {config.SWARM_CONFIDENCE_THRESHOLD}")
     print("=" * 60)
-    
+
     scanner = CloudScanner()
-    
+
     try:
         asyncio.run(scanner.run_scanner())
     except KeyboardInterrupt:

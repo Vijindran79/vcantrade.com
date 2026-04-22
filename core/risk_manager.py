@@ -91,9 +91,9 @@ class RiskManager:
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Professor Mode — PositionSizer
-# ─────────────────────────────────────────────────────────────────────────────
+# [EMOJI]
+# Professor Mode [DASH] PositionSizer
+# [EMOJI]
 
 class PositionSizer:
     """Autonomous Professor position sizer.
@@ -105,7 +105,7 @@ class PositionSizer:
       flagged *Too Risky* and ``evaluate()`` returns ``ok=False``.
     """
 
-    MAX_STOP_DISTANCE_PCT: float = 5.0  # Hard cap; above this → rejected
+    MAX_STOP_DISTANCE_PCT: float = 5.0  # Hard cap; above this -> rejected
     SL_BUFFER: float = 0.002            # 0.2% beyond S/R level
 
     def __init__(self, balance: float, risk_pct: float = 1.0):

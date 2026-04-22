@@ -136,7 +136,7 @@ class RiskGovernor:
         self.total_exposure_current = 0.0
         
         logger.info(
-            f"🏛️ Risk Governor initialized: "
+            f"[GOVERN] Risk Governor initialized: "
             f"Max Units={max_risk_units}, "
             f"Max/Unit={max_exposure_per_unit_pct}%, "
             f"Corr Threshold={correlation_threshold}"
@@ -191,7 +191,7 @@ class RiskGovernor:
         if highest_corr >= self.correlation_threshold:
             # HIGH CORRELATION DETECTED
             logger.warning(
-                f"⚠️ High correlation detected: {new_asset} vs "
+                f"[WARN] High correlation detected: {new_asset} vs "
                 f"{matching_unit.assets} (corr: {highest_corr:.2f})"
             )
             

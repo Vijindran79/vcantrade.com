@@ -128,7 +128,7 @@ class MarketSessionDetector:
         self._runtime_mode = "AUTONOMOUS"
         self._dashboard_tickers: List[str] = []
         
-        logger.info("🕐 Market Session Detector initialized with Holiday Awareness")
+        logger.info("[CLOCK] Market Session Detector initialized with Holiday Awareness")
 
     def set_runtime_context(self, mode: str, dashboard_tickers: Optional[List[str]] = None) -> None:
         """Store operator mode and active dashboard tickers for session overrides."""
@@ -246,7 +246,7 @@ class MarketSessionDetector:
             self._filtered_tickers = list(self._dashboard_tickers)
             self._last_update = now
             logger.info(
-                "🕐 DASHBOARD OVERRIDE: Treating %d dashboard tickers as always open for analysis in %s mode",
+                "[CLOCK] DASHBOARD OVERRIDE: Treating %d dashboard tickers as always open for analysis in %s mode",
                 len(self._dashboard_tickers),
                 self._runtime_mode,
             )
@@ -259,7 +259,7 @@ class MarketSessionDetector:
             self._filtered_tickers = TICKER_BY_MARKET["CRYPTO"]
             self._last_update = now
             
-            logger.info("🕐 SATURDAY MODE: Close-only/Audit day. No new stock/forex trades.")
+            logger.info("[CLOCK] SATURDAY MODE: Close-only/Audit day. No new stock/forex trades.")
             return ["Crypto"], MarketSession.SATURDAY_AUDIT
         
         # Sunday = Crypto Only
@@ -268,7 +268,7 @@ class MarketSessionDetector:
             self._active_markets = ["Crypto"]
             self._last_update = now
             
-            logger.info("🕐 SUNDAY MODE: Markets closed. Crypto only.")
+            logger.info("[CLOCK] SUNDAY MODE: Markets closed. Crypto only.")
             return ["Crypto"], MarketSession.CRYPTO
         
         # Check holidays
@@ -288,7 +288,7 @@ class MarketSessionDetector:
             self._active_markets = active_markets
             self._last_update = now
             
-            logger.info(f"🌴 HOLIDAY MODE: {holiday_name} | Only crypto/non-US markets active")
+            logger.info(f"[PALM] HOLIDAY MODE: {holiday_name} | Only crypto/non-US markets active")
             return active_markets, MarketSession.HOLIDAY
         
         # Check early close
@@ -297,7 +297,7 @@ class MarketSessionDetector:
             self._is_early_close = True
             self._early_close_reason = early_reason
             
-            logger.info(f"⏰ EARLY CLOSE: {early_reason}")
+            logger.info(f"[ALARM] EARLY CLOSE: {early_reason}")
         
         # Weekday - check which markets are open
         active_markets = ["Crypto"]  # Crypto always active
@@ -309,7 +309,7 @@ class MarketSessionDetector:
             # Check if market is closed due to early close
             if is_early and market_name == "NewYork":
                 if current_hour >= early_hour:
-                    logger.debug(f"🕐 {market_name} closed early at {early_hour} UTC")
+                    logger.debug(f"[CLOCK] {market_name} closed early at {early_hour} UTC")
                     continue
             
             if hours.open_utc < hours.close_utc:
@@ -389,7 +389,7 @@ class MarketSessionDetector:
             self._active_markets = ["Dashboard Watchlist"]
             self._last_update = now
             logger.info(
-                "🕐 DASHBOARD OVERRIDE: Weekend session filter bypassed for dashboard tickers: %s",
+                "[CLOCK] DASHBOARD OVERRIDE: Weekend session filter bypassed for dashboard tickers: %s",
                 ", ".join(filtered),
             )
             return filtered
@@ -415,7 +415,7 @@ class MarketSessionDetector:
             self._last_update = now
             
             logger.info(
-                f"🕐 WEEKEND MODE: Markets closed. Scanning {len(crypto_tickers)} crypto tickers only."
+                f"[CLOCK] WEEKEND MODE: Markets closed. Scanning {len(crypto_tickers)} crypto tickers only."
             )
             return crypto_tickers
         
@@ -443,7 +443,7 @@ class MarketSessionDetector:
         market_count = len(active_markets)
         
         logger.info(
-            f"🕐 SESSION DETECTED: {session_name} Session | "
+            f"[CLOCK] SESSION DETECTED: {session_name} Session | "
             f"Markets Open: {', '.join(active_markets)} | "
             f"Scanning {len(filtered)} tickers"
         )
@@ -549,28 +549,28 @@ class MarketSessionDetector:
         
         # Determine emoji and tag
         if primary_session == MarketSession.HOLIDAY:
-            emoji = "🌴"
+            emoji = "[PALM]"
             tag = f"Holiday Mode ({'US' if self._is_holiday_us else 'HK'})"
         elif primary_session == MarketSession.ALWAYS_OPEN:
-            emoji = "🟢"
+            emoji = "[GREEN]"
             tag = f"Always Open Override ({len(self._dashboard_tickers)} tickers)"
         elif primary_session == MarketSession.SATURDAY_AUDIT:
-            emoji = "📋"
+            emoji = "[CLIPBOARD]"
             tag = "Close-Only/Audit"
         elif primary_session == MarketSession.EARLY_CLOSE:
-            emoji = "⏰"
+            emoji = "[ALARM]"
             tag = f"Early Close ({self._early_close_reason})"
         elif primary_session == MarketSession.CRYPTO:
-            emoji = "₿"
+            emoji = "[BTC]"
             tag = "Crypto Only"
         else:
             session_emoji = {
-                MarketSession.ASIAN: "🌏",
-                MarketSession.EUROPEAN: "🇪🇺",
-                MarketSession.US: "🇺🇸",
-                MarketSession.CLOSED: "🔒",
+                MarketSession.ASIAN: "[EMOJI]",
+                MarketSession.EUROPEAN: "[EMOJI]",
+                MarketSession.US: "[EMOJI]",
+                MarketSession.CLOSED: "[LOCK]",
             }
-            emoji = session_emoji.get(primary_session, "🕐")
+            emoji = session_emoji.get(primary_session, "[CLOCK]")
             peak_tag = " [PEAK]" if is_peak else ""
             tag = f"{primary_session.value}{peak_tag}"
         
@@ -613,5 +613,5 @@ class MarketSessionDetector:
     def get_early_close_alert(self) -> str:
         """Get early close alert message if applicable."""
         if self._is_early_close:
-            return f"⏰ [ALERT] Market closing early: {self._early_close_reason}. Tightening Stop Losses."
+            return f"[ALARM] [ALERT] Market closing early: {self._early_close_reason}. Tightening Stop Losses."
         return ""

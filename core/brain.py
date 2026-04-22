@@ -7,7 +7,7 @@ import logging
 from typing import Any, Optional
 
 import config
-from core.swarm_consensus import OllamaSwarmConsensus
+from core.brain_swarm import OllamaSwarmConsensus
 
 try:
     from openai import OpenAI
@@ -35,20 +35,28 @@ class GeminiBrain:
         self.timeout = int(getattr(config, "GEMINI_TIMEOUT", 20) or 20)
         self._client = self._build_openrouter_client()
         self.predator = OllamaSwarmConsensus()
-        self.last_decision = self._fallback_decision("OpenRouter not queried yet.", self.model)
+        self.last_decision = self._fallback_decision(
+            "OpenRouter not queried yet.", self.model
+        )
 
     def is_available(self) -> bool:
         return bool(self.api_key and self._client is not None)
 
     def request_verdict(self, proposed_action: str, package: dict[str, Any]) -> str:
         """Return the exact trade approval string used by the scanner."""
-        return self.request_decision(proposed_action, package).get("verdict", "[SIGNAL] WAIT")
+        return self.request_decision(proposed_action, package).get(
+            "verdict", "[SIGNAL] WAIT"
+        )
 
-    def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
+    def request_decision(
+        self, proposed_action: str, package: dict[str, Any]
+    ) -> dict[str, Any]:
         """Return OpenRouter's verdict plus short reasoning for UI/execution use."""
         if not self.is_available():
             logger.warning("OpenRouter brain unavailable - switching to local Predator")
-            self.last_decision = self._use_predator_fallback(proposed_action, package, "OpenRouter unavailable.")
+            self.last_decision = self._use_predator_fallback(
+                proposed_action, package, "OpenRouter unavailable."
+            )
             return dict(self.last_decision)
 
         prompt = self._build_prompt(proposed_action, package)
@@ -60,7 +68,11 @@ class GeminiBrain:
         if api_key:
             return [str(api_key).strip()]
 
-        keys = [str(key).strip() for key in getattr(config, "OPENROUTER_API_KEYS", []) if str(key).strip()]
+        keys = [
+            str(key).strip()
+            for key in getattr(config, "OPENROUTER_API_KEYS", [])
+            if str(key).strip()
+        ]
         if keys:
             return keys
 
@@ -105,7 +117,9 @@ class GeminiBrain:
         package: dict[str, Any],
     ) -> dict[str, Any]:
         if not self.api_keys or self._client is None:
-            return self._use_predator_fallback(proposed_action, package, "OpenRouter client unavailable.")
+            return self._use_predator_fallback(
+                proposed_action, package, "OpenRouter client unavailable."
+            )
 
         last_error = "OpenRouter returned no usable response."
         for model_name in self.models:
@@ -129,19 +143,32 @@ class GeminiBrain:
                     )
                     choice = (response.choices or [None])[0]
                     message = getattr(choice, "message", None)
-                    content = self._extract_message_content(getattr(message, "content", ""))
-                    decision = self._parse_decision_text(content, proposed_action, model_name)
+                    content = self._extract_message_content(
+                        getattr(message, "content", "")
+                    )
+                    decision = self._parse_decision_text(
+                        content, proposed_action, model_name
+                    )
                     if decision:
                         return decision
                     last_error = f"Model {model_name} returned unparsable content."
-                    return self._use_predator_fallback(proposed_action, package, last_error)
+                    return self._use_predator_fallback(
+                        proposed_action, package, last_error
+                    )
                 except Exception as exc:  # pragma: no cover - SDK/network failure
                     last_error = self._describe_exception(exc)
                     if self._should_rotate_key(exc) and self._rotate_openrouter_key():
-                        logger.warning("OpenRouter key rotated after request failure: %s", last_error)
+                        logger.warning(
+                            "OpenRouter key rotated after request failure: %s",
+                            last_error,
+                        )
                         continue
-                    logger.warning("OpenRouter request failed for %s: %s", model_name, last_error)
-                    return self._use_predator_fallback(proposed_action, package, last_error)
+                    logger.warning(
+                        "OpenRouter request failed for %s: %s", model_name, last_error
+                    )
+                    return self._use_predator_fallback(
+                        proposed_action, package, last_error
+                    )
 
         return self._use_predator_fallback(proposed_action, package, last_error)
 
@@ -160,7 +187,9 @@ class GeminiBrain:
             return "\n".join(parts)
         return str(content or "")
 
-    def _parse_decision_text(self, text: str, proposed_action: str, model_name: str) -> Optional[dict[str, Any]]:
+    def _parse_decision_text(
+        self, text: str, proposed_action: str, model_name: str
+    ) -> Optional[dict[str, Any]]:
         raw_text = str(text or "").strip()
         if not raw_text:
             return None
@@ -170,8 +199,15 @@ class GeminiBrain:
         try:
             payload = json.loads(raw_text)
             if isinstance(payload, dict):
-                verdict_source = payload.get("verdict") or payload.get("signal") or payload.get("action") or raw_text
-                reasoning = str(payload.get("reasoning") or payload.get("reason") or "").strip()
+                verdict_source = (
+                    payload.get("verdict")
+                    or payload.get("signal")
+                    or payload.get("action")
+                    or raw_text
+                )
+                reasoning = str(
+                    payload.get("reasoning") or payload.get("reason") or ""
+                ).strip()
         except json.JSONDecodeError:
             reasoning = ""
 
@@ -201,7 +237,9 @@ class GeminiBrain:
             return f"[SIGNAL] {action}"
         return "[SIGNAL] WAIT"
 
-    def _fallback_decision(self, reasoning: str = "", model: Optional[str] = None) -> dict[str, Any]:
+    def _fallback_decision(
+        self, reasoning: str = "", model: Optional[str] = None
+    ) -> dict[str, Any]:
         return {
             "verdict": "[SIGNAL] WAIT",
             "reasoning": str(reasoning or "").strip()[:240],
@@ -219,7 +257,10 @@ class GeminiBrain:
     ) -> dict[str, Any]:
         logger.warning("[FALLBACK MODE] Local Predator engaged: %s", reason)
         fallback_package = dict(package or {})
-        fallback_package.setdefault("signal_type", package.get("signal_type") if isinstance(package, dict) else "UNKNOWN")
+        fallback_package.setdefault(
+            "signal_type",
+            package.get("signal_type") if isinstance(package, dict) else "UNKNOWN",
+        )
         decision = self.predator.request_decision(proposed_action, fallback_package)
         if not decision.get("reasoning"):
             decision["reasoning"] = str(reason)[:240]
@@ -271,13 +312,13 @@ class GeminiBrain:
         signal_type = str(package.get("signal_type", "UNKNOWN") or "UNKNOWN")
         return f"""You are OpenRouter, the final execution gate for an automated trading bot.
 
-Review the proposed {str(proposed_action or 'WAIT').upper()} and decide if the bot should strike now.
+Review the proposed {str(proposed_action or "WAIT").upper()} and decide if the bot should strike now.
 
 Market snapshot:
 - Signal type: {signal_type}
 - Last 10 OHLCV candles: {candles_json}
-- Current RSI: {package.get('rsi', 50.0)}
-- Current ATR: {package.get('atr', 0.0)}
+- Current RSI: {package.get("rsi", 50.0)}
+- Current ATR: {package.get("atr", 0.0)}
 - Primary liquidity label: {liquidity_label}
 - Nearest liquidity zone coordinates: {zones_json}
 

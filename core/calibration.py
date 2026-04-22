@@ -69,7 +69,7 @@ class CalibrationManager:
                 logger.error(f"Failed to load calibration: {e}")
                 self.coordinates = dict(DEFAULT_COORDINATES)
         else:
-            logger.info("No calibration file found — using defaults")
+            logger.info("No calibration file found [DASH] using defaults")
             self.coordinates = dict(DEFAULT_COORDINATES)
 
     def save(self):
@@ -145,7 +145,7 @@ class CalibrationWizard:
             self._gw = gw
             pyautogui.FAILSAFE = True
         except ImportError:
-            logger.error("pyautogui or pygetwindow not available — calibration disabled")
+            logger.error("pyautogui or pygetwindow not available [DASH] calibration disabled")
 
     def is_available(self) -> bool:
         return self._pyautogui is not None
@@ -194,7 +194,7 @@ class CalibrationWizard:
         Returns True if all points were calibrated.
         """
         if not self._pyautogui:
-            logger.error("Calibration not available — pyautogui missing")
+            logger.error("Calibration not available [DASH] pyautogui missing")
             return False
 
         logger.info("Starting full calibration sequence")
@@ -209,5 +209,5 @@ class CalibrationWizard:
             yield point, label
 
         self.manager.save()
-        logger.info("Calibration complete — all points saved")
+        logger.info("Calibration complete [DASH] all points saved")
         return True

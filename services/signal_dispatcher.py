@@ -116,7 +116,7 @@ class SignalDispatcher:
             self.last_signal_time = datetime.utcnow()
             
             logger.info(
-                f"📡 Signal received: {data['action']} {data['ticker']} "
+                f"[SAT] Signal received: {data['action']} {data['ticker']} "
                 f"(confidence: {confidence:.2f}, source: {data['source_ip']})"
             )
             
@@ -169,7 +169,7 @@ class SignalDispatcher:
             self.last_handshake_time = datetime.utcnow()
 
             logger.info(
-                "🤝 Handshake accepted from %s (%s)",
+                "[HANDSHAKE] Handshake accepted from %s (%s)",
                 metadata["brain"],
                 metadata["source_ip"],
             )

@@ -30,7 +30,7 @@ class CodeArchitect:
         self.last_generation = None
         self.liquidity_sweep_alerts = []  # Store recent sweep detections
 
-        logger.info("🏗️ Code Architect initialized")
+        logger.info("[EMOJI] Code Architect initialized")
 
     def detect_liquidity_sweep(
         self,
@@ -150,7 +150,7 @@ class CodeArchitect:
             self.liquidity_sweep_alerts = self.liquidity_sweep_alerts[-50:]
 
         logger.info(
-            f"🎯 Liquidity Sweep Detected: {sweep_type} | "
+            f"[TARGET] Liquidity Sweep Detected: {sweep_type} | "
             f"Direction: {signal_direction} | Conviction: {conviction:.2f} | "
             f"{'ALPHA TRADE' if rsi_divergence else 'Normal'}"
         )
@@ -212,7 +212,7 @@ box.new(bar_index[100], supplyTop_{i}, bar_index, supplyBot_{i},
             labels_code = f"""
 // AI Analysis Labels
 var label ai_header = label.new(bar_index, high, 
-    text="🤖 AI Co-Pilot Analysis\\nTimeframe: {timeframe}\\nGenerated: {timestamp}\\nAsset: {asset}", 
+    text="[ROBOT] AI Co-Pilot Analysis\\nTimeframe: {timeframe}\\nGenerated: {timestamp}\\nAsset: {asset}", 
     color=color.new(#000000, 80), 
     style=label.style_label_left, 
     textcolor=#00D4FF, 
@@ -222,7 +222,7 @@ label.set_xy(ai_header, bar_index, high)
         
         # Complete Pine Script v6
         pine_script = f"""//@version=6
-indicator("🤖 AI Co-Pilot - Institutional Zones [{timeframe}]", overlay=true, max_boxes_count=500)
+indicator("[ROBOT] AI Co-Pilot - Institutional Zones [{timeframe}]", overlay=true, max_boxes_count=500)
 
 // ============================================================
 // AI-Generated Institutional Demand & Retail Supply Zones
@@ -265,7 +265,7 @@ alertcondition(close < supplyBot_0 and close[1] >= supplyBot_0,
         }
         self.last_generation = script_id
         
-        logger.info(f"✅ Pine Script generated: {script_id}")
+        logger.info(f"[OK] Pine Script generated: {script_id}")
         return pine_script
 
     def generate_mql5_zones(
@@ -334,7 +334,7 @@ alertcondition(close < supplyBot_0 and close[1] >= supplyBot_0,
 int OnInit()
   {{
    // --- indicator short name
-   IndicatorSetString(INDICATOR_SHORTNAME, "🤖 AI Zones [{timeframe}]");
+   IndicatorSetString(INDICATOR_SHORTNAME, "[ROBOT] AI Zones [{timeframe}]");
    
    // --- Delete old objects
    ObjectsDeleteAll(0, "Demand_");
@@ -376,7 +376,7 @@ int OnCalculate(const int rates_total,
         }
         self.last_generation = script_id
         
-        logger.info(f"✅ MQL5 code generated: {script_id}")
+        logger.info(f"[OK] MQL5 code generated: {script_id}")
         return mql5_code
 
     def generate_multi_timeframe_analysis(
@@ -429,7 +429,7 @@ box.new(bar_index[100], tf_{tf.replace('H', 'h').replace('D', 'd')}_sup_{i}_top,
 """
         
         pine_script = f"""//@version=6
-indicator("🤖 AI Multi-TF Analysis [{primary_timeframe}]", overlay=true, max_boxes_count=500)
+indicator("[ROBOT] AI Multi-TF Analysis [{primary_timeframe}]", overlay=true, max_boxes_count=500)
 
 // ============================================================
 // Multi-Timeframe Institutional Zones
@@ -442,7 +442,7 @@ indicator("🤖 AI Multi-TF Analysis [{primary_timeframe}]", overlay=true, max_b
 
 // Multi-TF Summary Label
 var label mt_summary = label.new(bar_index, high, 
-    text="🤖 Multi-TF Analysis\\n" + 
+    text="[ROBOT] Multi-TF Analysis\\n" + 
     "Primary: {primary_timeframe}\\n" + 
     "Analyzed: {', '.join(analysis.keys())}\\n" +
     "Status: Strict Boss ACTIVE", 
@@ -463,7 +463,7 @@ label.set_xy(mt_summary, bar_index, high)
         }
         self.last_generation = script_id
         
-        logger.info(f"✅ Multi-timeframe script generated: {script_id}")
+        logger.info(f"[OK] Multi-timeframe script generated: {script_id}")
         return pine_script
 
     def get_last_script(self) -> Optional[Dict]:

@@ -33,7 +33,7 @@ async def main():
     signals = await scanner.scan_all_tickers()
     
     if signals:
-        print(f"\n🔥 Found {len(signals)} signal(s)!")
+        print(f"\n[FIRE] Found {len(signals)} signal(s)!")
         for s in signals:
             print(f"  - {s.ticker}: {s.signal_type} (strength: {s.strength:.2f})")
         
@@ -42,7 +42,7 @@ async def main():
         result = await scanner.process_signals(signals)
         
         if result:
-            print(f"\n🎯 AI Decision:")
+            print(f"\n[TARGET] AI Decision:")
             print(f"  Action: {result['action']}")
             print(f"  Confidence: {result['confidence']:.2f}")
             print(f"  Entry: ${result.get('entry_price', 0):.2f}")
@@ -50,12 +50,12 @@ async def main():
             print(f"  SL: ${result.get('stop_loss', 0):.2f}")
             print(f"  Reason: {result.get('reason', 'N/A')}")
         else:
-            print("\n⚠️ No trade signal generated (confidence too low)")
+            print("\n[WARN] No trade signal generated (confidence too low)")
     else:
-        print("\n⏸️ No signals detected this scan - markets are quiet")
+        print("\n[PAUSE] No signals detected this scan - markets are quiet")
         print("This is normal - the scanner checks every 10 seconds")
     
-    print("\n✅ Scanner test complete!")
+    print("\n[OK] Scanner test complete!")
     print("Check scanner_test.log for full details")
 
 if __name__ == "__main__":

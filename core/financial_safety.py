@@ -62,7 +62,7 @@ class FinancialSafetyManager:
         self.last_news_scrape_failed = False
         self.last_news_scrape_error = ""
         
-        logger.info("💰 Financial Safety Manager initialized")
+        logger.info("[MONEY] Financial Safety Manager initialized")
 
     def set_runtime_mode(self, mode: str) -> None:
         self.runtime_mode = str(mode or "TEACHER").upper().strip() or "TEACHER"
@@ -121,7 +121,7 @@ class FinancialSafetyManager:
                 self.current_mode = PositionSizeMode.MINIMAL
                 self.interventions_count += 1
                 logger.warning(
-                    f"🔴 MINIMAL LOT MODE ACTIVATED | "
+                    f"[RED] MINIMAL LOT MODE ACTIVATED | "
                     f"Daily loss: ${abs(daily_pnl):.2f} / ${max_daily_loss:.2f} "
                     f"({loss_ratio:.0%}) | "
                     f"Position size reduced to 5% of normal"
@@ -133,7 +133,7 @@ class FinancialSafetyManager:
                 self.current_mode = PositionSizeMode.MICRO
                 self.interventions_count += 1
                 logger.warning(
-                    f"🟡 MICRO-LOT MODE ACTIVATED | "
+                    f"[YELLOW] MICRO-LOT MODE ACTIVATED | "
                     f"Daily loss: ${abs(daily_pnl):.2f} / ${max_daily_loss:.2f} "
                     f"({loss_ratio:.0%}) | "
                     f"Position size reduced to 10% of normal"
@@ -145,7 +145,7 @@ class FinancialSafetyManager:
                 old_mode = self.current_mode
                 self.current_mode = PositionSizeMode.NORMAL
                 logger.info(
-                    f"🟢 RETURNED TO NORMAL MODE | "
+                    f"[GREEN] RETURNED TO NORMAL MODE | "
                     f"Daily loss ratio decreased to {loss_ratio:.0%}"
                 )
             return PositionSizeMode.NORMAL
@@ -188,7 +188,7 @@ class FinancialSafetyManager:
         
         if multiplier < 1.0:
             logger.info(
-                f"📏 Position size adjusted: ${base_amount:.2f} → ${safe_amount:.2f} "
+                f"[RULER] Position size adjusted: ${base_amount:.2f} -> ${safe_amount:.2f} "
                 f"({multiplier:.0%}) | Mode: {mode.value}"
             )
         
@@ -224,11 +224,11 @@ class FinancialSafetyManager:
             
             if self.upcoming_news:
                 logger.warning(
-                    f"📰 High-impact news detected: {len(self.upcoming_news)} events"
+                    f"[NEWS] High-impact news detected: {len(self.upcoming_news)} events"
                 )
                 for event in self.upcoming_news:
                     logger.warning(
-                        f"   • {event['time']} - {event['currency']} {event['event']} "
+                        f"   [BULLET] {event['time']} - {event['currency']} {event['event']} "
                         f"(Impact: {event['impact']})"
                     )
             
@@ -472,13 +472,13 @@ class FinancialSafetyManager:
         if should_pause and not self.trading_paused:
             self.trading_paused = True
             self.pause_reason = reason
-            logger.warning(f"🛑 TRADING PAUSED: {reason}")
+            logger.warning(f"[STOP] TRADING PAUSED: {reason}")
             
         elif not should_pause and self.trading_paused:
             self.trading_paused = False
             old_reason = self.pause_reason
             self.pause_reason = ""
-            logger.info(f"▶️ TRADING RESUMED: {old_reason}")
+            logger.info(f"[PLAY] TRADING RESUMED: {old_reason}")
 
     # ===================================================================
     # DASHBOARD DATA
@@ -502,4 +502,4 @@ class FinancialSafetyManager:
         self.current_mode = PositionSizeMode.NORMAL
         self.trading_paused = False
         self.pause_reason = ""
-        logger.info("🔄 Financial Safety Manager daily reset complete")
+        logger.info("[REFRESH] Financial Safety Manager daily reset complete")

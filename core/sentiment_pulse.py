@@ -116,7 +116,7 @@ class SentimentPulse:
         ]
         
         logger.info(
-            f"📡 Sentiment Pulse initialized: "
+            f"[SAT] Sentiment Pulse initialized: "
             f"Check interval={check_interval}s, "
             f"Red Folder window={red_folder_minutes_before}m before, "
             f"{red_folder_minutes_after}m after"
@@ -160,7 +160,7 @@ class SentimentPulse:
             self.last_check = time.time()
             
             logger.info(
-                f"📡 News scan complete: "
+                f"[SAT] News scan complete: "
                 f"{len(events)} events found, "
                 f"{len(high_impact)} high-impact, "
                 f"RPA {'PAUSED' if self.rpa_paused else 'ACTIVE'}"
@@ -257,12 +257,12 @@ class SentimentPulse:
                         f"{event.time_until_event().total_seconds() / 60:.0f} minutes. "
                         f"Market too choppy for RPA execution."
                     )
-                    logger.warning(f"🛑 RPA PAUSED: {self.rpa_pause_reason}")
+                    logger.warning(f"[STOP] RPA PAUSED: {self.rpa_pause_reason}")
                 return
         
         # No active events - resume RPA
         if self.rpa_paused:
-            logger.info("✅ RPA RESUMED: No high-impact events in window")
+            logger.info("[OK] RPA RESUMED: No high-impact events in window")
             self.rpa_paused = False
             self.rpa_pause_reason = ""
 
@@ -447,7 +447,7 @@ class SentimentPulse:
                 self.macro_history = self.macro_history[-100:]
 
             logger.info(
-                f"📊 Macro Indicators Updated: "
+                f"[CHART] Macro Indicators Updated: "
                 f"DXY={current_dxy:.2f} ({self.dxy_direction}), "
                 f"US10Y={current_us10y:.2f}% ({self.us10y_direction})"
             )
@@ -492,7 +492,7 @@ class SentimentPulse:
         """
         if signal_direction.upper() == "LONG" and self.dxy_direction == "UP":
             logger.info(
-                f"⚠️ Macro Confluence: DXY trending UP, "
+                f"[WARN] Macro Confluence: DXY trending UP, "
                 f"applying {self.crypto_long_penalty} penalty to Crypto LONG"
             )
             return self.crypto_long_penalty

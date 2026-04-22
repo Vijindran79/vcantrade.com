@@ -2,7 +2,7 @@
 import sys
 
 print("=" * 70)
-print("🔍 FINAL PRODUCTION VERIFICATION")
+print("[MAGNIFY] FINAL PRODUCTION VERIFICATION")
 print("=" * 70)
 print()
 
@@ -28,24 +28,24 @@ print("-" * 70)
 for mod in modules:
     try:
         __import__(mod)
-        print(f"  ✅ {mod}")
+        print(f"  [OK] {mod}")
     except Exception as e:
-        print(f"  ❌ {mod}: {e}")
+        print(f"  [FAIL] {mod}: {e}")
         errors.append(mod)
 
 print()
 print("=" * 70)
 
 if not errors:
-    print("✅ ALL 12 MODULES IMPORT SUCCESSFULLY")
-    print("✅ No syntax errors detected")
-    print("✅ All dependencies resolved")
+    print("[OK] ALL 12 MODULES IMPORT SUCCESSFULLY")
+    print("[OK] No syntax errors detected")
+    print("[OK] All dependencies resolved")
     print()
-    print("🎉 SYSTEM IS PRODUCTION READY!")
+    print("[CELEBRATE] SYSTEM IS PRODUCTION READY!")
     print("=" * 70)
     sys.exit(0)
 else:
-    print(f"❌ {len(errors)} module(s) failed to import:")
+    print(f"[FAIL] {len(errors)} module(s) failed to import:")
     for err in errors:
         print(f"  - {err}")
     print("=" * 70)

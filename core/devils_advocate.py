@@ -91,7 +91,7 @@ class DevilsAdvocate:
         self.timeout = config.LLM_TIMEOUT
         self.challenge_count = 0
         self.total_challenges = 0
-        logger.info("😈 Devil's Advocate agent initialized")
+        logger.info("[DEVIL] Devil's Advocate agent initialized")
 
     def challenge_trade(
         self,
@@ -139,7 +139,7 @@ class DevilsAdvocate:
 
             self.challenge_count += 1
             logger.info(
-                f"😈 Devil's Advocate: {result.get('rating', 'NEUTRAL')} - "
+                f"[DEVIL] Devil's Advocate: {result.get('rating', 'NEUTRAL')} - "
                 f"{len(result.get('rejection_reasons', []))} reasons found"
             )
 
@@ -169,7 +169,7 @@ class DevilsAdvocate:
 
         if neutral_rsi_reason:
             logger.info(
-                "😈 AUTONOMOUS OVERRIDE: clearing neutral-RSI Devil's Advocate penalty for %s because liquidity sweep is the primary driver",
+                "[DEVIL] AUTONOMOUS OVERRIDE: clearing neutral-RSI Devil's Advocate penalty for %s because liquidity sweep is the primary driver",
                 market_data.asset,
             )
             result["rating"] = "NEUTRAL"

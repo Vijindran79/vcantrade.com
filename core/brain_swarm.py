@@ -55,20 +55,20 @@ def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = No
 
     try:
         request_timeout = max(int(timeout or config.LLM_TIMEOUT), 90)
-        logger.info(f"🧠 Calling local brain: {config.OLLAMA_MODEL} (timeout={request_timeout}s)")
+        logger.info(f"[BRAIN] Calling local brain: {config.OLLAMA_MODEL} (timeout={request_timeout}s)")
         response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
         response.raise_for_status()
         data = response.json()
         raw_response = data.get('response', '{}')
         
-        logger.info(f"✅ Local brain responded successfully")
+        logger.info(f"[OK] Local brain responded successfully")
         return parse_json_response(raw_response)
     except requests.exceptions.ConnectionError:
-        logger.error("❌ Cannot connect to Ollama! Is Ollama running on localhost:11434?")
+        logger.error("[FAIL] Cannot connect to Ollama! Is Ollama running on localhost:11434?")
         logger.error("   Run: ollama serve")
         return {"error": "Ollama not running"}
     except Exception as e:
-        logger.error(f"❌ Local AI Error: {e}")
+        logger.error(f"[FAIL] Local AI Error: {e}")
         return {"error": str(e)}
 
 
@@ -123,7 +123,7 @@ class OllamaSwarmConsensus:
         self.model = config.OLLAMA_MODEL
         self.timeout = max(int(config.LLM_TIMEOUT), 90)
         self.devils_advocate = DevilsAdvocate()
-        logger.info(f"🧠 Local Brain initialized: {self.model} at {self.base_url}")
+        logger.info(f"[BRAIN] Local Brain initialized: {self.model} at {self.base_url}")
 
     def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
         """Fallback strike gate used when the cloud brain is unavailable."""
@@ -200,9 +200,9 @@ Return JSON only:
         skip_vibe_debate: bool = False,
     ) -> Tuple[LLMAnalysisOutput, DebateTranscript]:
         """Execute a 3-step Vibe -> Liquidity -> Closer analysis flow."""
-        logger.info(f"🧠 Analyzing {market_data.asset} with {self.model}")
+        logger.info(f"[BRAIN] Analyzing {market_data.asset} with {self.model}")
         if user_suggestion:
-            logger.info(f"🚀 User suggestion received: {user_suggestion}")
+            logger.info(f"[SUCCESS] User suggestion received: {user_suggestion}")
 
         from core.market_sessions import MarketSessionDetector
 
@@ -293,7 +293,7 @@ Return JSON only:
             "prompt_context": user_suggestion[:500],
         }
 
-        # 😈 Devil's Advocate Challenge - Find reasons NOT to take this trade
+        # [DEVIL] Devil's Advocate Challenge - Find reasons NOT to take this trade
         devils_challenge = self.devils_advocate.challenge_trade(
             market_data=market_data,
             suggested_action=output.action.value,
@@ -307,7 +307,7 @@ Return JSON only:
         if devils_challenge.get("rating") in ["STRONG_AVOID", "CAUTIOUS"]:
             penalty = devils_challenge.get("confidence_penalty", -0.10)
             logger.warning(
-                f"😈 Devil's Advocate PENALTY: {penalty:.2f} | "
+                f"[DEVIL] Devil's Advocate PENALTY: {penalty:.2f} | "
                 f"Reasons: {devils_challenge.get('rejection_reasons', [])}"
             )
 
@@ -361,7 +361,7 @@ Return JSON only:
             skip_reason=skip_reason,
         )
 
-        logger.info(f"✅ Analysis complete: {output.action.value} {market_data.asset}")
+        logger.info(f"[OK] Analysis complete: {output.action.value} {market_data.asset}")
         return output, transcript
 
     def _build_analysis_prompt(

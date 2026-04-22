@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 End-to-End System Test - Simulates full user experience
-Tests: Scanner → Signal → AI Analysis → Prop Firm Check → Execution → Position Monitoring
+Tests: Scanner -> Signal -> AI Analysis -> Prop Firm Check -> Execution -> Position Monitoring
 """
 import sys
 import io
@@ -31,21 +31,21 @@ def report_test(name, condition, detail=""):
     global PASS, FAIL
     if condition:
         PASS += 1
-        logger.info(f"✅ {name}")
+        logger.info(f"[OK] {name}")
         if detail:
-            logger.info(f"   → {detail}")
+            logger.info(f"   -> {detail}")
     else:
         FAIL += 1
-        logger.error(f"❌ {name}")
+        logger.error(f"[FAIL] {name}")
         if detail:
-            logger.error(f"   → {detail}")
+            logger.error(f"   -> {detail}")
 
 def warn(name, detail=""):
     global WARN
     WARN += 1
-    logger.warning(f"⚠️ {name}")
+    logger.warning(f"[WARN] {name}")
     if detail:
-        logger.warning(f"   → {detail}")
+        logger.warning(f"   -> {detail}")
 
 async def main():
     global PASS, FAIL
@@ -55,10 +55,10 @@ async def main():
     logger.info("=" * 70)
     logger.info("")
 
-    # ── TEST 1: Config ─────────────────────────────────────────────
-    logger.info("─" * 50)
+    # [EMOJI] TEST 1: Config [EMOJI]
+    logger.info("[EMOJI]" * 50)
     logger.info("TEST 1: Configuration")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     try:
         import config
         report_test("Config loaded", True)
@@ -70,11 +70,11 @@ async def main():
     except Exception as e:
         report_test("Config loaded", False, str(e))
 
-    # ── TEST 2: Ollama Connection ─────────────────────────────────
+    # [EMOJI] TEST 2: Ollama Connection [EMOJI]
     logger.info("")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     logger.info("TEST 2: Ollama AI Connection")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     try:
         import requests
         resp = requests.post(f"{config.OLLAMA_BASE_URL}/api/generate", json={
@@ -89,11 +89,11 @@ async def main():
     except Exception as e:
         report_test("Ollama responds", False, str(e))
 
-    # ── TEST 3: Scanner Detects Real Signals ──────────────────────
+    # [EMOJI] TEST 3: Scanner Detects Real Signals [EMOJI]
     logger.info("")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     logger.info("TEST 3: Market Scanner (Live Data)")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     try:
         from core.scanner import CloudScanner
         scanner = CloudScanner()
@@ -112,11 +112,11 @@ async def main():
         import traceback
         traceback.print_exc()
 
-    # ── TEST 4: AI Analysis Works ─────────────────────────────────
+    # [EMOJI] TEST 4: AI Analysis Works [EMOJI]
     logger.info("")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     logger.info("TEST 4: AI Analysis (Swarm Consensus)")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     try:
         from core.scanner import CloudScanner
         from core.models import MarketDataPoint
@@ -152,11 +152,11 @@ async def main():
         import traceback
         traceback.print_exc()
 
-    # ── TEST 5: Prop Firm Rule Engine ─────────────────────────────
+    # [EMOJI] TEST 5: Prop Firm Rule Engine [EMOJI]
     logger.info("")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     logger.info("TEST 5: Prop Firm Rule Engine (The Professor)")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     try:
         from core.prop_firm_rules import PropFirmRuleEngine, PropFirmName
         engine = PropFirmRuleEngine(PropFirmName.TOPSTEP)
@@ -181,11 +181,11 @@ async def main():
         import traceback
         traceback.print_exc()
 
-    # ── TEST 6: Position Monitoring ───────────────────────────────
+    # [EMOJI] TEST 6: Position Monitoring [EMOJI]
     logger.info("")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     logger.info("TEST 6: Position Lifecycle")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     try:
         position = {
             "asset": "BTC-USD",
@@ -217,11 +217,11 @@ async def main():
     except Exception as e:
         report_test("Position monitoring", False, str(e))
 
-    # ── TEST 7: Dashboard Imports ─────────────────────────────────
+    # [EMOJI] TEST 7: Dashboard Imports [EMOJI]
     logger.info("")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     logger.info("TEST 7: UI Components")
-    logger.info("─" * 50)
+    logger.info("[EMOJI]" * 50)
     try:
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance() or QApplication(sys.argv)
@@ -245,21 +245,21 @@ async def main():
         import traceback
         traceback.print_exc()
 
-    # ── SUMMARY ────────────────────────────────────────────────────
+    # [EMOJI] SUMMARY [EMOJI]
     logger.info("")
     logger.info("=" * 70)
     logger.info("FINAL RESULTS")
     logger.info("=" * 70)
     logger.info(f"Total Tests: {PASS + FAIL}")
-    logger.info(f"✅ Passed: {PASS}")
-    logger.info(f"❌ Failed: {FAIL}")
-    logger.info(f"⚠️ Warnings: {WARN}")
+    logger.info(f"[OK] Passed: {PASS}")
+    logger.info(f"[FAIL] Failed: {FAIL}")
+    logger.info(f"[WARN] Warnings: {WARN}")
     logger.info("")
     
     if FAIL == 0:
-        logger.info("🎉 ALL TESTS PASSED - SYSTEM IS PRODUCTION READY!")
+        logger.info("[CELEBRATE] ALL TESTS PASSED - SYSTEM IS PRODUCTION READY!")
     else:
-        logger.info(f"⚠️ {FAIL} test(s) failed - fixes needed")
+        logger.info(f"[WARN] {FAIL} test(s) failed - fixes needed")
     
     # Write report
     with open("e2e_report.txt", "w", encoding="utf-8") as f:

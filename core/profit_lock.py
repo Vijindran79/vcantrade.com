@@ -36,7 +36,7 @@ class WalkAwayProtocol:
         self.violations_logged = []
         
         logger.info(
-            f"🚶 Walk Away Protocol initialized: "
+            f"[WALK] Walk Away Protocol initialized: "
             f"Max Daily Loss={max_daily_loss_pct}%, "
             f"Shutdown={shutdown_hours}h"
         )
@@ -70,7 +70,7 @@ class WalkAwayProtocol:
                 "reason": self.shutdown_reason
             })
             
-            logger.critical(f"🛑 WALK AWAY TRIGGERED: {self.shutdown_reason}")
+            logger.critical(f"[STOP] WALK AWAY TRIGGERED: {self.shutdown_reason}")
             return True
         
         return False
@@ -86,7 +86,7 @@ class WalkAwayProtocol:
         
         if elapsed_hours >= self.shutdown_hours:
             logger.info(
-                f"✅ Walk Away Protocol cleared: "
+                f"[OK] Walk Away Protocol cleared: "
                 f"{elapsed_hours:.1f}h shutdown complete"
             )
             self.is_active = False
@@ -96,7 +96,7 @@ class WalkAwayProtocol:
         else:
             remaining = self.shutdown_hours - elapsed_hours
             logger.warning(
-                f"🚶 Walk Away ACTIVE: {remaining:.1f}h remaining"
+                f"[WALK] Walk Away ACTIVE: {remaining:.1f}h remaining"
             )
             return False
     
@@ -179,7 +179,7 @@ class ProfitLock:
         )
         
         logger.info(
-            f"🔒 Profit Lock initialized: "
+            f"[LOCK] Profit Lock initialized: "
             f"Target={daily_profit_target_pct}%, "
             f"Max Loss={daily_max_loss_pct}%, "
             f"BE Buffer={breakeven_buffer_pct}%"
@@ -219,7 +219,7 @@ class ProfitLock:
         })
         
         logger.info(
-            f"📊 Position added to Profit Lock: "
+            f"[CHART] Position added to Profit Lock: "
             f"{asset} @ ${entry_price:.2f}, SL=${stop_loss:.2f}"
         )
 
@@ -446,7 +446,7 @@ class ProfitLock:
 
         return {
             "new_stop": new_stop,
-            "reason": f"🛡️ {lookback_bars}-bar MNQ vacuum trail",
+            "reason": f"[SHIELD] {lookback_bars}-bar MNQ vacuum trail",
             "break_even_locked": False,
             "stop_locked": True,
         }
@@ -493,7 +493,7 @@ class ProfitLock:
                 actions["breakeven_level"] = self._calculate_breakeven_level()
                 
                 logger.info(
-                    f"🔒 PROFIT LOCK TRIGGERED: Daily P&L {daily_pnl_pct:.2f}% >= {self.daily_profit_target_pct}% "
+                    f"[LOCK] PROFIT LOCK TRIGGERED: Daily P&L {daily_pnl_pct:.2f}% >= {self.daily_profit_target_pct}% "
                     f"All stops moved to breakeven + {self.breakeven_buffer_pct}%"
                 )
         
@@ -510,8 +510,8 @@ class ProfitLock:
                 pos["stop_locked"] = True
                 
                 logger.info(
-                    f"🔒 Stop locked for {pos['asset']}: "
-                    f"${old_stop:.2f} → ${breakeven_level:.2f}"
+                    f"[LOCK] Stop locked for {pos['asset']}: "
+                    f"${old_stop:.2f} -> ${breakeven_level:.2f}"
                 )
         
         self.stops_adjusted = True
@@ -584,7 +584,7 @@ class ProfitLock:
         self.open_positions = []
         
         logger.info(
-            f"🔄 Daily reset: Starting balance ${self.daily_start_balance:.2f}"
+            f"[REFRESH] Daily reset: Starting balance ${self.daily_start_balance:.2f}"
         )
 
     def get_dashboard_summary(self) -> Dict:

@@ -358,7 +358,7 @@ The calibration module uses proper normalization. Clicks will work whether VPS i
 from core.llm_analyzer import call_local_brain
 
 # After:
-from core.swarm_consensus import call_local_brain
+from core.brain_swarm import call_local_brain
 ```
 
 **Impact**: Fixed import error, VisualConfirmation now functional

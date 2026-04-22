@@ -63,7 +63,7 @@ class VisionConfirmationDialog(QDialog):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setWindowTitle(f"👁️ Vision Confirmation: {self.signal_data['ticker']}")
+        self.setWindowTitle(f"[EYE] Vision Confirmation: {self.signal_data['ticker']}")
         self.setModal(True)
         self.setFixedSize(900, 700)
 
@@ -77,14 +77,14 @@ class VisionConfirmationDialog(QDialog):
         # Title
         ticker = self.signal_data["ticker"]
         action = self.signal_data["action"]
-        title = QLabel(f"👁️ Visual Chart Analysis: {action} {ticker}")
+        title = QLabel(f"[EYE] Visual Chart Analysis: {action} {ticker}")
         title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {CYAN};")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
         # Screenshot area
-        self.screenshot_label = QLabel("📸 Capturing chart screenshot...")
+        self.screenshot_label = QLabel("[CAMERA] Capturing chart screenshot...")
         self.screenshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.screenshot_label.setMinimumHeight(300)
         self.screenshot_label.setStyleSheet(f"""
@@ -109,7 +109,7 @@ class VisionConfirmationDialog(QDialog):
         vision_layout.setSpacing(8)
 
         # Status label
-        self.vision_status = QLabel("🔍 Analyzing chart patterns with vision model...")
+        self.vision_status = QLabel("[MAGNIFY] Analyzing chart patterns with vision model...")
         self.vision_status.setFont(QFont("Consolas", 11))
         self.vision_status.setStyleSheet(f"color: {ORANGE};")
         vision_layout.addWidget(self.vision_status)
@@ -143,7 +143,7 @@ class VisionConfirmationDialog(QDialog):
         """)
         verdict_layout = QVBoxLayout(self.verdict_box)
 
-        self.verdict_label = QLabel("⏳ Waiting for vision analysis...")
+        self.verdict_label = QLabel("[WAIT] Waiting for vision analysis...")
         self.verdict_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
         self.verdict_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.verdict_label.setStyleSheet(f"color: {CYAN};")
@@ -155,7 +155,7 @@ class VisionConfirmationDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
 
-        self.approve_btn = QPushButton("✅ CONFIRM & APPROVE")
+        self.approve_btn = QPushButton("[OK] CONFIRM & APPROVE")
         self.approve_btn.setMinimumHeight(40)
         self.approve_btn.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
         self.approve_btn.setStyleSheet(f"""
@@ -176,7 +176,7 @@ class VisionConfirmationDialog(QDialog):
         self.approve_btn.setEnabled(False)
         button_layout.addWidget(self.approve_btn)
 
-        self.skip_btn = QPushButton("⏭️ SKIP VISION & APPROVE")
+        self.skip_btn = QPushButton("[SKIP] SKIP VISION & APPROVE")
         self.skip_btn.setMinimumHeight(40)
         self.skip_btn.setFont(QFont("Consolas", 11))
         self.skip_btn.setStyleSheet(f"""
@@ -192,7 +192,7 @@ class VisionConfirmationDialog(QDialog):
         self.skip_btn.clicked.connect(self._on_skip_vision)
         button_layout.addWidget(self.skip_btn)
 
-        self.reject_btn = QPushButton("❌ REJECT")
+        self.reject_btn = QPushButton("[FAIL] REJECT")
         self.reject_btn.setMinimumHeight(40)
         self.reject_btn.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
         self.reject_btn.setStyleSheet(f"""
@@ -217,7 +217,7 @@ class VisionConfirmationDialog(QDialog):
         """Capture screenshot and analyze with vision model."""
         try:
             # Step 1: Capture screenshot via Browser Agent
-            self.vision_results.append("📸 Step 1: Capturing chart screenshot...")
+            self.vision_results.append("[CAMERA] Step 1: Capturing chart screenshot...")
             
             if self.browser_agent and self.browser_agent.is_running:
                 ticker = self.signal_data["ticker"]
@@ -226,22 +226,22 @@ class VisionConfirmationDialog(QDialog):
                 if result.get("screenshot"):
                     self.screenshot_base64 = result["screenshot"]
                     self._display_screenshot()
-                    self.vision_results.append("✅ Screenshot captured successfully")
+                    self.vision_results.append("[OK] Screenshot captured successfully")
                 else:
-                    self.vision_results.append("⚠️ Screenshot capture failed - proceeding with text analysis only")
+                    self.vision_results.append("[WARN] Screenshot capture failed - proceeding with text analysis only")
                     self.screenshot_base64 = None
             else:
-                self.vision_results.append("⚠️ Browser agent not available - using text-only analysis")
+                self.vision_results.append("[WARN] Browser agent not available - using text-only analysis")
                 self.screenshot_base64 = None
 
             # Step 2: Analyze with vision model
-            self.vision_results.append("\n🔍 Step 2: Analyzing RSI and MACD patterns...")
+            self.vision_results.append("\n[MAGNIFY] Step 2: Analyzing RSI and MACD patterns...")
             
             await self._analyze_with_vision()
 
         except Exception as e:
             logger.error(f"Vision analysis failed: {e}")
-            self.vision_results.append(f"❌ Vision analysis failed: {e}")
+            self.vision_results.append(f"[FAIL] Vision analysis failed: {e}")
             self._show_verdict("ERROR", "Vision analysis failed - manual confirmation required")
 
     async def _analyze_with_vision(self):
@@ -252,7 +252,7 @@ class VisionConfirmationDialog(QDialog):
             
             # If we have screenshot, use vision model
             if self.screenshot_base64:
-                self.vision_results.append("🧠 Sending to vision model for analysis...")
+                self.vision_results.append("[BRAIN] Sending to vision model for analysis...")
                 
                 # Call vision model (Qwen-VL or LLaVA)
                 result = await self._call_vision_model(prompt, self.screenshot_base64)
@@ -276,17 +276,17 @@ class VisionConfirmationDialog(QDialog):
                         self._show_verdict("WEAK", f"Weak visual confirmation (confidence: {vision_confidence:.0%})")
                         self.approve_btn.setEnabled(False)
                 else:
-                    self.vision_results.append(f"⚠️ Vision model failed: {result.get('error', 'Unknown error')}")
+                    self.vision_results.append(f"[WARN] Vision model failed: {result.get('error', 'Unknown error')}")
                     self._show_verdict("FAILED", "Vision analysis failed - use manual judgment")
             else:
                 # No screenshot - text-only analysis
-                self.vision_results.append("⚠️ No screenshot available - using text analysis only")
+                self.vision_results.append("[WARN] No screenshot available - using text analysis only")
                 self._show_verdict("TEXT_ONLY", "Text-only analysis - no visual confirmation")
                 self.approve_btn.setEnabled(True)
 
         except Exception as e:
             logger.error(f"Vision model analysis failed: {e}")
-            self.vision_results.append(f"❌ Vision model error: {e}")
+            self.vision_results.append(f"[FAIL] Vision model error: {e}")
             self._show_verdict("ERROR", "Vision model error - use manual judgment")
 
     def _build_vision_prompt(self) -> str:
@@ -383,7 +383,7 @@ Respond with ONLY JSON - no markdown, no explanations."""
                 """)
         except Exception as e:
             logger.error(f"Failed to display screenshot: {e}")
-            self.screenshot_label.setText(f"❌ Failed to display screenshot: {e}")
+            self.screenshot_label.setText(f"[FAIL] Failed to display screenshot: {e}")
 
     def _display_vision_results(self, result: dict):
         """Display vision analysis results."""
@@ -396,10 +396,10 @@ Respond with ONLY JSON - no markdown, no explanations."""
         
         rsi_color = GREEN if rsi_confirmed else RED
         self.vision_results.append(f"""
-<b>📊 RSI Analysis:</b>
+<b>[CHART] RSI Analysis:</b>
   Value: {rsi_val}
   Signal: <span style="color: {rsi_color}">{rsi_signal.upper()}</span>
-  Confirmed: {'✅' if rsi_confirmed else '❌'}
+  Confirmed: {'[OK]' if rsi_confirmed else '[FAIL]'}
 """)
         
         # MACD Analysis
@@ -408,9 +408,9 @@ Respond with ONLY JSON - no markdown, no explanations."""
         
         macd_color = GREEN if macd_confirmed else RED
         self.vision_results.append(f"""
-<b>📈 MACD Analysis:</b>
+<b>[UP] MACD Analysis:</b>
   Signal: <span style="color: {macd_color}">{macd_signal.upper()}</span>
-  Confirmed: {'✅' if macd_confirmed else '❌'}
+  Confirmed: {'[OK]' if macd_confirmed else '[FAIL]'}
 """)
         
         # Trend & Levels
@@ -419,7 +419,7 @@ Respond with ONLY JSON - no markdown, no explanations."""
         resistance = result.get("resistance_level", "N/A")
         
         self.vision_results.append(f"""
-<b>🎯 Key Levels:</b>
+<b>[TARGET] Key Levels:</b>
   Trend: {trend}
   Support: ${support if isinstance(support, str) else f'{support:.2f}'}
   Resistance: ${resistance if isinstance(resistance, str) else f'{resistance:.2f}'}
@@ -428,12 +428,12 @@ Respond with ONLY JSON - no markdown, no explanations."""
         # Notes
         notes = result.get("notes", "")
         if notes:
-            self.vision_results.append(f"\n<b>📝 Notes:</b> {notes}")
+            self.vision_results.append(f"\n<b>[NOTE] Notes:</b> {notes}")
         
         # Confidence
         confidence = result.get("confidence", 0.5)
         conf_color = GREEN if confidence > 0.7 else ORANGE if confidence > 0.5 else RED
-        self.vision_results.append(f'\n<b>🎯 Vision Confidence:</b> <span style="color: {conf_color}">{confidence:.0%}</span>')
+        self.vision_results.append(f'\n<b>[TARGET] Vision Confidence:</b> <span style="color: {conf_color}">{confidence:.0%}</span>')
 
     def _show_verdict(self, verdict: str, message: str):
         """Show final verdict from vision analysis."""
@@ -447,7 +447,7 @@ Respond with ONLY JSON - no markdown, no explanations."""
         }
         
         color = verdict_colors.get(verdict, GRAY)
-        self.verdict_label.setText(f"⏳ {message}")
+        self.verdict_label.setText(f"[WAIT] {message}")
         self.verdict_label.setStyleSheet(f"color: {color};")
         self.verdict_box.setStyleSheet(f"""
             background: rgba({', '.join(str(int(color[i:i+2], 16)) for i in (1, 3, 5))}, 0.1);

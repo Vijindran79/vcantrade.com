@@ -8,7 +8,7 @@ the Swarm for full debate when thresholds are breached.
 Rate-limit strategy:
 - Forex pairs: polled every 30s via yfinance (free, no key needed)
 - Crypto: polled every 15s via ccxt public endpoints (no key needed)
-- Assets are staggered — only 1-2 requests per second at peak
+- Assets are staggered [DASH] only 1-2 requests per second at peak
 - Baseline volumes computed with exponential moving average (EMA)
   so we adapt to session changes (London open, NY open, etc.)
 """
@@ -195,7 +195,7 @@ class WatchtowerScanner(QThread):
         try:
             import yfinance as yf
         except ImportError:
-            logger.debug("yfinance not installed — skipping Forex/Stock scan")
+            logger.debug("yfinance not installed [DASH] skipping Forex/Stock scan")
             return
 
         for asset_name, ticker_symbol in YFINANCE_WATCHLIST.items():
@@ -235,7 +235,7 @@ class WatchtowerScanner(QThread):
         try:
             import ccxt
         except ImportError:
-            logger.debug("ccxt not installed — skipping crypto scan")
+            logger.debug("ccxt not installed [DASH] skipping crypto scan")
             return
 
         try:
@@ -353,7 +353,7 @@ class WatchtowerScanner(QThread):
         self.alert_detected.emit(alert)
         logger.warning(
             f"WATCHTOWER ALERT: [{alert.severity}] {alert.alert_type} on "
-            f"{alert.asset} — {alert.reason}"
+            f"{alert.asset} [DASH] {alert.reason}"
         )
 
         # Build MarketDataPoint for Swarm handoff

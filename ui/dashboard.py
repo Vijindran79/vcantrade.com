@@ -187,12 +187,12 @@ class CommandCenter(QWidget):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(8)
 
-        title = QLabel("🚀 VcaniTrade AI")
+        title = QLabel("[SUCCESS] VcaniTrade AI")
         title.setStyleSheet(f"color: {CYAN}; font-size: 16px; font-weight: bold; font-family: 'Segoe UI';")
         layout.addWidget(title)
 
         # Transparency slider
-        trans_label = QLabel("🔍")
+        trans_label = QLabel("[MAGNIFY]")
         trans_label.setStyleSheet(f"color: {GRAY}; font-size: 12px;")
         layout.addWidget(trans_label)
 
@@ -209,7 +209,7 @@ class CommandCenter(QWidget):
         layout.addWidget(self.transparency_slider)
 
         # Pin/Unpin button (toggle always on top)
-        self.pin_btn = QPushButton("📌 PIN")
+        self.pin_btn = QPushButton("[PIN] PIN")
         self.pin_btn.setFixedWidth(65)
         self.pin_btn.setStyleSheet(f"""
             QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 4px;
@@ -257,20 +257,20 @@ class CommandCenter(QWidget):
         
         if self._always_on_top:
             self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-            self.pin_btn.setText("📌 PIN")
+            self.pin_btn.setText("[PIN] PIN")
             self.pin_btn.setStyleSheet(f"""
                 QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 4px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 4px 8px; }}
             """)
-            self.log("📌 Dashboard pinned to front")
+            self.log("[PIN] Dashboard pinned to front")
         else:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
-            self.pin_btn.setText("📌 UNPIN")
+            self.pin_btn.setText("[PIN] UNPIN")
             self.pin_btn.setStyleSheet(f"""
                 QPushButton {{ background: {ORANGE}; color: {BG_DARK}; border: none; border-radius: 4px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 4px 8px; }}
             """)
-            self.log("📌 Dashboard unpinned - can now go behind other windows")
+            self.log("[PIN] Dashboard unpinned - can now go behind other windows")
         
         self.show()  # Re-show to apply flag changes
 
@@ -279,7 +279,7 @@ class CommandCenter(QWidget):
         opacity = value / 100.0
         self.setWindowOpacity(opacity)
         if value < 80:
-            self.log(f"🔍 Transparency: {100 - value}% (you can see through the dashboard)")
+            self.log(f"[MAGNIFY] Transparency: {100 - value}% (you can see through the dashboard)")
 
     def set_bridge_status(self, status: str):
         """Update external brain bridge indicator in the header."""
@@ -289,13 +289,13 @@ class CommandCenter(QWidget):
             dot_color = NEON_GREEN
             border_color = NEON_GREEN
             text_color = NEON_GREEN
-            text = "🟢 BRIDGE ONLINE"
+            text = "[GREEN] BRIDGE ONLINE"
             shadow = "0 0 12px rgba(0,255,65,0.35)"
         elif normalized in {"lost", "heartbeat_lost", "warning"}:
             dot_color = BRIDGE_RED
             border_color = BRIDGE_RED
             text_color = BRIDGE_RED
-            text = "🔴 BRIDGE HEARTBEAT LOST"
+            text = "[RED] BRIDGE HEARTBEAT LOST"
             shadow = "0 0 10px rgba(255,77,79,0.20)"
         else:
             dot_color = GRAY
@@ -319,7 +319,7 @@ class CommandCenter(QWidget):
     # =================== ACCOUNT PANEL ===================
     def _build_account_panel(self) -> QWidget:
         """Account Balance, Equity, Daily P&L, Drawdown Tracking"""
-        panel = QGroupBox("💰 ACCOUNT (Top Step Funding)")
+        panel = QGroupBox("[MONEY] ACCOUNT (Top Step Funding)")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 1px solid {BORDER}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -412,7 +412,7 @@ class CommandCenter(QWidget):
     # =================== PROP FIRM COMPLIANCE PANEL ===================
     def _build_prop_firm_panel(self) -> QWidget:
         """Prop Firm Rule Compliance Panel (The "Professor")"""
-        panel = QGroupBox("🎓 PROP FIRM RULES (The Professor)")
+        panel = QGroupBox("[GRADUATE] PROP FIRM RULES (The Professor)")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 1px solid {BORDER}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -442,7 +442,7 @@ class CommandCenter(QWidget):
             self.firm_selector.setCurrentIndex(selector_index)
         firm_row.addWidget(self.firm_selector)
 
-        self.firm_status = QLabel("✅ COMPLIANT")
+        self.firm_status = QLabel("[OK] COMPLIANT")
         self.firm_status.setStyleSheet(f"color: {GREEN}; font-size: 12px; font-weight: bold; font-family: 'Consolas';")
         firm_row.addWidget(self.firm_status)
 
@@ -544,7 +544,7 @@ class CommandCenter(QWidget):
         """Update prop firm panel with compliance data."""
         # Update status
         can_trade = data.get("can_trade", True)
-        self.firm_status.setText("✅ COMPLIANT" if can_trade else "🛑 BLOCKED")
+        self.firm_status.setText("[OK] COMPLIANT" if can_trade else "[STOP] BLOCKED")
         self.firm_status.setStyleSheet(f"""
             color: {GREEN if can_trade else RED}; font-size: 12px; font-weight: bold; font-family: 'Consolas';
         """)
@@ -561,7 +561,7 @@ class CommandCenter(QWidget):
         # Update violations
         violations = data.get("violations", [])
         if violations:
-            self.violations_label.setText("⚠️ " + "\n".join(violations))
+            self.violations_label.setText("[WARN] " + "\n".join(violations))
         else:
             self.violations_label.setText("")
 
@@ -610,7 +610,7 @@ class CommandCenter(QWidget):
     # =================== CONTROL PANEL ===================
     def _build_control_panel(self) -> QWidget:
         """Trading Controls: Mode, Investment, Risk Settings"""
-        panel = QGroupBox("⚙️ TRADING CONTROLS")
+        panel = QGroupBox("[GEAR] TRADING CONTROLS")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 1px solid {BORDER}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -627,7 +627,7 @@ class CommandCenter(QWidget):
         mode_label.setStyleSheet(f"color: {GRAY}; font-size: 12px; font-weight: bold; font-family: 'Consolas';")
         mode_row.addWidget(mode_label)
 
-        self.btn_teacher = QPushButton("👨‍🏫 TEACHER (Approve Each)")
+        self.btn_teacher = QPushButton("[EMOJI] TEACHER (Approve Each)")
         self.btn_teacher.setCheckable(True)
         self.btn_teacher.setChecked(True)
         self.btn_teacher.setMinimumHeight(36)
@@ -638,7 +638,7 @@ class CommandCenter(QWidget):
         self.btn_teacher.clicked.connect(self._set_teacher_mode)
         mode_row.addWidget(self.btn_teacher)
 
-        self.btn_auto = QPushButton("🤖 AUTONOMOUS (Auto)")
+        self.btn_auto = QPushButton("[ROBOT] AUTONOMOUS (Auto)")
         self.btn_auto.setCheckable(True)
         self.btn_auto.setChecked(False)
         self.btn_auto.setMinimumHeight(36)
@@ -655,7 +655,7 @@ class CommandCenter(QWidget):
         invest_row = QHBoxLayout()
         invest_row.setSpacing(10)
 
-        inv_label = QLabel("💵 Default Investment ($):")
+        inv_label = QLabel("[CASH] Default Investment ($):")
         inv_label.setStyleSheet(f"color: {WHITE}; font-size: 12px; font-weight: bold; font-family: 'Consolas';")
         invest_row.addWidget(inv_label)
 
@@ -770,7 +770,7 @@ class CommandCenter(QWidget):
         self._apply_prop_firm_mode_state(initial=True)
 
         # Save Settings Button
-        save_btn = QPushButton("💾 Save Settings")
+        save_btn = QPushButton("[EMOJI] Save Settings")
         save_btn.setMinimumHeight(36)
         save_btn.setStyleSheet(f"""
             QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
@@ -830,7 +830,7 @@ class CommandCenter(QWidget):
         layout.setSpacing(8)
 
         # Header
-        header = QLabel("🧪 TEST EXECUTION (Verify Browser Clicking)")
+        header = QLabel("[TEST] TEST EXECUTION (Verify Browser Clicking)")
         header.setStyleSheet(f"color: {CYAN}; font-size: 12px; font-weight: bold; font-family: 'Consolas';")
         layout.addWidget(header)
 
@@ -839,7 +839,7 @@ class CommandCenter(QWidget):
         test_row.setSpacing(8)
 
         # Test Browser Click button
-        self.test_browser_btn = QPushButton("🌐 Test Browser")
+        self.test_browser_btn = QPushButton("[GLOBE] Test Browser")
         self.test_browser_btn.setMinimumHeight(32)
         self.test_browser_btn.setStyleSheet(f"""
             QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 6px;
@@ -850,7 +850,7 @@ class CommandCenter(QWidget):
         test_row.addWidget(self.test_browser_btn)
 
         # Force Test Trade button
-        self.force_test_btn = QPushButton("⚡ FORCE HAND TEST")
+        self.force_test_btn = QPushButton("[BOLT] FORCE HAND TEST")
         self.force_test_btn.setMinimumHeight(32)
         self.force_test_btn.setStyleSheet(f"""
             QPushButton {{ background: {ORANGE}; color: {BG_DARK}; border: none; border-radius: 6px;
@@ -888,7 +888,7 @@ class CommandCenter(QWidget):
         self.test_status.setStyleSheet(f"color: {ORANGE}; font-size: 10px; font-family: 'Consolas';")
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(100, lambda: self.test_browser_requested.emit())
-        self.log("🧪 TEST: Browser agent click test requested")
+        self.log("[TEST] TEST: Browser agent click test requested")
 
     def _force_test_trade(self):
         """Force a visible RPA hand-move diagnostic against the active TradingView chart."""
@@ -896,7 +896,7 @@ class CommandCenter(QWidget):
         self.test_status.setStyleSheet(f"color: {ORANGE}; font-size: 10px; font-family: 'Consolas';")
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(100, lambda: self.force_test_trade_requested.emit())
-        self.log("⚡ FORCE HAND TEST: visible TradingView hand-move requested")
+        self.log("[BOLT] FORCE HAND TEST: visible TradingView hand-move requested")
 
     def _toggle_dry_run(self):
         """Toggle dry run mode."""
@@ -907,14 +907,14 @@ class CommandCenter(QWidget):
                 QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
             """)
-            self.log("✅ DRY RUN: ON - Paper trading mode")
+            self.log("[OK] DRY RUN: ON - Paper trading mode")
         else:
             self.dry_run_btn.setText("DRY RUN: OFF")
             self.dry_run_btn.setStyleSheet(f"""
                 QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 6px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
             """)
-            self.log("⚠️ DRY RUN: OFF - Live trading mode (CAUTION!)")
+            self.log("[WARN] DRY RUN: OFF - Live trading mode (CAUTION!)")
 
     def _apply_auto_risk_state(self, initial: bool = False):
         """Toggle manual TP/SL inputs against structural Profit Lock risk logic."""
@@ -928,7 +928,7 @@ class CommandCenter(QWidget):
                 QPushButton:hover {{ background: #2ea043; }}
             """)
             if not initial:
-                self.log("🧠 AUTO-RISK engaged - fixed TP/SL ignored, structural Profit Lock logic in command")
+                self.log("[BRAIN] AUTO-RISK engaged - fixed TP/SL ignored, structural Profit Lock logic in command")
         else:
             self.auto_risk_btn.setStyleSheet(f"""
                 QPushButton {{ background: {BG_INPUT}; color: {ORANGE}; border: 1px solid {ORANGE}; border-radius: 6px;
@@ -937,7 +937,7 @@ class CommandCenter(QWidget):
             """)
             if not initial:
                 self.log(
-                    f"🎯 AUTO-RISK disabled - using fixed TP {self.tp_input.value():.1f}% / SL {self.sl_input.value():.1f}%"
+                    f"[TARGET] AUTO-RISK disabled - using fixed TP {self.tp_input.value():.1f}% / SL {self.sl_input.value():.1f}%"
                 )
 
     def _toggle_auto_risk(self):
@@ -958,7 +958,7 @@ class CommandCenter(QWidget):
             self.prop_firm_mode_status.setText("Max Lots: 1 | Human Latency: ON | Daily Loss: $150")
             self.prop_firm_mode_status.setStyleSheet(f"color: {ORANGE}; font-size: 11px; font-family: 'Consolas';")
             if not initial:
-                self.log("🎓 Prop Firm Mode ON - Max lots 1, human latency enabled, daily loss capped at $150")
+                self.log("[GRADUATE] Prop Firm Mode ON - Max lots 1, human latency enabled, daily loss capped at $150")
         else:
             restore_value = self._manual_max_loss_value if self._manual_max_loss_value > 0 else 500.0
             self.max_loss_input.setEnabled(True)
@@ -972,7 +972,7 @@ class CommandCenter(QWidget):
             self.prop_firm_mode_status.setText("Manual limits active")
             self.prop_firm_mode_status.setStyleSheet(f"color: {GRAY}; font-size: 11px; font-family: 'Consolas';")
             if not initial:
-                self.log("🎓 Prop Firm Mode OFF - manual limits restored")
+                self.log("[GRADUATE] Prop Firm Mode OFF - manual limits restored")
 
     def _toggle_prop_firm_mode(self):
         """Force strict prop-firm-safe execution settings when enabled."""
@@ -986,7 +986,7 @@ class CommandCenter(QWidget):
     # =================== WATCHLIST PANEL ===================
     def _build_watchlist_panel(self) -> QWidget:
         """Watchlist Management - Add/Remove Tickers to Monitor"""
-        panel = QGroupBox("📊 WATCHLIST (Monitored Instruments)")
+        panel = QGroupBox("[CHART] WATCHLIST (Monitored Instruments)")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 1px solid {BORDER}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -1014,7 +1014,7 @@ class CommandCenter(QWidget):
         self.ticker_input.returnPressed.connect(self._add_ticker)
         add_row.addWidget(self.ticker_input)
 
-        add_btn = QPushButton("➕ Add")
+        add_btn = QPushButton("[EMOJI] Add")
         add_btn.setMinimumHeight(34)
         add_btn.setStyleSheet(f"""
             QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 6px;
@@ -1024,7 +1024,7 @@ class CommandCenter(QWidget):
         add_btn.clicked.connect(self._add_ticker)
         add_row.addWidget(add_btn)
 
-        remove_btn = QPushButton("➖ Remove Selected")
+        remove_btn = QPushButton("[EMOJI] Remove Selected")
         remove_btn.setMinimumHeight(34)
         remove_btn.setStyleSheet(f"""
             QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 6px;
@@ -1071,7 +1071,7 @@ class CommandCenter(QWidget):
         # Watchlist table
         self.watchlist_table = QTableWidget()
         self.watchlist_table.setColumnCount(4)
-        self.watchlist_table.setHorizontalHeaderLabels(["✓", "Ticker", "Last Signal", "Status"])
+        self.watchlist_table.setHorizontalHeaderLabels(["[OK]", "Ticker", "Last Signal", "Status"])
         # Column width optimization: Slim Ticker/Status, wide Logic/Reasoning
         self.watchlist_table.setColumnWidth(0, 30)   # Checkmark - very slim
         self.watchlist_table.setColumnWidth(1, 80)   # Ticker - slim
@@ -1095,7 +1095,7 @@ class CommandCenter(QWidget):
     # =================== POSITIONS PANEL ===================
     def _build_positions_panel(self) -> QWidget:
         """Live Positions with Real-Time P&L"""
-        panel = QGroupBox("📈 LIVE POSITIONS (Auto-Monitored)")
+        panel = QGroupBox("[UP] LIVE POSITIONS (Auto-Monitored)")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 1px solid {BORDER}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -1151,7 +1151,7 @@ class CommandCenter(QWidget):
     # =================== TRADE LOG PANEL ===================
     def _build_trade_log_panel(self) -> QWidget:
         """Trade History & Activity Log"""
-        panel = QGroupBox("📜 TRADE LOG & ACTIVITY")
+        panel = QGroupBox("[EMOJI] TRADE LOG & ACTIVITY")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 1px solid {BORDER}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -1202,7 +1202,7 @@ class CommandCenter(QWidget):
         action_btn_row = QHBoxLayout()
         action_btn_row.setSpacing(8)
 
-        clear_log_btn = QPushButton("🗑️ Clear Log")
+        clear_log_btn = QPushButton("[EMOJI] Clear Log")
         clear_log_btn.setMinimumHeight(32)
         clear_log_btn.setStyleSheet(f"""
             QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
@@ -1212,7 +1212,7 @@ class CommandCenter(QWidget):
         clear_log_btn.clicked.connect(self._clear_activity_log)
         action_btn_row.addWidget(clear_log_btn)
 
-        export_btn = QPushButton("📊 Export Trade History")
+        export_btn = QPushButton("[CHART] Export Trade History")
         export_btn.setMinimumHeight(32)
         export_btn.setStyleSheet(f"""
             QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 6px;
@@ -1230,7 +1230,7 @@ class CommandCenter(QWidget):
     # =================== CO-PILOT COMMAND BRIDGE ===================
     def _build_copilot_chat_panel(self) -> QWidget:
         """Co-Pilot Command Bridge - Human-AI Collaborative Trading"""
-        panel = QGroupBox("🚀 CO-PILOT COMMAND BRIDGE (Talk to Your AI)")
+        panel = QGroupBox("[SUCCESS] CO-PILOT COMMAND BRIDGE (Talk to Your AI)")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 2px solid {CYAN}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -1241,7 +1241,7 @@ class CommandCenter(QWidget):
         layout.setSpacing(8)
 
         # Instruction text
-        instruction = QLabel("💡 Examples: 'Switch to 2H BTC longs' | 'News just dropped for ETH, analyze' | 'Force buy BTC now'")
+        instruction = QLabel("[IDEA] Examples: 'Switch to 2H BTC longs' | 'News just dropped for ETH, analyze' | 'Force buy BTC now'")
         instruction.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas'; font-style: italic;")
         instruction.setWordWrap(True)
         layout.addWidget(instruction)
@@ -1255,7 +1255,7 @@ class CommandCenter(QWidget):
                       border-radius: 6px; font-family: 'Consolas'; font-size: 11px; padding: 8px; }}
         """)
         # Add welcome message
-        self.copilot_chat.append(f'<span style="color:{CYAN}; font-weight:bold;">🤖 AI Co-Pilot:</span> <span style="color:{GREEN};">Ready for your commands. I\'m your Strict Boss - I\'ll push back if your idea conflicts with the data.</span>')
+        self.copilot_chat.append(f'<span style="color:{CYAN}; font-weight:bold;">[ROBOT] AI Co-Pilot:</span> <span style="color:{GREEN};">Ready for your commands. I\'m your Strict Boss - I\'ll push back if your idea conflicts with the data.</span>')
         layout.addWidget(self.copilot_chat)
 
         # Input row
@@ -1272,7 +1272,7 @@ class CommandCenter(QWidget):
         input_row.addWidget(self.copilot_input, stretch=1)
 
         # Send button
-        send_btn = QPushButton("📤 Send")
+        send_btn = QPushButton("[EMOJI] Send")
         send_btn.setMinimumHeight(40)
         send_btn.setFixedWidth(80)
         send_btn.setStyleSheet(f"""
@@ -1290,7 +1290,7 @@ class CommandCenter(QWidget):
         status_row = QHBoxLayout()
         status_row.setSpacing(15)
 
-        self.copilot_status = QLabel("🟢 AI Status: Ready")
+        self.copilot_status = QLabel("[GREEN] AI Status: Ready")
         self.copilot_status.setStyleSheet(f"color: {GREEN}; font-size: 11px; font-weight: bold; font-family: 'Consolas';")
         status_row.addWidget(self.copilot_status)
 
@@ -1298,7 +1298,7 @@ class CommandCenter(QWidget):
         self.copilot_mode.setStyleSheet(f"color: {CYAN}; font-size: 11px; font-family: 'Consolas';")
         status_row.addWidget(self.copilot_mode)
 
-        self.vibe_status = QLabel("🟡 Vibe Status: Standby")
+        self.vibe_status = QLabel("[YELLOW] Vibe Status: Standby")
         self.vibe_status.setStyleSheet(f"color: {ORANGE}; font-size: 11px; font-weight: bold; font-family: 'Consolas';")
         status_row.addWidget(self.vibe_status)
 
@@ -1314,7 +1314,7 @@ class CommandCenter(QWidget):
             return
 
         # Display user message
-        self.copilot_chat.append(f'<span style="color:{ORANGE}; font-weight:bold;">👤 You:</span> {command}')
+        self.copilot_chat.append(f'<span style="color:{ORANGE}; font-weight:bold;">[EMOJI] You:</span> {command}')
         
         # Emit signal to main app for processing
         self.user_command_sent.emit(command)
@@ -1323,11 +1323,11 @@ class CommandCenter(QWidget):
         self.copilot_input.clear()
         
         # Log
-        self.log(f"🚀 Co-Pilot command sent: {command}")
+        self.log(f"[SUCCESS] Co-Pilot command sent: {command}")
 
     def add_copilot_response(self, thoughts: str, verdict: str, adjustment: str = ""):
         """Add AI response to copilot chat in [THOUGHTS], [VERDICT], [ADJUSTMENT] format"""
-        self.copilot_chat.append(f'<span style="color:{CYAN}; font-weight:bold;">🤖 AI Co-Pilot:</span>')
+        self.copilot_chat.append(f'<span style="color:{CYAN}; font-weight:bold;">[ROBOT] AI Co-Pilot:</span>')
         self.copilot_chat.append(f'<span style="color:{YELLOW};">[THOUGHTS]</span> {thoughts}')
         self.copilot_chat.append(f'<span style="color:{GREEN};">[VERDICT]</span> {verdict}')
         if adjustment:
@@ -1341,7 +1341,7 @@ class CommandCenter(QWidget):
 
     def update_copilot_status(self, status: str):
         """Update AI Co-Pilot status indicator"""
-        self.copilot_status.setText(f"🟢 AI Status: {status}")
+        self.copilot_status.setText(f"[GREEN] AI Status: {status}")
 
     def update_copilot_mode(self, mode: str, color: str = CYAN):
         """Update the active command posture shown in the Co-Pilot bridge."""
@@ -1351,19 +1351,19 @@ class CommandCenter(QWidget):
     def update_vibe_status(self, status: str, mode: str = "standby"):
         """Update Vibe shield status indicator."""
         normalized = str(mode or "standby").lower()
-        icon = "🟡"
+        icon = "[YELLOW]"
         color = ORANGE
         if normalized == "active":
-            icon = "🟢"
+            icon = "[GREEN]"
             color = GREEN
         elif normalized == "fallback":
-            icon = "🟡"
+            icon = "[YELLOW]"
             color = YELLOW
         elif normalized == "standby":
-            icon = "🟡"
+            icon = "[YELLOW]"
             color = ORANGE
         elif normalized == "offline":
-            icon = "⚪"
+            icon = "[WHITE]"
             color = GRAY
 
         self.vibe_status.setText(f"{icon} Vibe Status: {status}")
@@ -1374,7 +1374,7 @@ class CommandCenter(QWidget):
     # =================== INSTITUTIONAL GOVERNOR (STAGE 3) ===================
     def _build_institutional_governor_panel(self) -> QWidget:
         """Stage 3: Institutional Governor & Risk Architect"""
-        panel = QGroupBox("🏛️ INSTITUTIONAL GOVERNOR (Stage 3 Risk Management)")
+        panel = QGroupBox("[GOVERN] INSTITUTIONAL GOVERNOR (Stage 3 Risk Management)")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 2px solid {ORANGE}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -1433,7 +1433,7 @@ class CommandCenter(QWidget):
         rpa_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
         rpa_layout.addWidget(rpa_label)
 
-        self.rpa_status_label = QLabel("✅ ENABLED")
+        self.rpa_status_label = QLabel("[OK] ENABLED")
         self.rpa_status_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
         rpa_layout.addWidget(self.rpa_status_label)
         bottom_row.addLayout(rpa_layout)
@@ -1444,7 +1444,7 @@ class CommandCenter(QWidget):
         walk_label.setStyleSheet(f"color: {GRAY}; font-size: 10px; font-family: 'Consolas';")
         walk_layout.addWidget(walk_label)
 
-        self.walk_away_label = QLabel("✅ ACTIVE")
+        self.walk_away_label = QLabel("[OK] ACTIVE")
         self.walk_away_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
         walk_layout.addWidget(self.walk_away_label)
         bottom_row.addLayout(walk_layout)
@@ -1501,7 +1501,7 @@ class CommandCenter(QWidget):
     # =================== META-COGNITION (STAGE 4) ===================
     def _build_meta_cognition_panel(self) -> QWidget:
         """Stage 4: Meta-Cognition & Alpha Hunter - Learning Progress & Alpha Score"""
-        panel = QGroupBox("🧠 META-COGNITION (Stage 4 Self-Learning)")
+        panel = QGroupBox("[BRAIN] META-COGNITION (Stage 4 Self-Learning)")
         panel.setStyleSheet(f"""
             QGroupBox {{ color: {CYAN}; font-size: 14px; font-weight: bold; font-family: 'Segoe UI';
                         border: 2px solid {CYAN}; border-radius: 8px; margin-top: 8px; padding-top: 12px; }}
@@ -1656,13 +1656,13 @@ class CommandCenter(QWidget):
         # Color based on alpha score
         if alpha_score >= 70:
             alpha_color = GREEN
-            alpha_desc = "Excellent learning 🚀"
+            alpha_desc = "Excellent learning [SUCCESS]"
         elif alpha_score >= 50:
             alpha_color = ORANGE
             alpha_desc = "Learning in progress..."
         else:
             alpha_color = RED
-            alpha_desc = "Needs improvement ⚠️"
+            alpha_desc = "Needs improvement [WARN]"
 
         self.alpha_score_label.setStyleSheet(f"color: {alpha_color}; font-size: 24px; font-weight: bold; font-family: 'Consolas';")
         self.alpha_desc_label.setText(alpha_desc)
@@ -1741,26 +1741,26 @@ class CommandCenter(QWidget):
         # RPA Status
         rpa_enabled = data.get("rpa_enabled", True)
         if rpa_enabled:
-            self.rpa_status_label.setText("✅ ENABLED")
+            self.rpa_status_label.setText("[OK] ENABLED")
             self.rpa_status_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
         else:
-            self.rpa_status_label.setText("🛑 PAUSED")
+            self.rpa_status_label.setText("[STOP] PAUSED")
             self.rpa_status_label.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
 
         # Walk Away Protocol
         walk_away_active = data.get("walk_away_can_trade", True)
         if walk_away_active:
-            self.walk_away_label.setText("✅ ACTIVE")
+            self.walk_away_label.setText("[OK] ACTIVE")
             self.walk_away_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
         else:
             remaining = data.get("walk_away_remaining_hours", 0)
-            self.walk_away_label.setText(f"🚶 SHUTDOWN ({remaining:.1f}h)")
+            self.walk_away_label.setText(f"[WALK] SHUTDOWN ({remaining:.1f}h)")
             self.walk_away_label.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
 
         # Profit Lock Status
         stops_locked = data.get("stops_locked", False)
         if stops_locked:
-            self.profit_lock_label.setText("🔒 LOCKED")
+            self.profit_lock_label.setText("[LOCK] LOCKED")
             self.profit_lock_label.setStyleSheet(f"color: {GREEN}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
         else:
             self.profit_lock_label.setText("UNLOCKED")
@@ -1794,11 +1794,11 @@ class CommandCenter(QWidget):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(12)
 
-        warning = QLabel("⚠️ EMERGENCY:")
+        warning = QLabel("[WARN] EMERGENCY:")
         warning.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
         layout.addWidget(warning)
 
-        kill_btn = QPushButton("🛑 KILL SWITCH - STOP ALL TRADING")
+        kill_btn = QPushButton("[STOP] KILL SWITCH - STOP ALL TRADING")
         kill_btn.setMinimumHeight(44)
         kill_btn.setStyleSheet(f"""
             QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 8px;
@@ -1810,7 +1810,7 @@ class CommandCenter(QWidget):
         layout.addWidget(kill_btn, stretch=1)
 
         # Reset button
-        self.reset_kill_btn = QPushButton("🔄 RESET")
+        self.reset_kill_btn = QPushButton("[REFRESH] RESET")
         self.reset_kill_btn.setMinimumHeight(44)
         self.reset_kill_btn.setFixedWidth(120)
         self.reset_kill_btn.setStyleSheet(f"""
@@ -1953,10 +1953,10 @@ class CommandCenter(QWidget):
         pause_reason = safety_data.get("pause_reason", "")
         
         if paused:
-            self.log(f"🛑 Trading paused: {pause_reason}")
+            self.log(f"[STOP] Trading paused: {pause_reason}")
         elif mode != "normal":
             multiplier = safety_data.get("position_multiplier", 1.0)
-            self.log(f"📏 Position mode: {mode} ({multiplier:.0%} size)")
+            self.log(f"[RULER] Position mode: {mode} ({multiplier:.0%} size)")
 
     # =================== EVENT HANDLERS ===================
 
@@ -1979,7 +1979,7 @@ class CommandCenter(QWidget):
             f"font-size: 12px; font-weight: bold; font-family: 'Consolas';"
         )
         self.mode_changed.emit("TEACHER")
-        self.log("👨‍🏫 Switched to TEACHER MODE - Manual approval required")
+        self.log("[EMOJI] Switched to TEACHER MODE - Manual approval required")
 
     def _set_autonomous_mode(self):
         self._mode = "AUTONOMOUS"
@@ -2000,14 +2000,14 @@ class CommandCenter(QWidget):
             f"font-size: 12px; font-weight: bold; font-family: 'Consolas';"
         )
         self.mode_changed.emit("AUTONOMOUS")
-        self.log("🤖 Switched to AUTONOMOUS MODE - Auto-execution enabled")
+        self.log("[ROBOT] Switched to AUTONOMOUS MODE - Auto-execution enabled")
 
     def _add_ticker(self):
         ticker = settings_manager.normalize_ticker(self.ticker_input.text())
         
         # Validate ticker is not empty
         if not ticker:
-            self.log("⚠️ Please enter a valid ticker symbol")
+            self.log("[WARN] Please enter a valid ticker symbol")
             return
             
         current_watchlist = self._collect_watchlist_from_inputs()
@@ -2015,19 +2015,19 @@ class CommandCenter(QWidget):
         if ticker not in current_watchlist:
             empty_slot = next((slot for slot in self.watchlist_slots if not slot.text().strip()), None)
             if empty_slot is None:
-                self.log("⚠️ All 10 watchlist slots are full")
+                self.log("[WARN] All 10 watchlist slots are full")
                 return
             empty_slot.setText(ticker)
             self._sync_watchlist_from_inputs()
             self.ticker_input.clear()
-            self.log(f"➕ Added {ticker} to watchlist")
+            self.log(f"[EMOJI] Added {ticker} to watchlist")
         elif ticker in current_watchlist:
-            self.log(f"⚠️ {ticker} already in watchlist")
+            self.log(f"[WARN] {ticker} already in watchlist")
 
     def _remove_ticker(self):
         selected = self.watchlist_table.selectedItems()
         if not selected:
-            self.log("⚠️ Select a ticker to remove")
+            self.log("[WARN] Select a ticker to remove")
             return
         
         row = selected[0].row()
@@ -2039,7 +2039,7 @@ class CommandCenter(QWidget):
                     slot.clear()
                     break
             self._sync_watchlist_from_inputs()
-            self.log(f"➖ Removed {ticker} from watchlist")
+            self.log(f"[EMOJI] Removed {ticker} from watchlist")
 
     def _queue_watchlist_sync(self):
         """Debounce rapid text edits from the 10 dashboard slots."""
@@ -2095,7 +2095,7 @@ class CommandCenter(QWidget):
             status_color = QColor(str(row_state.get("status_color", CYAN)))
 
             # Checkbox
-            check = QTableWidgetItem("✅")
+            check = QTableWidgetItem("[OK]")
             check.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.watchlist_table.setItem(i, 0, check)
             
@@ -2158,13 +2158,13 @@ class CommandCenter(QWidget):
     ):
         """Update the watchlist table row with live status text/icon."""
         status_map = {
-            "scanning": ("🟢 Scanning", QColor(GREEN)),
-            "analyzing_liquidity": ("🟡 Analyzing Liquidity", QColor(ORANGE)),
-            "trade_rejected": ("🔴 Trade Rejected", QColor(RED)),
+            "scanning": ("[GREEN] Scanning", QColor(GREEN)),
+            "analyzing_liquidity": ("[YELLOW] Analyzing Liquidity", QColor(ORANGE)),
+            "trade_rejected": ("[RED] Trade Rejected", QColor(RED)),
             "rsi_veto_overbought": ("[VETO] RSI OVERBOUGHT", QColor(RED)),
             "rsi_veto_oversold": ("[VETO] RSI OVERSOLD", QColor(RED)),
-            "awaiting_strike": ("⚡ Strike Ready", QColor(GREEN)),
-            "executing": ("🦁 Striking", QColor(GREEN)),
+            "awaiting_strike": ("[BOLT] Strike Ready", QColor(GREEN)),
+            "executing": ("[LION] Striking", QColor(GREEN)),
             "monitoring": ("Monitoring", QColor(CYAN)),
         }
         label, color = status_map.get(status, (status, QColor(CYAN)))
@@ -2232,26 +2232,26 @@ class CommandCenter(QWidget):
         risk_mode = "AUTO-RISK (structure)" if self.auto_risk_enabled else (
             f"manual TP {self.tp_input.value():.1f}% / SL {self.sl_input.value():.1f}%"
         )
-        self.log(f"💾 Settings saved: ${investment}/trade, {risk_mode}{suffix}")
+        self.log(f"[EMOJI] Settings saved: ${investment}/trade, {risk_mode}{suffix}")
 
     def _on_kill_switch(self):
         self._killed = True
         self.kill_switch_triggered.emit()
-        self.log("🛑 KILL SWITCH ACTIVATED - ALL TRADING STOPPED")
+        self.log("[STOP] KILL SWITCH ACTIVATED - ALL TRADING STOPPED")
         # Don't disable the entire UI - just show reset button
         self.reset_kill_btn.setEnabled(True)
-        self.log("⚠️ Use the RESET button to resume trading")
+        self.log("[WARN] Use the RESET button to resume trading")
 
     def _on_reset_kill_switch(self):
         """Reset kill switch and re-enable trading."""
         self._killed = False
         self.reset_kill_btn.setEnabled(False)
-        self.log("✅ Kill switch reset - Trading can resume")
+        self.log("[OK] Kill switch reset - Trading can resume")
 
     def _clear_activity_log(self):
         """Clear the activity log."""
         self.activity_log.clear()
-        self.log("🗑️ Activity log cleared")
+        self.log("[EMOJI] Activity log cleared")
 
     def _export_trade_history(self):
         """Export trade history to CSV file."""
@@ -2286,6 +2286,6 @@ class CommandCenter(QWidget):
                         row_data.append(item.text() if item else "")
                     writer.writerow(row_data)
 
-            self.log(f"📊 Trade history exported to: {file_path}")
+            self.log(f"[CHART] Trade history exported to: {file_path}")
         except Exception as e:
-            self.log(f"❌ Export failed: {e}")
+            self.log(f"[FAIL] Export failed: {e}")
