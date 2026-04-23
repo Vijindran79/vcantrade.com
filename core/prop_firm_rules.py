@@ -140,8 +140,8 @@ class ComplianceState:
         """
         violations = []
         
-        # 1. Check daily loss limit
-        if self.daily_pnl <= -self.rules.max_daily_loss:
+        # 1. Check daily loss limit (skip if firm has no daily limit, e.g. Apex)
+        if self.rules.max_daily_loss > 0 and self.daily_pnl <= -self.rules.max_daily_loss:
             violations.append(
                 f"[FAIL] DAILY LOSS LIMIT: ${abs(self.daily_pnl):.2f} / ${self.rules.max_daily_loss:.2f}"
             )
@@ -185,7 +185,7 @@ class ComplianceState:
         profit_factor = abs(self.largest_win / max(0.01, self.largest_loss))
         
         # Progress toward targets
-        daily_progress = min(100, (abs(self.daily_pnl) / self.rules.max_daily_loss) * 100)
+        daily_progress = min(100, (abs(self.daily_pnl) / max(0.01, self.rules.max_daily_loss)) * 100)
         drawdown_usage = (self.max_drawdown_from_peak / self.rules.max_trailing_drawdown) * 100
         profit_progress = (self.total_pnl / self.rules.profit_target_phase1) * 100
         
@@ -307,8 +307,8 @@ class PropFirmRuleEngine:
         """
         can_trade, violations = self.compliance.can_trade()
         
-        # Check if potential loss would violate daily limit
-        if potential_loss > 0:
+        # Check if potential loss would violate daily limit (skip if firm has no daily limit)
+        if potential_loss > 0 and self.rules.max_daily_loss > 0:
             new_daily_pnl = self.compliance.daily_pnl - potential_loss
             if new_daily_pnl < -self.rules.max_daily_loss:
                 violations.append(

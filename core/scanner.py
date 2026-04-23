@@ -30,6 +30,7 @@ from core.settings import settings_manager
 from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
 from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
 from core.market_sessions import MarketSessionDetector
+from core.liquidity_engine import LiquidityEngine
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class CloudScanner:
         self.consensus = SwarmConsensus()
         self.brain = GeminiBrain()
         self.code_architect = CodeArchitect()
+        self.liquidity_engine = LiquidityEngine()
         self.recent_signals: Dict[str, datetime] = {}  # Prevent duplicate signals
         self.signal_cooldown = 300  # 5 minutes between signals for same ticker
         self.status_callback = None
@@ -256,7 +258,11 @@ class CloudScanner:
             latest_rsi,
         )
         liquidity_zone = self._detect_liquidity_zone(df, ticker)
+        # Enhanced Smart Money liquidity analysis
+        smart_money = self.liquidity_engine.analyze(df, ticker)
+        smart_money_dict = self.liquidity_engine.to_dict(smart_money)
         brain_package = self._build_brain_package(df, liquidity_zone)
+        brain_package["smart_money"] = smart_money_dict
         if liquidity_zone:
             self._emit_status(ticker, "analyzing_liquidity")
 
@@ -504,6 +510,36 @@ class CloudScanner:
 
             strength = max(0.60, min(0.85, 0.85 - (distance_ratio * 100)))
 
+        # SNIPER ENTRY: Validate wick rejection >= 15% of candle range (MSS confirmation)
+        candle_range = candle["high"] - candle["low"]
+        if candle_range > 0 and bias:
+            if bias == "BUY":
+                lower_wick = min(candle["open"], candle["close"]) - candle["low"]
+                wick_pct = lower_wick / candle_range
+                if wick_pct < 0.15:
+                    logger.info(
+                        "[SNIPER] Rejected %s %s: lower wick %.1f%% < 15%% (no rejection)",
+                        ticker, signal_type, wick_pct * 100,
+                    )
+                    return None
+                # MSS: price must be moving away from zone (close > open or close near high)
+                if candle["close"] <= candle["open"]:
+                    logger.info("[SNIPER] Rejected %s %s: no bullish momentum (close <= open)", ticker, signal_type)
+                    return None
+            elif bias == "SELL":
+                upper_wick = candle["high"] - max(candle["open"], candle["close"])
+                wick_pct = upper_wick / candle_range
+                if wick_pct < 0.15:
+                    logger.info(
+                        "[SNIPER] Rejected %s %s: upper wick %.1f%% < 15%% (no rejection)",
+                        ticker, signal_type, wick_pct * 100,
+                    )
+                    return None
+                # MSS: price must be moving away from zone (close < open or close near low)
+                if candle["close"] >= candle["open"]:
+                    logger.info("[SNIPER] Rejected %s %s: no bearish momentum (close >= open)", ticker, signal_type)
+                    return None
+
         logger.info(
             "[TARGET] Liquidity trigger armed for %s: %s near %s",
             ticker,
@@ -727,9 +763,11 @@ class CloudScanner:
         )
 
     async def _evaluate_timeframe_alignment(
-        self, ticker: str, action: str
+        self, ticker: str, action: str, signal_type: str = "", strength: float = 0.0
     ) -> Tuple[bool, Dict[str, str]]:
-        """Evaluate 5m/3m/1m alignment with a more aggressive autonomous-mode sniper gate."""
+        """Evaluate 5m/3m/1m alignment with a more aggressive autonomous-mode sniper gate.
+        For liquidity-based signals, uses a relaxed check because SMA crossovers naturally
+        oppose sweep direction (price drops during a demand sweep)."""
         action = str(action or "").upper()
         if action not in {"BUY", "SELL"}:
             return False, {}
@@ -809,23 +847,37 @@ class CloudScanner:
         one_min_match = votes.get("1m") == action
         aligned_helpers = sum(1 for tf in ["5m", "3m"] if votes.get(tf) == action)
 
+        is_liquidity = "LIQUIDITY" in str(signal_type or "").upper()
+        is_strong = float(strength or 0) >= 0.70
+
         if runtime_mode == "AUTONOMOUS":
-            aligned = one_min_match
-            if aligned and aligned_helpers == 0:
-                logger.warning(
-                    "[TARGET] AUTONOMOUS SNIPER OVERRIDE: %s %s triggered from 1m alone | votes=%s",
-                    action,
-                    ticker,
-                    votes,
-                )
-            elif aligned:
-                logger.info(
-                    "[TARGET] AUTONOMOUS SNIPER: %s %s confirmed by 1m + %s helper timeframe(s) | votes=%s",
-                    action,
-                    ticker,
-                    aligned_helpers,
-                    votes,
-                )
+            matching_timeframes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == action)
+            if is_liquidity and is_strong:
+                # For liquidity sweeps/rejections, SMAs naturally oppose the sweep
+                # (price drops during demand sweeps = bearish SMAs). Don't require
+                # agreement from lagging indicators. Just don't fight the 5m trend.
+                five_m_opposite = votes.get("5m") == ("SELL" if action == "BUY" else "BUY")
+                aligned = matching_timeframes >= 1 or not five_m_opposite
+                if aligned:
+                    logger.info(
+                        "[TARGET] AUTONOMOUS LIQUIDITY SNIPER: %s %s passed | %d/3 agree | 5m_opposite=%s | votes=%s",
+                        action,
+                        ticker,
+                        matching_timeframes,
+                        five_m_opposite,
+                        votes,
+                    )
+            else:
+                # Standard signals: require at least 2 out of 3 timeframes to agree.
+                aligned = matching_timeframes >= 2
+                if aligned:
+                    logger.info(
+                        "[TARGET] AUTONOMOUS SNIPER: %s %s confirmed by %d/3 timeframes | votes=%s",
+                        action,
+                        ticker,
+                        matching_timeframes,
+                        votes,
+                    )
         else:
             aligned = all(votes.get(tf) == action for tf in ["5m", "3m", "1m"])
         return aligned, votes
@@ -1024,6 +1076,67 @@ class CloudScanner:
         key = f"{ticker}:{signal_type}"
         self.recent_signals[key] = datetime.utcnow()
 
+    def _validate_zone_origin(self, signal: TechnicalSignal, action: str) -> bool:
+        """
+        Validate that BUY signals originate from demand zones
+        and SELL signals originate from supply zones.
+        A signal is only valid if price is at or near the correct zone.
+        """
+        smart_money = signal.metadata.get("smart_money")
+        if not smart_money:
+            return True  # No zone data available; do not block
+
+        price = float(signal.metadata.get("price", 0.0))
+        if price <= 0:
+            return True
+
+        tolerance_pct = 0.003  # 0.3% tolerance for zone proximity
+        tolerance = max(price * tolerance_pct, 0.5)
+
+        if action == "BUY":
+            nearest_demand = smart_money.get("nearest_demand")
+            if not nearest_demand:
+                logger.info(
+                    "[ZONE] BUY %s rejected: no active demand zone", signal.ticker
+                )
+                return False
+            zone_top = float(nearest_demand.get("top", 0))
+            zone_bottom = float(nearest_demand.get("bottom", 0))
+            if price > zone_top + tolerance:
+                logger.info(
+                    "[ZONE] BUY %s rejected: price %.2f far from demand zone %.2f-%.2f",
+                    signal.ticker, price, zone_bottom, zone_top,
+                )
+                return False
+            logger.info(
+                "[ZONE] BUY %s validated at demand zone %.2f-%.2f",
+                signal.ticker, zone_bottom, zone_top,
+            )
+            return True
+
+        if action == "SELL":
+            nearest_supply = smart_money.get("nearest_supply")
+            if not nearest_supply:
+                logger.info(
+                    "[ZONE] SELL %s rejected: no active supply zone", signal.ticker
+                )
+                return False
+            zone_top = float(nearest_supply.get("top", 0))
+            zone_bottom = float(nearest_supply.get("bottom", 0))
+            if price < zone_bottom - tolerance:
+                logger.info(
+                    "[ZONE] SELL %s rejected: price %.2f far from supply zone %.2f-%.2f",
+                    signal.ticker, price, zone_bottom, zone_top,
+                )
+                return False
+            logger.info(
+                "[ZONE] SELL %s validated at supply zone %.2f-%.2f",
+                signal.ticker, zone_bottom, zone_top,
+            )
+            return True
+
+        return True
+
     async def process_signals(self, signals: List[TechnicalSignal]) -> Optional[dict]:
         """
         Process detected signals through Swarm Debate.
@@ -1094,6 +1207,8 @@ class CloudScanner:
                 mtf_ok, mtf_votes = await self._evaluate_timeframe_alignment(
                     signal.ticker,
                     analysis.action.value,
+                    signal_type=signal.signal_type,
+                    strength=signal.strength,
                 )
                 if not mtf_ok:
                     logger.info(
@@ -1101,6 +1216,17 @@ class CloudScanner:
                         analysis.action.value,
                         signal.ticker,
                         mtf_votes,
+                    )
+                    self._emit_status(signal.ticker, "trade_rejected")
+                    continue
+
+                # ZONE ORIGIN VALIDATION: BUY must come from demand zone, SELL from supply zone
+                zone_ok = self._validate_zone_origin(signal, analysis.action.value)
+                if not zone_ok:
+                    logger.info(
+                        "[ZONE] %s %s rejected: no supporting liquidity zone",
+                        analysis.action.value,
+                        signal.ticker,
                     )
                     self._emit_status(signal.ticker, "trade_rejected")
                     continue
@@ -1174,7 +1300,7 @@ class CloudScanner:
                     ),
                     "brain_used": brain_used,
                     "fallback_mode": fallback_mode,
-                    "force_execute": brain_verdict in {"[SIGNAL] BUY", "[SIGNAL] SELL"},
+                    "force_execute": False,
                     "liquidity_zone": liquidity_zone,
                     "investment_amount": 1000.0,  # Default $1000 per trade
                     "transcript": {

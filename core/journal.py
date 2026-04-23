@@ -297,6 +297,14 @@ class TradeJournalDB:
             ).fetchone()
         return dict(row) if row else {}
 
+    def get_total_realized_pnl(self) -> float:
+        """Return the sum of all realized P&L from closed trades in the journal."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0.0) AS total_pnl FROM trade_vibes WHERE pnl IS NOT NULL"
+            ).fetchone()
+        return float(row["total_pnl"]) if row else 0.0
+
     def _remember_vibe_failure(
         self,
         conn: sqlite3.Connection,

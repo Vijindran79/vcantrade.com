@@ -77,7 +77,7 @@ from core.meta_analyzer import MetaAnalyzer, TradeJournal
 from core.watchtower import WatchtowerScanner
 from core.vision_engine import VisionCapture
 from core.scanner import CloudScanner
-from core.signal_dispatcher import SignalDispatcher
+from services.signal_dispatcher import SignalDispatcher
 from core.browser_agent import BrowserAgent
 from core.settings import settings_manager
 from core.financial_safety import FinancialSafetyManager
@@ -87,6 +87,7 @@ from core.journal import TradeJournalDB
 from core.risk_manager import RiskManager, PositionSizer
 from core.vibe_adapter import VibeTradingAdapter
 from execution.rpa_executor import RPAExecutor
+from core.mt5_executor import MT5Executor
 from core.trade_executor import TradeExecutor
 from core.market_sessions import MarketSessionDetector
 from ui.dashboard import CommandCenter
@@ -146,6 +147,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("Logging system initialized")
 
+# Cloud Dashboard: Capture last log message for remote bridge broadcast
+_last_log_message = ""
+
+
+class DashboardLogCapture(logging.Handler):
+    """Captures the most recent log record for remote dashboard display."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        global _last_log_message
+        try:
+            _last_log_message = self.format(record)
+        except Exception:
+            pass
+
+
+_dashboard_handler = DashboardLogCapture()
+_dashboard_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+)
+_dashboard_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_dashboard_handler)
+
 
 def _acquire_single_instance_lock() -> bool:
     """Prevent multiple dashboard instances from running simultaneously."""
@@ -171,7 +194,7 @@ def _release_single_instance_lock() -> None:
         _instance_lock_socket = None
 
 
-from core.signal_dispatcher import SignalDispatcher
+from services.signal_dispatcher import SignalDispatcher
 import pyautogui
 
 
@@ -496,6 +519,237 @@ class SignalListenerThread(QThread):
         self.running = False
 
 
+class CloudBridgeThread(QThread):
+    """
+    Remote dashboard bridge for Vast.ai cloud server.
+    Serves WebSocket + REST endpoints so a local Windows client
+    can monitor P&L, positions, and trigger the kill switch.
+    """
+
+    kill_requested = pyqtSignal()  # Marshalled to main Qt thread automatically
+
+    def __init__(self, app, host="0.0.0.0", port=8765):
+        super().__init__()
+        self.app = app
+        self.host = host
+        self.port = port
+        self.running = True
+        self.loop = None
+        self._clients = set()
+
+    def run(self):
+        logger.info("[BRIDGE] Cloud dashboard bridge thread starting...")
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._run_server())
+        except Exception as e:
+            logger.error("[BRIDGE] Server loop error: %s", e)
+        finally:
+            if self.loop and not self.loop.is_closed():
+                self.loop.close()
+
+    async def _run_server(self):
+        from aiohttp import web, WSMsgType
+
+        @web.middleware
+        async def cors_middleware(request, handler):
+            response = await handler(request)
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            return response
+
+        async def health(request):
+            return web.json_response({"status": "ok"})
+
+        async def status(request):
+            return web.json_response(self._build_status())
+
+        async def kill(request):
+            logger.critical("[BRIDGE] Remote KILL SWITCH received from %s", request.remote)
+            self.kill_requested.emit()
+            return web.json_response({"status": "kill_signal_sent"})
+
+        async def websocket_handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            self._clients.add(ws)
+            logger.info("[BRIDGE] Dashboard client connected: %s", request.remote)
+            try:
+                async for msg in ws:
+                    if msg.type == WSMsgType.TEXT:
+                        if msg.data == "ping":
+                            await ws.send_str("pong")
+                    elif msg.type == WSMsgType.ERROR:
+                        break
+            except Exception:
+                pass
+            finally:
+                self._clients.discard(ws)
+                logger.info("[BRIDGE] Dashboard client disconnected: %s", request.remote)
+            return ws
+
+        app = web.Application(middlewares=[cors_middleware])
+        app.router.add_get("/api/health", health)
+        app.router.add_get("/api/status", status)
+        app.router.add_post("/api/kill", kill)
+        app.router.add_get("/ws", websocket_handler)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.port)
+        await site.start()
+        logger.info("[BRIDGE] Dashboard server listening on %s:%s", self.host, self.port)
+
+        # Broadcast loop: push status every 5 seconds
+        while self.running:
+            try:
+                data = self._build_status()
+                dead = set()
+                for ws in self._clients:
+                    if ws.closed:
+                        dead.add(ws)
+                        continue
+                    try:
+                        await ws.send_json(data)
+                    except Exception:
+                        dead.add(ws)
+                self._clients -= dead
+            except Exception as e:
+                logger.error("[BRIDGE] Broadcast error: %s", e)
+            await asyncio.sleep(5)
+
+        logger.info("[BRIDGE] Dashboard server shutting down...")
+        await runner.cleanup()
+
+    def _build_status(self):
+        app = self.app
+        return {
+            "account_id": "PAAPEX3143270000002",
+            "current_balance": getattr(app, "balance", 0.0),
+            "equity": getattr(app, "equity", 0.0),
+            "daily_pnl": getattr(app, "daily_pnl", 0.0),
+            "total_pnl": getattr(app, "total_pnl", 0.0),
+            "active_positions": len(getattr(app, "positions", [])),
+            "positions": [
+                {
+                    "asset": p.get("asset"),
+                    "side": p.get("side"),
+                    "entry": p.get("entry"),
+                    "current": p.get("current"),
+                    "pnl": p.get("pnl"),
+                    "pnl_pct": p.get("pnl_pct"),
+                }
+                for p in getattr(app, "positions", [])
+            ],
+            "mode": getattr(app, "current_mode", "UNKNOWN"),
+            "bridge_status": getattr(app, "bridge_status", "unknown"),
+            "trades_today": getattr(app, "trades_today", 0),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "last_log_message": _last_log_message,
+        }
+
+    def stop(self):
+        self.running = False
+        if self.loop and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self._cancel_all_tasks)
+
+    def _cancel_all_tasks(self):
+        try:
+            for task in asyncio.all_tasks(self.loop):
+                task.cancel()
+        except Exception:
+            pass
+
+
+class MultiAssetHunterThread(QThread):
+    """
+    Cycles through MNQ / ES / Oil every 30 seconds.
+    Navigates TradingView, screenshots, sends to Cloud Brain (Ollama v1),
+    and emits trade signals when BUY/SELL is detected.
+    """
+
+    status_update = pyqtSignal(str, str, str)  # symbol, status, message
+    trade_signal = pyqtSignal(str, str, str)    # symbol, action, reason
+
+    def __init__(self, app, symbols=None, interval_sec=None):
+        super().__init__()
+        self.app = app
+        self.symbols = symbols or config.MULTI_ASSET_TICKERS
+        self.interval_sec = interval_sec or config.MULTI_ASSET_CYCLE_SECONDS
+        self.running = True
+        self.index = 0
+
+    def run(self):
+        logger.info("[HUNTER] Multi-Asset Hunter started. Symbols: %s", self.symbols)
+        while self.running:
+            symbol = self.symbols[self.index]
+            self._cycle_symbol(symbol)
+            self.index = (self.index + 1) % len(self.symbols)
+            # Sleep in 1-second chunks for responsive stop
+            for _ in range(self.interval_sec):
+                if not self.running:
+                    break
+                time.sleep(1)
+        logger.info("[HUNTER] Multi-Asset Hunter stopped.")
+
+    def _cycle_symbol(self, symbol: str):
+        try:
+            self.status_update.emit(symbol, "NAVIGATING", f"Switching to {symbol}...")
+
+            # 1. Navigate browser to symbol
+            loop = self.app._browser_loop if hasattr(self.app, "_browser_loop") else None
+            if not loop or loop.is_closed():
+                self.status_update.emit(symbol, "ERROR", "Browser loop not available")
+                return
+
+            future = asyncio.run_coroutine_threadsafe(
+                self.app.browser_agent.navigate_to_symbol(symbol),
+                loop,
+            )
+            nav_ok = future.result(timeout=35)
+            if not nav_ok:
+                self.status_update.emit(symbol, "ERROR", "Navigation failed")
+                return
+
+            self.status_update.emit(symbol, "SCREENSHOT", "Capturing chart...")
+
+            # 2. Take screenshot
+            future = asyncio.run_coroutine_threadsafe(
+                self.app.browser_agent.take_screenshot(),
+                loop,
+            )
+            screenshot_b64 = future.result(timeout=15)
+            if not screenshot_b64:
+                self.status_update.emit(symbol, "ERROR", "Screenshot failed")
+                return
+
+            self.status_update.emit(symbol, "ANALYZING", "Sending to Cloud Brain...")
+
+            # 3. Send to Ollama vision
+            from core.brain_swarm import analyze_chart_with_vision
+            result = analyze_chart_with_vision(screenshot_b64, symbol)
+            signal = result.get("signal", "NONE")
+            reason = result.get("reason", "No reason")
+
+            self.status_update.emit(symbol, f"SIGNAL_{signal}", reason)
+
+            # 4. Execute if BUY/SELL
+            if signal in ("BUY", "SELL"):
+                logger.critical("[HUNTER] %s SIGNAL: %s | %s", symbol, signal, reason)
+                self.trade_signal.emit(symbol, signal, reason)
+            else:
+                logger.info("[HUNTER] %s no trade setup | %s", symbol, reason)
+
+        except Exception as e:
+            logger.error("[HUNTER] Cycle error for %s: %s", symbol, e)
+            self.status_update.emit(symbol, "ERROR", str(e)[:100])
+
+    def stop(self):
+        self.running = False
+
+
 class AnalysisWorker(QThread):
     """
     Analyzes market data using Swarm Consensus multi-agent debate.
@@ -621,11 +875,13 @@ class VcaniTradeApp:
 
         # Initialize account state early so downstream components can safely
         # reference balance during construction.
-        self.balance = 10000.0
-        self.equity = 10000.0
+        # PRODUCTION: CURRENT_BALANCE must match your prop firm / broker account.
+        self.starting_balance = float(config.CURRENT_BALANCE)
+        self.balance = float(config.CURRENT_BALANCE)
+        self.equity = float(config.CURRENT_BALANCE)
         self.daily_pnl = 0.0
         self.total_pnl = 0.0
-        self.peak_balance = 10000.0
+        self.peak_balance = float(config.CURRENT_BALANCE)
         self.max_drawdown = 0.0
         self.trades_today = 0
         self.positions = []
@@ -636,6 +892,7 @@ class VcaniTradeApp:
         self.bridge_status = "disconnected"
         self.bridge_warning_emitted = False
         self.bridge_timeout_seconds = 120.0
+        self.balance_diverged = False
 
         # UI - Command Center (main dashboard)
         self.cmd = CommandCenter()
@@ -671,6 +928,8 @@ class VcaniTradeApp:
         # RPA Hand - clicks TradingView paper trading UI directly (no API keys needed)
         # on_blind_error fires when TradingView is minimized or covered by another app
         self.rpa_hand = RPAExecutor(on_blind_error=self._on_rpa_blind)
+        # MT5 Executor - routes trades to MetaTrader 5 when EXECUTION_MODE == "MT5"
+        self.mt5_executor = MT5Executor()
         self.sql_journal = TradeJournalDB(db_path="trades.db")
         self.vibe_adapter = VibeTradingAdapter()
         self._vibe_strategy_worker = None
@@ -740,6 +999,7 @@ class VcaniTradeApp:
             from core.prop_firm_rules import PropFirmRuleEngine, PropFirmName
             firm_map = {
                 "TopStep": PropFirmName.TOPSTEP,
+                "Apex Trader Funding": PropFirmName.APEX,
                 "Apex": PropFirmName.APEX,
                 "MyFundedFutures": PropFirmName.MYFUNDED,
                 "FTMO": PropFirmName.FTMO,
@@ -762,6 +1022,8 @@ class VcaniTradeApp:
         self.data_scout_listener = DataScoutListenerThread()  # Vast.ai scout listener
         self.watchtower = WatchtowerScanner()  # Local fallback scanner
         self.analysis_worker = AnalysisWorker()  # Local analysis (vision + swarm)
+        self.cloud_bridge = CloudBridgeThread(self, host="0.0.0.0", port=8765)  # Remote dashboard bridge
+        self.hunter = MultiAssetHunterThread(self) if config.MULTI_ASSET_ENABLED else None  # Vision-based multi-asset hunter
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
 
         # State
@@ -772,11 +1034,11 @@ class VcaniTradeApp:
         self.test_status_text = "Ready"  # Test execution status
 
         # Balance & P/L tracking
-        self.balance = 10000.0  # Starting balance
-        self.equity = 10000.0
+        self.balance = float(config.CURRENT_BALANCE)
+        self.equity = float(config.CURRENT_BALANCE)
         self.daily_pnl = 0.0
         self.total_pnl = 0.0
-        self.peak_balance = 10000.0
+        self.peak_balance = float(config.CURRENT_BALANCE)
         self.max_drawdown = 0.0
         self.trades_today = 0
         self.daily_wins = 0
@@ -1061,11 +1323,36 @@ class VcaniTradeApp:
             self.browser_agent_status = "starting"
             self.browser_agent = BrowserAgent(headless=True)
             await self.browser_agent.start()
+            # Auto-navigate to TradingView MNQ1! chart
+            await self.browser_agent.navigate_to_tradingview()
             self.browser_agent_status = "ready"
         except Exception as e:
             self.browser_agent_status = "error"
             self._browser_error_message = str(e)
             logger.error(f"Failed to start browser agent: {e}")
+
+    def _cloud_heartbeat(self):
+        """Log a heartbeat every 10s so the operator knows the bot is alive on Vast.ai."""
+        try:
+            url = ""
+            if self.browser_agent and self.browser_agent.is_running and self.browser_agent.page:
+                import asyncio
+                future = asyncio.run_coroutine_threadsafe(
+                    self.browser_agent.get_current_url(),
+                    self._browser_loop if hasattr(self, '_browser_loop') and self._browser_loop and not self._browser_loop.is_closed() else asyncio.get_event_loop()
+                )
+                try:
+                    url = future.result(timeout=2.0)
+                except Exception:
+                    url = "(pending)"
+            mode = self.current_mode
+            positions = len(self.positions)
+            logger.info(
+                "[HEARTBEAT] Lion is awake | mode=%s | positions=%s | url=%s",
+                mode, positions, url[:60] if url else "(no page)"
+            )
+        except Exception as e:
+            logger.warning("[HEARTBEAT] Heartbeat error: %s", e)
 
     def _sync_browser_agent_state(self):
         """Finalize browser-agent state transitions on the Qt main thread."""
@@ -1104,6 +1391,14 @@ class VcaniTradeApp:
         self.cmd.force_test_trade_requested.connect(self._on_force_test_trade)
         self.cmd.user_command_sent.connect(self._on_copilot_command)  # NEW: Co-Pilot Command Bridge
         self.ai_narrator.stealth_toggled.connect(self._handle_manual_stealth_toggle)
+
+        # Cloud Bridge kill switch (thread-safe via pyqtSignal)
+        self.cloud_bridge.kill_requested.connect(self._on_kill_switch)
+
+        # Multi-Asset Hunter signals
+        if self.hunter:
+            self.hunter.status_update.connect(self._on_hunter_status_update)
+            self.hunter.trade_signal.connect(self._on_hunter_trade_signal)
 
         # Cloud Scanner -> UI + Narrator
         self.cloud_scanner.signal_detected.connect(self._on_cloud_signal)
@@ -1183,6 +1478,12 @@ class VcaniTradeApp:
             self.browser_state_timer = QTimer()
             self.browser_state_timer.timeout.connect(self._sync_browser_agent_state)
             self.browser_state_timer.start(1000)
+
+        # CLOUD HEARTBEAT: Log status every 10s so you know the Lion is awake
+        if not hasattr(self, "cloud_heartbeat_timer"):
+            self.cloud_heartbeat_timer = QTimer()
+            self.cloud_heartbeat_timer.timeout.connect(self._cloud_heartbeat)
+            self.cloud_heartbeat_timer.start(10000)  # 10 seconds
 
         self.cmd.log("[OK] All systems connected - Ready to trade")
         
@@ -2151,13 +2452,32 @@ class VcaniTradeApp:
                 votes[label] = "WAIT"
             timeframe_rsi[label] = float(r) if not pd.isna(r) else None
 
-        passed = all(votes.get(tf) == action for tf in ["5m", "3m", "1m"])
+        # Require 2 out of 3 timeframes to agree (AUTONOMOUS mode)
+        matching = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == action)
+        passed = matching >= 2
         buy_votes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == "BUY")
         sell_votes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == "SELL")
         one_min_rsi = timeframe_rsi.get("1m")
         mtf_bias = "SELL" if sell_votes > buy_votes else "BUY" if buy_votes > sell_votes else "MIXED"
         votes["1m_rsi"] = round(one_min_rsi, 2) if isinstance(one_min_rsi, (int, float)) else None
         votes["mtf_bias"] = mtf_bias
+
+        # LIQUIDITY SIGNAL OVERRIDE: SMAs naturally oppose sweep direction.
+        # If scanner already approved the liquidity signal, don't let lagging MTF block it
+        # unless the 5m trend is strongly opposed.
+        signal_type = str((signal_data or {}).get("signal_type", "")).upper()
+        is_liquidity = "LIQUIDITY" in signal_type
+        if not passed and is_liquidity:
+            five_m_opposite = votes.get("5m") == ("SELL" if action == "BUY" else "BUY")
+            if not five_m_opposite:
+                votes["override"] = "LIQUIDITY_RELAXED_MTF"
+                logger.warning(
+                    "[TARGET] LIQUIDITY OVERRIDE: %s %s allowed against MTF because liquidity sweep/rejection signal detected and 5m is not opposing | votes=%s",
+                    action,
+                    ticker,
+                    votes,
+                )
+                return True, votes
 
         if (
             not passed
@@ -2769,6 +3089,12 @@ class VcaniTradeApp:
         safety_status = self.financial_safety.get_safety_status()
         self.cmd.update_safety_status(safety_status)
 
+        # LIVE BALANCE SYNC: scrape real broker balance every 60s
+        try:
+            self._sync_live_balance()
+        except Exception as e:
+            logger.warning("Live balance sync error in safety controls: %s", e)
+
     def _update_institutional_governor_ui(self):
         """STAGE 3: Update Institutional Governor panel in dashboard."""
         # Collect risk governor data
@@ -3002,7 +3328,7 @@ class VcaniTradeApp:
     def _ensure_balance_state(self):
         """Defensive balance-state initialization for late/mocked call paths."""
         if not hasattr(self, "balance"):
-            self.balance = 10000.0
+            self.balance = float(config.CURRENT_BALANCE)
         if not hasattr(self, "equity"):
             self.equity = float(self.balance)
         if not hasattr(self, "daily_pnl"):
@@ -3013,6 +3339,128 @@ class VcaniTradeApp:
             self.peak_balance = float(self.balance)
         if not hasattr(self, "max_drawdown"):
             self.max_drawdown = 0.0
+        if not hasattr(self, "starting_balance"):
+            self.starting_balance = float(config.CURRENT_BALANCE)
+        if not hasattr(self, "balance_diverged"):
+            self.balance_diverged = False
+
+    def _get_open_risk_dollars(self) -> float:
+        """Sum of initial risk amounts for all open positions."""
+        return sum(
+            float(p.get("initial_risk_amount", 0.0) or 0.0)
+            for p in getattr(self, "positions", [])
+        )
+
+    def _reconcile_balance(self) -> bool:
+        """Compare internal balance against journal-derived balance. Warn if >5% divergence."""
+        self._ensure_balance_state()
+        try:
+            journal_pnl = self.sql_journal.get_total_realized_pnl()
+            expected_balance = self.starting_balance + journal_pnl
+            divergence = abs(self.balance - expected_balance)
+            divergence_pct = (divergence / max(1.0, expected_balance)) * 100.0
+
+            if divergence_pct > 5.0:
+                logger.warning(
+                    "BALANCE DRIFT: internal=%.2f journal=%.2f diff=%.2f (%.2f%%). Skipping this trade.",
+                    self.balance,
+                    expected_balance,
+                    divergence,
+                    divergence_pct,
+                )
+                self.cmd.log(
+                    f'<span style="color:#D29922;font-weight:bold">[WARN] BALANCE DRIFT</span>: '
+                    f'Live ${self.balance:.2f} vs Ledger ${expected_balance:.2f} '
+                    f'(diff {divergence_pct:.2f}%). Skipping trade — will retry next signal.'
+                )
+                return False
+
+            self.balance_diverged = False
+            return True
+        except Exception as exc:
+            logger.warning("Balance reconciliation failed: %s", exc)
+            # Fail-open: allow trading if reconciliation itself fails, but log loudly
+            return True
+
+    def _sync_live_balance(self):
+        """Scrape live balance from broker dashboard and sync internal state.
+        Runs every 60 seconds alongside safety controls."""
+        try:
+            scrape_result = self.rpa_hand.scrape_live_balance()
+            if scrape_result is None:
+                return
+
+            live_balance = scrape_result.get("net_liq")
+            day_pl = scrape_result.get("day_pl")
+
+            if live_balance is None:
+                return
+
+            previous_balance = getattr(self, "balance", float(config.CURRENT_BALANCE))
+            diff = live_balance - previous_balance
+
+            # Log the dashboard snapshot every sync cycle
+            logger.info(
+                "[LION EYE] Dashboard Sync: Net Liq = $%.2f | Day P/L = %s",
+                live_balance,
+                f"${day_pl:.2f}" if day_pl is not None else "N/A",
+            )
+
+            # Only act if change is meaningful (> $5) to avoid noise from floating decimals
+            if abs(diff) < 5.0:
+                return
+
+            # Update internal balance immediately to match real Apex account
+            self.balance = live_balance
+            self.equity = live_balance
+
+            # Sync daily P/L from dashboard if available
+            if day_pl is not None:
+                self.daily_pnl = day_pl
+
+            # Manual profit / loss detection
+            if diff > 0:
+                logger.info(
+                    "[SYSTEM] Manual profit detected: $%.2f added to account. "
+                    "Adjusting equity buffer to $%.2f",
+                    diff,
+                    live_balance,
+                )
+                self.cmd.log(
+                    f'<span style="color:#3FB950;font-weight:bold">[SYSTEM] LIVE SYNC</span>: '
+                    f'Manual profit +${diff:.2f} detected. Equity updated to ${live_balance:.2f}'
+                )
+                self.ai_narrator.add_activity(
+                    "[SYSTEM]",
+                    f"Live balance sync: +${diff:.2f} manual profit"
+                )
+            elif diff < 0:
+                logger.info(
+                    "[SYSTEM] Balance decreased by $%.2f (possible manual loss or fees). "
+                    "Equity adjusted to $%.2f",
+                    abs(diff),
+                    live_balance,
+                )
+                self.cmd.log(
+                    f'<span style="color:#D29922;font-weight:bold">[SYSTEM] LIVE SYNC</span>: '
+                    f'Balance decreased by ${abs(diff):.2f}. Equity updated to ${live_balance:.2f}'
+                )
+
+            # Adjust peak balance if new balance is higher (resets drawdown calc)
+            if live_balance > getattr(self, "peak_balance", live_balance):
+                self.peak_balance = live_balance
+                logger.info("[SYSTEM] New peak balance: $%.2f", live_balance)
+
+            # Notify prop firm engine of updated balance
+            if hasattr(self, "prop_engine") and self.prop_engine:
+                self.prop_engine.compliance.current_balance = live_balance
+
+            # Update profit lock tracker
+            if hasattr(self, "profit_lock"):
+                self.profit_lock.update_balance(live_balance)
+
+        except Exception as e:
+            logger.warning("Live balance sync failed: %s", e)
 
     def _close_position(self, position: dict, reason: str):
         """Close a position and update P&L."""
@@ -3148,9 +3596,10 @@ class VcaniTradeApp:
         """Handle signal received from cloud via HTTP."""
         self._mark_bridge_alive()
         brain_override_action = self._brain_override_action(signal_data)
-        action = brain_override_action if brain_override_action in {"BUY", "SELL"} else self._resolve_directional_action(signal_data)
+        resolved_action = self._resolve_directional_action(signal_data)
+        action = brain_override_action if brain_override_action in {"BUY", "SELL"} else resolved_action
         signal_data["action"] = action
-        signal_data["force_execute"] = bool(signal_data.get("force_execute")) or brain_override_action in {"BUY", "SELL"}
+        signal_data["force_execute"] = bool(signal_data.get("force_execute"))
         ticker = signal_data.get("ticker", "UNKNOWN")
         confidence = signal_data.get("confidence", 0.0)
         entry_price = signal_data.get("entry_price", 0.0)
@@ -3160,6 +3609,38 @@ class VcaniTradeApp:
         brain_used = str(signal_data.get("brain_used", "OPENROUTER") or "OPENROUTER").strip().upper()
         fallback_mode = bool(signal_data.get("fallback_mode"))
         brain_override = self._has_brain_override(signal_data)
+
+        # DETAILED CONSENSUS LOGGING: expose when brain disagrees with scanner
+        if brain_verdict and brain_verdict not in {"", "HOLD"}:
+            if brain_override_action in {"BUY", "SELL"} and brain_override_action != resolved_action:
+                logger.warning(
+                    "[CONSENSUS] Brain override (%s) conflicts with scanner signal (%s) for %s | "
+                    "brain='%s' model=%s reasoning='%s'",
+                    brain_override_action,
+                    resolved_action,
+                    ticker,
+                    brain_used,
+                    brain_model,
+                    brain_reasoning[:120],
+                )
+            elif brain_override_action == "HOLD" and resolved_action in {"BUY", "SELL"}:
+                logger.info(
+                    "[CONSENSUS] Brain says WAIT/HOLD while scanner wants %s for %s | "
+                    "brain='%s' model=%s reasoning='%s' — falling back to scanner",
+                    resolved_action,
+                    ticker,
+                    brain_used,
+                    brain_model,
+                    brain_reasoning[:120],
+                )
+            elif brain_override_action == resolved_action and resolved_action in {"BUY", "SELL"}:
+                logger.info(
+                    "[CONSENSUS] Brain agrees with scanner: %s %s | brain='%s' model=%s",
+                    resolved_action,
+                    ticker,
+                    brain_used,
+                    brain_model,
+                )
 
         self._sync_brain_runtime_ui(brain_used, fallback_mode)
 
@@ -3356,7 +3837,9 @@ class VcaniTradeApp:
         brain_model = str(signal_data.get("brain_model", "") or "").strip()
         brain_used = str(signal_data.get("brain_used", "OPENROUTER") or "OPENROUTER").strip().upper()
         fallback_mode = bool(signal_data.get("fallback_mode"))
-        force_execute = bool(signal_data.get("force_execute")) or brain_override_action in {"BUY", "SELL"}
+        # SAFETY: force_execute comes ONLY from explicit manual override or test mode.
+        # Brain approval (BUY/SELL) no longer bypasses safety gates.
+        force_execute = bool(signal_data.get("force_execute"))
         rsi_value = float(signal_data.get("rsi", signal_data.get("RSI", 50.0)) or 50.0)
         signal_data["force_execute"] = force_execute
         signal_data["brain_used"] = brain_used
@@ -3379,6 +3862,16 @@ class VcaniTradeApp:
             self.cmd.log(f"[WARN] Trade blocked: {ticker} is not active on dashboard")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
+
+        # -- Balance Reconciliation Gate -----------------------------------
+        if not self._reconcile_balance():
+            self._log_gatekeeper_abort(
+                "Balance",
+                f"{ticker} | balance divergence detected; trading halted",
+            )
+            self._on_ticker_status_update(ticker, "trade_rejected")
+            return
+
         logger.info(
             "EXEC_CLOUD: start action=%s ticker=%s raw_confidence=%.2f adjusted_confidence=%.2f entry=%.4f force_execute=%s brain=%s brain_verdict=%s model=%s",
             action,
@@ -3496,13 +3989,37 @@ class VcaniTradeApp:
                 f'bypassing news pause for {action} {ticker}'
             )
 
+        # -- Trading Hours Gate --------------------------------------------
+        if config.TRADING_START_HOUR_UTC >= 0 and config.TRADING_END_HOUR_UTC >= 0:
+            from datetime import datetime, timezone
+            now_utc = datetime.now(timezone.utc)
+            current_hour = now_utc.hour
+            in_window = False
+            start = config.TRADING_START_HOUR_UTC
+            end = config.TRADING_END_HOUR_UTC
+            if start <= end:
+                in_window = start <= current_hour < end
+            else:
+                # Window crosses midnight (e.g. 23:00 to 08:00)
+                in_window = current_hour >= start or current_hour < end
+            if not in_window and not force_execute:
+                logger.info("EXEC_CLOUD: blocked outside trading hours for %s (UTC hour=%d, window=%d-%d)", ticker, current_hour, start, end)
+                self._log_gatekeeper_abort(
+                    "Hours",
+                    f"{ticker} | outside trading window (UTC {start:02d}:00-{end:02d}:00)"
+                )
+                self.cmd.log(f"[STOP] OUTSIDE TRADING HOURS (UTC {start:02d}:00-{end:02d}:00) - {ticker}")
+                self.ai_narrator.notify_error("Outside trading hours")
+                return
+
         levels = self.support_resistance_levels.get(ticker, {
             "supports": signal_data.get("support_levels", []),
             "resistances": signal_data.get("resistance_levels", []),
         })
 
         # -- PositionSizer Risk Gate ---------------------------------------
-        sizer = PositionSizer(balance=self.balance, risk_pct=1.0)
+        open_risk = self._get_open_risk_dollars()
+        sizer = PositionSizer(balance=self.balance, risk_pct=1.0, open_risk=open_risk)
         risk_eval = sizer.evaluate(entry_price=entry_price, side=action, levels=levels)
         auto_risk_enabled = bool(self.settings.get("auto_risk_enabled", True))
         tp_price = 0.0
@@ -3548,8 +4065,31 @@ class VcaniTradeApp:
             )
 
         per_unit_risk = abs(entry_price - sl_price)
+
+        # Micro futures contract multipliers ($ per price unit) — MUST match rpa_executor mapping
+        contract_multipliers = {
+            "NQ=F": 2.0,    # MNQ: $2 per point
+            "ES=F": 5.0,    # MES: $5 per point
+            "CL=F": 100.0,  # MCL: $100 per $1.00 barrel move
+            "GC=F": 10.0,   # MGC: $10 per point
+            "SI=F": 10.0,   # Micro Silver: $10 per point
+        }
+        multiplier = contract_multipliers.get(ticker, 1.0)
+        dollar_risk_per_contract = per_unit_risk * multiplier
+
         risk_dollar = max(float(risk_eval.get("risk_amount") or 0.0), self.balance * 0.01)
-        quantity = (risk_dollar / per_unit_risk) if per_unit_risk > 0 else 0.0
+        quantity = (risk_dollar / dollar_risk_per_contract) if dollar_risk_per_contract > 0 else 0.0
+
+        logger.info(
+            "[POSITION] %s %s | per_unit_risk=%.4f multiplier=%.2f risk_per_contract=$%.2f "
+            "risk_dollar=$%.2f quantity=%.4f",
+            ticker, action, per_unit_risk, multiplier, dollar_risk_per_contract, risk_dollar, quantity,
+        )
+
+        # MICRO TEST MODE: force 1 contract for MNQ/MES/MCL during testing
+        if ticker in {"NQ=F", "ES=F", "CL=F"}:
+            quantity = 1.0
+            logger.info("[POSITION] MICRO TEST MODE: forcing quantity=1 for %s", ticker)
 
         if quantity <= 0 and force_execute:
             fallback_amount = float(signal_data.get("investment_amount", self.default_investment) or self.default_investment or 1000.0)
@@ -3618,6 +4158,15 @@ class VcaniTradeApp:
                     f'<span style="color:#F85149;font-weight:bold">[BRAIN] OPENROUTER OVERRIDE</span>: '
                     f'bypassing prop rules for {action} {ticker}'
                 )
+
+        # -- EXECUTION: UI (RPA) or MT5 --
+        if config.EXECUTION_MODE.upper() == "MT5":
+            self._execute_cloud_signal_mt5(
+                ticker, action, entry_price, sl_price, tp_price,
+                quantity, amount, signal_data, brain_used,
+                confidence_score, risk_dollar, vibe_context
+            )
+            return
 
         # -- RPA Hand: move mouse and click on TradingView paper trading --
         mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data)
@@ -4081,7 +4630,206 @@ class VcaniTradeApp:
         self.signal_listener.stop()
         self.data_scout_listener.stop()
         self.watchtower.stop()
+        if self.hunter:
+            self.hunter.stop()
         logger.critical("Kill switch activated - all systems halted")
+
+    def _on_hunter_status_update(self, symbol: str, status: str, message: str):
+        """Update UI when the Multi-Asset Hunter cycles through symbols."""
+        self.cmd.log(f"[HUNTER] {symbol} | {status}: {message}")
+        self.ai_narrator.add_activity("[HUNTER]", f"{symbol} {status}")
+
+    def _dispatch_trade_execution(self, symbol: str, action: str, reason: str = "") -> bool:
+        """
+        Unified trade execution dispatcher.
+        Routes to MT5 or UI (RPA) based on config.EXECUTION_MODE.
+        Returns True if execution succeeded.
+        """
+        if config.EXECUTION_MODE.upper() == "MT5":
+            self.cmd.log(
+                f'<span style="color:#00D4FF;font-weight:bold">[MT5]</span> '
+                f'Sending {action} {symbol} to MetaTrader 5'
+            )
+            success = self.mt5_executor.execute_trade(symbol, action)
+            if success:
+                self.cmd.log(
+                    f'<span style="color:#3FB950;font-weight:bold">[MT5 OK]</span> '
+                    f'{action} {symbol} executed on MT5'
+                )
+                self.ai_narrator.add_activity("[MT5]", f"{action} {symbol}")
+            else:
+                self.cmd.log(
+                    f'<span style="color:#F85149;font-weight:bold">[MT5 FAIL]</span> '
+                    f'MT5 execution failed for {action} {symbol}'
+                )
+            return success
+        else:
+            # UI mode: use RPA hand
+            try:
+                from core.models import TradeRecord, SignalAction, ConfidenceLevel
+                trade = TradeRecord(
+                    asset=symbol,
+                    action=SignalAction.BUY if action == "BUY" else SignalAction.SELL,
+                    entry_price=0.0,
+                    stop_loss=0.0,
+                    take_profit=0.0,
+                    confidence=ConfidenceLevel.MEDIUM,
+                    ai_reason=reason,
+                    mode="HUNTER",
+                    status="OPEN",
+                )
+                success = self.rpa_hand.execute_trade(trade)
+                if success:
+                    self.cmd.log(
+                        f'<span style="color:#3FB950;font-weight:bold">[OK]</span> '
+                        f'RPA executed {action} {symbol}'
+                    )
+                    self.ai_narrator.add_activity("[OK]", f"RPA {action} {symbol}")
+                else:
+                    failure = getattr(self.rpa_hand, "last_failure_reason", "RPA hand failed")
+                    self.cmd.log(
+                        f'<span style="color:#F85149;font-weight:bold">[FAIL]</span> '
+                        f'RPA execution failed: {failure}'
+                    )
+                return success
+            except Exception as e:
+                logger.error("[RPA] Execution error: %s", e)
+                self.cmd.log(
+                    f'<span style="color:#F85149">[FAIL]</span> RPA execution error: {e}'
+                )
+                return False
+
+    def _execute_cloud_signal_mt5(
+        self,
+        ticker: str,
+        action: str,
+        entry_price: float,
+        sl_price: float,
+        tp_price: float,
+        quantity: float,
+        amount: float,
+        signal_data: dict,
+        brain_used: str,
+        confidence_score: float,
+        risk_dollar: float,
+        vibe_context: str,
+    ):
+        """MT5 execution path for cloud signals. Skips RPA pre-work and sends directly to MT5."""
+        self.cmd.log(
+            f'<span style="color:#00D4FF;font-weight:bold">[MT5]</span> '
+            f'Cloud signal {action} {ticker} -> MetaTrader 5'
+        )
+        success = self.mt5_executor.execute_trade(ticker, action)
+        order_status = "mt5_executed" if success else "mt5_failed"
+
+        self.cmd.log(
+            f'<span style="color:{"#3FB950" if success else "#F85149"};font-weight:bold">'
+            f'{"[MT5 OK] ORDER FILLED" if success else "[MT5 FAIL] ORDER REJECTED"}</span>: '
+            f'{action} {ticker}'
+        )
+
+        if not success:
+            self.cmd.log(
+                f'<span style="color:#F85149">[RECEIPT] JOURNAL</span>: '
+                f'skipped DB save because MT5 order was not filled for {ticker}'
+            )
+            self._on_ticker_status_update(ticker, "mt5_failed")
+            return
+
+        # Journal & Position tracking (mirrors RPA post-execution logic)
+        journal_id = self.sql_journal.save_trade(
+            coin=ticker,
+            entry=entry_price,
+            stop_loss=sl_price,
+            ai_confidence=confidence_score,
+            ai_reasoning=signal_data.get("reason", "No reasoning provided"),
+            brain_used=brain_used,
+            outcome="OPEN",
+        )
+        self.sql_journal.save_trade_vibe(
+            trade_id=journal_id,
+            asset=ticker,
+            vibe_context=vibe_context,
+            confidence_penalty=float(signal_data.get("vibe_memory_penalty", 0.0)),
+        )
+        logger.info("EXEC_CLOUD MT5: journal saved trade_id=%s for %s", journal_id, ticker)
+
+        position = {
+            "asset": ticker,
+            "side": action,
+            "entry": entry_price,
+            "current": entry_price,
+            "amount": amount,
+            "quantity": quantity,
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+            "initial_risk_amount": abs(entry_price - sl_price) * quantity,
+            "break_even_locked": False,
+            "last_trailing_check_ts": 0.0,
+            "pnl": 0.0,
+            "pnl_pct": 0.0,
+            "order_id": f"mt5_{ticker}_{int(datetime.now().timestamp())}",
+            "journal_id": journal_id,
+            "liquidity_zone": signal_data.get("liquidity_zone"),
+            "vibe_context": vibe_context,
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+        }
+
+        self.profit_lock.add_position(
+            asset=ticker,
+            entry_price=entry_price,
+            stop_loss=sl_price,
+            take_profit=None,
+            position_size=quantity,
+        )
+        self.positions.append(position)
+        self.trades_today += 1
+
+        self.cmd.update_positions(self.positions)
+        self.cmd.add_trade_log(ticker, action, amount, 0, "Open")
+
+        self.cmd.log(
+            f'<span style="color:#3FB950;font-weight:bold">[OK] POSITION OPENED (MT5)</span>: '
+            f'{action} {ticker} @ ${entry_price:.2f} | Amount: ${amount:.2f} | '
+            f'Qty: {quantity:.4f} | Managed SL: ${sl_price:.2f}'
+        )
+        self.cmd.log(
+            f'<span style="color:#8B949E">[RECEIPT] JOURNAL</span>: SAVING TO DB... '
+            f'Trade #{journal_id} | ORDER={order_status}'
+        )
+        reason_text = signal_data.get("reason", "n/a")
+        self.cmd.log(
+            f'<span style="color:#58A6FF">[CHART] Professor</span>: '
+            f'Confidence[{confidence_score:.0f}%] | RISK: ${risk_dollar:.2f} | '
+            f'REASON: {reason_text[:120]}'
+        )
+        self.ai_narrator.add_activity("[GRADUATE]", f"Confidence [{confidence_score:.0f}%] {'HIGH CONVICTION' if confidence_score >= 92 else 'APPROVED'}")
+        self.ai_narrator.add_activity("[SHIELD]", f"RISK: ${risk_dollar:.2f} | LEV: 5x | RiskScore: LOW")
+        self.ai_narrator.add_activity("[BRAIN]", f"REASON: {reason_text[:80]}")
+        self.ai_narrator.add_activity("[RECEIPT]", "SAVING TO DB...")
+
+        if self.browser_agent and action in ["BUY", "SELL"]:
+            self.cmd.log(f"[GLOBE] Browser agent verifying {ticker} price...")
+            self._verify_price_with_browser(position)
+
+        self.ai_narrator.notify_trade_executed(ticker, action, entry_price)
+        live_positions_pnl = sum(p.get("pnl", 0.0) for p in self.positions)
+        self.ai_narrator.update_live_pnl(self.total_pnl + live_positions_pnl, len(self.positions))
+        self._refresh_live_ledger()
+
+    def _on_hunter_trade_signal(self, symbol: str, action: str, reason: str):
+        """Execute a trade when the Cloud Brain returns BUY/SELL from vision analysis."""
+        self.cmd.log(
+            f'<span style="color:#00D4FF;font-weight:bold">[HUNTER]</span> '
+            f'Vision signal: {action} {symbol}'
+        )
+        self.ai_narrator.add_activity("[HUNTER]", f"{action} {symbol}")
+
+        if config.TEACHER_MODE:
+            self.cmd.log(f"[TEACHER] Would execute {action} {symbol} | {reason}")
+            return
+
+        self._dispatch_trade_execution(symbol, action, reason)
 
     def _on_calibrate(self):
         """Open the RPA Coordinate Mapper wizard."""
@@ -4188,6 +4936,8 @@ class VcaniTradeApp:
             ("data_scout_listener", self.data_scout_listener),
             ("watchtower", self.watchtower),
             ("analysis_worker", self.analysis_worker),
+            ("cloud_bridge", self.cloud_bridge),
+            ("hunter", self.hunter),
         ]:
             try:
                 svc.start()
@@ -4219,7 +4969,12 @@ class VcaniTradeApp:
         self.signal_listener.stop()
         self.data_scout_listener.stop()
         self.watchtower.stop()
+        if self.hunter:
+            self.hunter.stop()
+        self.cloud_bridge.stop()
         self.trade_engine.cleanup()
+        if self.mt5_executor:
+            self.mt5_executor.shutdown()
         logger.info("Application shutdown complete")
 
 
@@ -4237,6 +4992,7 @@ def main():
     print("=" * 60)
     print(f"Mode:      {initial_mode}")
     print(f"Trading:   {trading_mode}")
+    print(f"Executor:  {config.EXECUTION_MODE} (UI=RPA, MT5=MetaTrader)")
     print(
         f"Vision:    {config.VLM_MODEL}" if config.USE_VISION else "Vision:    Disabled"
     )

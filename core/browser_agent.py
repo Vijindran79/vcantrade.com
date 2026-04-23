@@ -306,32 +306,93 @@ class BrowserAgent:
             return False
 
     async def start(self):
-        """Launch the browser agent."""
+        """Connect to existing Chrome via CDP. Auto-creates TradingView tab if missing."""
         if self.is_running:
             logger.warning("Browser agent already running")
             return
-        
+
         try:
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=self.headless,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                ]
-            )
-            self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            )
+
+            # CDP ONLY: Connect to existing Chrome on Vast.ai Linux server
+            self.browser = await self.playwright.chromium.connect_over_cdp("http://127.0.0.1:9223")
+            contexts = self.browser.contexts
+            if not contexts:
+                logger.error("[FAIL] No contexts found in Chrome CDP connection")
+                raise RuntimeError("No contexts in Chrome on port 9223")
+
+            # Search for existing TradingView tab
+            for ctx in contexts:
+                for pg in ctx.pages:
+                    if pg.url and "tradingview" in pg.url.lower():
+                        self.page = pg
+                        self.context = ctx
+                        self.is_running = True
+                        logger.info("[OK] Browser agent connected to TradingView tab: %s", pg.url[:80])
+                        return
+
+            # No TradingView tab found — create one via CDP context
+            self.context = contexts[0]
+            logger.info("[AUTO] No TradingView tab found. Creating new tab via CDP context...")
             self.page = await self.context.new_page()
+            await self.page.goto("https://www.tradingview.com/chart/", wait_until="domcontentloaded", timeout=30000)
+            logger.info("[AUTO] Navigated to TradingView chart: %s", self.page.url[:80])
+
+            # Login detection
+            await self._handle_login_wait()
+
             self.is_running = True
-            
-            logger.info("[OK] Browser agent launched successfully")
+            return
+
         except Exception as e:
-            logger.error(f"[FAIL] Failed to launch browser agent: {e}")
+            logger.error(f"[FAIL] Failed to connect to Chrome on 127.0.0.1:9223: {e}")
             raise
+
+    async def _handle_login_wait(self):
+        """Detect login screen and wait for manual login if needed."""
+        if not self.page:
+            return
+        url = self.page.url or ""
+        # Check if we're on a login/signin page
+        if "signin" in url.lower() or "login" in url.lower():
+            logger.warning("[LOGIN] TradingView login screen detected. Waiting 30s for manual login...")
+            await asyncio.sleep(30)
+            return
+        # Check DOM for login form indicators
+        has_login_form = await self.page.evaluate("""() => {
+            const email = document.querySelector('input[type="email"], input[name="username"]');
+            const pass = document.querySelector('input[type="password"]');
+            return !!(email && pass);
+        }""")
+        if has_login_form:
+            logger.warning("[LOGIN] TradingView login form detected in DOM. Waiting 30s for manual login...")
+            await asyncio.sleep(30)
+
+    async def navigate_to_tradingview(self):
+        """Navigate to TradingView MNQ1! chart. Called after start()."""
+        return await self.navigate_to_symbol("CME_MINI:MNQ1!")
+
+    async def navigate_to_symbol(self, symbol: str):
+        """Navigate to any TradingView symbol chart."""
+        if not self.is_running or not self.page:
+            logger.warning("[NAV] Browser agent not running, starting...")
+            await self.start()
+
+        try:
+            tv_url = f"https://www.tradingview.com/chart/?symbol={symbol}"
+            logger.info("[NAV] Navigating to %s chart: %s", symbol, tv_url)
+            await self.page.goto(tv_url, wait_until="domcontentloaded", timeout=30000)
+            logger.info("[NAV] Loaded %s chart: %s", symbol, self.page.url[:80])
+
+            # Login check after navigation
+            await self._handle_login_wait()
+
+            # Give chart widgets time to render
+            await asyncio.sleep(2)
+            return True
+        except Exception as e:
+            logger.error("[NAV] Failed to navigate to TradingView %s: %s", symbol, e)
+            return False
 
     async def stop(self):
         """Close the browser agent and cleanup all resources."""
@@ -398,81 +459,77 @@ class BrowserAgent:
 
     async def get_tradingview_price(self, symbol: str) -> Dict[str, Any]:
         """
-        Get current price from TradingView for a symbol.
-        The bot opens TradingView and reads the price itself!
+        Get current price from TradingView.
+        If already on a TradingView page, scrapes from current tab instead of navigating.
         """
         if not self.is_running:
             await self.start()
-        
-        url = f"https://www.tradingview.com/symbols/{symbol.replace('-', '')}/"
-        
+
         try:
-            # Navigate to TradingView
-            await self.navigate_to(url)
-            
-            # Wait for price to load
-            await self.page.wait_for_selector('.js-symbol-last', timeout=10000)
-            
-            # Scrape the current price
-            price_text = await self.page.text_content('.js-symbol-last')
-            price = float(price_text.replace(',', '').strip())
-            
-            # Scrape change percentage
-            try:
-                change_text = await self.page.text_content('.js-change-text')
-                change_pct = float(change_text.replace('%', '').strip())
-            except:
-                change_pct = 0.0
-            
-            # Take screenshot for vision analysis
-            screenshot = await self.take_screenshot()
-            
-            logger.info(f"[CHART] TradingView data for {symbol}: ${price:.2f} ({change_pct:+.2f}%)")
-            
+            current_url = await self.get_current_url()
+            # Only navigate if we're not already on a TradingView chart
+            if "tradingview.com" not in current_url:
+                url = f"https://www.tradingview.com/symbols/{symbol.replace('-', '')}/"
+                await self.navigate_to(url)
+            else:
+                logger.info("[CHART] Already on TradingView - scraping current tab for %s", symbol)
+
+            # Try multiple selectors with short timeout (don't hang if page is loaded but widgets aren't)
+            selectors = ['.js-symbol-last', '.tv-symbol-price', '[data-testid="qsp-price"]', 'span[class*="price"]']
+            price = 0.0
+            for sel in selectors:
+                try:
+                    elem = await self.page.query_selector(sel)
+                    if elem:
+                        price_text = await elem.inner_text()
+                        price_text = price_text.replace(',', '').replace('$', '').strip()
+                        if price_text and price_text.replace('.', '').replace('-', '').isdigit():
+                            price = float(price_text)
+                            break
+                except Exception:
+                    continue
+
+            if price <= 0:
+                raise ValueError("Price element not found")
+
+            logger.info("[CHART] TradingView data for %s: $%.2f", symbol, price)
             return {
                 "symbol": symbol,
                 "price": price,
-                "change_pct": change_pct,
                 "source": "TradingView",
                 "timestamp": datetime.now().isoformat(),
-                "screenshot": screenshot,
-            }
-            
-        except Exception as e:
-            logger.error(f"[FAIL] Failed to get TradingView price for {symbol}: {e}")
-            return {
-                "symbol": symbol,
-                "error": str(e),
-                "source": "TradingView",
             }
 
+        except Exception as e:
+            logger.error("[FAIL] Failed to get TradingView price for %s: %s", symbol, e)
+            return {"symbol": symbol, "error": str(e), "source": "TradingView"}
+
     async def get_yahoo_finance_price(self, symbol: str) -> Dict[str, Any]:
-        """Get current price from Yahoo Finance."""
+        """Get current price from Yahoo Finance. Opens a new tab so user's TradingView tab stays intact."""
         if not self.is_running:
             await self.start()
-        
-        url = f"https://finance.yahoo.com/quote/{symbol}/"
-        
+
         try:
-            # Navigate to Yahoo Finance
-            await self.navigate_to(url)
-            
-            # Wait for price to load
-            await self.page.wait_for_selector('[data-testid="qsp-price"]', timeout=10000)
-            
-            # Scrape the current price
-            price_text = await self.page.get_attribute('[data-testid="qsp-price"]', 'innerText')
+            # Open Yahoo Finance in a new tab to avoid disturbing user's TradingView
+            new_page = await self.context.new_page()
+            url = f"https://finance.yahoo.com/quote/{symbol}/"
+            logger.info("[CHART] Opening Yahoo Finance in new tab for %s", symbol)
+            await new_page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2)
+
+            # Scrape price
+            price_text = await new_page.text_content('[data-testid="qsp-price"]')
             price = float(price_text.replace(',', '').strip())
-            
+
             # Scrape change
             try:
-                change_text = await self.page.get_attribute('[data-testid="qsp-price-change"]', 'innerText')
+                change_text = await new_page.text_content('[data-testid="qsp-price-change"]')
                 change = change_text.strip()
-            except:
+            except Exception:
                 change = "0.00"
-            
-            logger.info(f"[CHART] Yahoo Finance data for {symbol}: ${price:.2f} ({change})")
-            
+
+            await new_page.close()
+            logger.info("[CHART] Yahoo Finance data for %s: $%.2f (%s)", symbol, price, change)
             return {
                 "symbol": symbol,
                 "price": price,
@@ -480,14 +537,10 @@ class BrowserAgent:
                 "source": "Yahoo Finance",
                 "timestamp": datetime.now().isoformat(),
             }
-            
+
         except Exception as e:
-            logger.error(f"[FAIL] Failed to get Yahoo Finance price for {symbol}: {e}")
-            return {
-                "symbol": symbol,
-                "error": str(e),
-                "source": "Yahoo Finance",
-            }
+            logger.error("[FAIL] Failed to get Yahoo Finance price for %s: %s", symbol, e)
+            return {"symbol": symbol, "error": str(e), "source": "Yahoo Finance"}
 
     async def check_multiple_sources(self, symbol: str) -> Dict[str, Any]:
         """

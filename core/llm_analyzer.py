@@ -23,6 +23,21 @@ from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
 
 logger = logging.getLogger(__name__)
 
+# Cloud fallback brain for when local Ollama is unavailable
+_cloud_brain = None
+
+
+def _get_cloud_brain():
+    """Lazy initializer for cloud fallback brain to avoid circular imports."""
+    global _cloud_brain
+    if _cloud_brain is None:
+        try:
+            from core.brain import GeminiBrain
+            _cloud_brain = GeminiBrain()
+        except Exception as exc:
+            logger.warning("Cloud fallback brain unavailable: %s", exc)
+    return _cloud_brain
+
 
 def _get_or_create_event_loop():
     """Get existing event loop or create a new one safely."""
@@ -80,6 +95,39 @@ class LLMAnalyzer:
 
         except Exception as e:
             logger.error(f"Swarm consensus failed: {e}")
+            # -- Cloud Fallback: if local Ollama fails, try OpenRouter once --
+            cloud_brain = _get_cloud_brain()
+            if cloud_brain and cloud_brain.is_available():
+                try:
+                    logger.warning("[SYSTEM] Local Predator down. Attempting cloud fallback for analysis.")
+                    package = {
+                        "recent_ohlcv": [],
+                        "liquidity_zones": [],
+                        "liquidity_zone_label": "N/A",
+                        "signal_type": "SWARM_FALLBACK",
+                        "rsi": market_data.indicators.get("RSI", 50.0),
+                        "atr": market_data.indicators.get("ATR", 0.0),
+                        "asset": market_data.asset,
+                    }
+                    decision = cloud_brain.request_decision("BUY", package)
+                    verdict = decision.get("verdict", "[SIGNAL] WAIT")
+                    action = SignalAction.BUY if "BUY" in verdict else SignalAction.SELL if "SELL" in verdict else SignalAction.HOLD
+                    output = LLMAnalysisOutput(
+                        action=action,
+                        asset=market_data.asset,
+                        confidence=ConfidenceLevel.MEDIUM,
+                        reason=f"[CLOUD FALLBACK] {decision.get('reasoning', 'Cloud brain override')} (model={decision.get('model', 'unknown')})",
+                    )
+                    transcript = DebateTranscript(
+                        asset=market_data.asset,
+                        ceo_verdict=f"[CLOUD FALLBACK] {verdict} {market_data.asset}",
+                        ceo_full_statement=output.reason,
+                    )
+                    logger.info("Cloud fallback analysis succeeded: %s %s", action.value, market_data.asset)
+                    return output, transcript
+                except Exception as cloud_exc:
+                    logger.error("Cloud fallback also failed: %s", cloud_exc)
+
             output = LLMAnalysisOutput(
                 action=SignalAction.HOLD,
                 asset=market_data.asset,

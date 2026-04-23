@@ -72,6 +72,89 @@ def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = No
         return {"error": str(e)}
 
 
+def analyze_chart_with_vision(
+    screenshot_base64: str,
+    symbol: str,
+    model: str = None,
+    timeout: Optional[int] = None,
+) -> dict:
+    """
+    Send a chart screenshot to the Ollama v1 endpoint for visual trade analysis.
+
+    Uses OpenAI-compatible /v1/chat/completions format so vision models
+    (llava, qwen2.5-vl, moondream) can analyze the screenshot.
+
+    Returns:
+        {"signal": "BUY|SELL|NONE", "reason": "...", "raw": "..."}
+    """
+    url = f"{config.OLLAMA_V1_URL}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {config.OLLAMA_API_KEY}",
+    }
+
+    prompt = (
+        f"Analyze this {symbol} chart. Is there a high-probability trade setup? "
+        "Answer with: SIGNAL: [BUY/SELL/NONE] and REASON: [Short text]."
+    )
+
+    payload = {
+        "model": model or config.MULTI_ASSET_VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{screenshot_base64}"},
+                    },
+                ],
+            }
+        ],
+        "stream": False,
+        "temperature": 0.1,
+        "max_tokens": 256,
+        "top_p": 0.9,
+    }
+
+    try:
+        request_timeout = max(int(timeout or config.LLM_TIMEOUT), 90)
+        logger.info(
+            "[VISION] Sending %s chart to %s (timeout=%ss)",
+            symbol,
+            config.OLLAMA_V1_URL,
+            request_timeout,
+        )
+        response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
+        response.raise_for_status()
+        data = response.json()
+
+        choices = data.get("choices", [])
+        if not choices:
+            logger.warning("[VISION] No choices in response for %s", symbol)
+            return {"signal": "NONE", "reason": "Empty model response", "raw": str(data)}
+
+        content = choices[0].get("message", {}).get("content", "")
+        logger.info("[VISION] %s analysis received (%s chars)", symbol, len(content))
+
+        # Parse SIGNAL and REASON
+        signal_match = re.search(r"SIGNAL:\s*(BUY|SELL|NONE)", content, re.IGNORECASE)
+        signal = signal_match.group(1).upper() if signal_match else "NONE"
+
+        reason_match = re.search(r"REASON:\s*(.+?)(?:\n|$)", content, re.IGNORECASE)
+        reason = reason_match.group(1).strip() if reason_match else content[:240].strip()
+
+        return {"signal": signal, "reason": reason, "raw": content}
+
+    except requests.exceptions.ConnectionError:
+        logger.error("[VISION] Cannot connect to Ollama v1 at %s", config.OLLAMA_V1_URL)
+        return {"signal": "NONE", "reason": "Ollama connection failed", "raw": ""}
+    except Exception as e:
+        logger.error("[VISION] Error analyzing %s: %s", symbol, e)
+        return {"signal": "NONE", "reason": f"Vision analysis error: {e}", "raw": ""}
+
+
 def parse_json_response(raw: str) -> dict:
     """Clean and parse JSON from LLM response."""
     if not raw:

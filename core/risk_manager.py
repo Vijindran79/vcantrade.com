@@ -103,14 +103,16 @@ class PositionSizer:
     - Stop-loss anchored to the nearest support (BUY) or resistance (SELL).
     - If the stop distance exceeds ``MAX_STOP_DISTANCE_PCT`` the trade is
       flagged *Too Risky* and ``evaluate()`` returns ``ok=False``.
+    - Respects ``open_risk`` so total exposure never exceeds account capacity.
     """
 
     MAX_STOP_DISTANCE_PCT: float = 5.0  # Hard cap; above this -> rejected
     SL_BUFFER: float = 0.002            # 0.2% beyond S/R level
 
-    def __init__(self, balance: float, risk_pct: float = 1.0):
+    def __init__(self, balance: float, risk_pct: float = 1.0, open_risk: float = 0.0):
         self.balance = max(0.0, balance)
         self.risk_pct = max(0.1, risk_pct)
+        self.open_risk = max(0.0, open_risk)
 
     def evaluate(
         self,
@@ -173,8 +175,9 @@ class PositionSizer:
                 ),
             }
 
-        # --- Size the position at exactly 1% risk ---
-        risk_amount = self.balance * (self.risk_pct / 100.0)
+        # --- Size the position at exactly 1% risk of AVAILABLE balance ---
+        available_balance = max(0.0, self.balance - self.open_risk)
+        risk_amount = available_balance * (self.risk_pct / 100.0)
         per_unit_risk = abs(entry_price - stop_loss)
         quantity = risk_amount / per_unit_risk if per_unit_risk > 0 else 0.0
 
@@ -187,6 +190,6 @@ class PositionSizer:
             "quantity": quantity,
             "reason": (
                 f"Stop @ ${stop_loss:.4f} ({stop_distance_pct:.2f}% distance) "
-                f"| Risk ${risk_amount:.2f}"
+                f"| Risk ${risk_amount:.2f} (avail=${max(0.0, self.balance - self.open_risk):.2f})"
             ),
         }

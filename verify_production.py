@@ -11,7 +11,7 @@ modules = [
     'config',
     'core.models',
     'core.scanner',
-    'core.signal_dispatcher',
+    'services.signal_dispatcher',
     'core.llm_analyzer',
     'core.swarm_consensus',
     'core.trade_engine',

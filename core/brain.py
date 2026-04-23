@@ -68,13 +68,10 @@ class GeminiBrain:
         if api_key:
             return [str(api_key).strip()]
 
-        keys = [
-            str(key).strip()
-            for key in getattr(config, "OPENROUTER_API_KEYS", [])
-            if str(key).strip()
-        ]
-        if keys:
-            return keys
+        # Use the pre-parsed key list from config (budget-friendly order)
+        key_list = getattr(config, "OPENROUTER_KEY_LIST", [])
+        if key_list:
+            return list(key_list)
 
         single_key = str(getattr(config, "OPENROUTER_API_KEY", "") or "").strip()
         return [single_key] if single_key else []
@@ -123,8 +120,8 @@ class GeminiBrain:
 
         last_error = "OpenRouter returned no usable response."
         for model_name in self.models:
-            attempts = max(1, len(self.api_keys))
-            for _ in range(attempts):
+            # Try every key for this model before moving to the next model
+            for _ in range(len(self.api_keys)):
                 try:
                     response = self._client.chat.completions.create(
                         model=model_name,
@@ -152,25 +149,39 @@ class GeminiBrain:
                     if decision:
                         return decision
                     last_error = f"Model {model_name} returned unparsable content."
-                    return self._use_predator_fallback(
-                        proposed_action, package, last_error
-                    )
+                    # Unparsable content is not a key error; try next model
+                    break
                 except Exception as exc:  # pragma: no cover - SDK/network failure
                     last_error = self._describe_exception(exc)
-                    if self._should_rotate_key(exc) and self._rotate_openrouter_key():
+                    if self._should_rotate_key(exc):
+                        if self._rotate_openrouter_key():
+                            logger.warning(
+                                "OpenRouter key rotated after failure: %s",
+                                last_error,
+                            )
+                            continue  # Retry same model with next key
+                        else:
+                            logger.warning(
+                                "OpenRouter all keys exhausted for model %s",
+                                model_name,
+                            )
+                            break  # Move to next model
+                    else:
+                        # Non-rotation error (e.g., 500, timeout) - try next model
                         logger.warning(
-                            "OpenRouter key rotated after request failure: %s",
+                            "OpenRouter non-rotation error on %s: %s",
+                            model_name,
                             last_error,
                         )
-                        continue
-                    logger.warning(
-                        "OpenRouter request failed for %s: %s", model_name, last_error
-                    )
-                    return self._use_predator_fallback(
-                        proposed_action, package, last_error
-                    )
+                        break  # Move to next model
 
-        return self._use_predator_fallback(proposed_action, package, last_error)
+        # Every model and every key was exhausted
+        logger.error(
+            "[SYSTEM] Cloud APIs exhausted. Switching to Local Predator for this trade."
+        )
+        return self._use_predator_fallback(
+            proposed_action, package, f"All OpenRouter keys and models exhausted. Last error: {last_error}"
+        )
 
     def _extract_message_content(self, content: Any) -> str:
         if isinstance(content, str):
@@ -264,6 +275,9 @@ class GeminiBrain:
         decision = self.predator.request_decision(proposed_action, fallback_package)
         if not decision.get("reasoning"):
             decision["reasoning"] = str(reason)[:240]
+        # Ensure fallback is clearly marked in the decision
+        decision["brain_used"] = "OLLAMA_PREDATOR"
+        decision["fallback_mode"] = True
         return decision
 
     def _should_rotate_key(self, exc: Exception) -> bool:

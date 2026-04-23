@@ -362,7 +362,11 @@ class FinancialSafetyManager:
         except Exception as e:
             self.last_news_scrape_failed = True
             self.last_news_scrape_error = str(e)
-            logger.error(f"Forex Factory scrape failed: {e}")
+            err_msg = str(e)
+            if "DNS" in err_msg or "Cannot connect" in err_msg:
+                logger.info("Forex Factory unreachable (network/DNS) - skipping news check")
+            else:
+                logger.error(f"Forex Factory scrape failed: {e}")
             return []
 
     async def _scrape_investing_com(self) -> List[Dict]:
@@ -387,7 +391,11 @@ class FinancialSafetyManager:
         except Exception as e:
             self.last_news_scrape_failed = True
             self.last_news_scrape_error = str(e)
-            logger.error(f"Investing.com scrape failed: {e}")
+            err_msg = str(e)
+            if "DNS" in err_msg or "Cannot connect" in err_msg:
+                logger.info("Investing.com unreachable (network/DNS) - skipping news check")
+            else:
+                logger.error(f"Investing.com scrape failed: {e}")
             return []
 
     def _deduplicate_events(self, events: List[Dict]) -> List[Dict]:

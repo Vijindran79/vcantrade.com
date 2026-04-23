@@ -228,7 +228,7 @@ print("\n[SAT] TEST 4: Signal Dispatcher")
 print("-" * 70)
 
 try:
-    from core.signal_dispatcher import SignalDispatcher
+    from services.signal_dispatcher import SignalDispatcher
     record_result("SignalDispatcher import", True)
     
     # Test initialization

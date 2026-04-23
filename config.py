@@ -25,18 +25,32 @@ PROP_ACCOUNT_SIZE = float(os.getenv("PROP_ACCOUNT_SIZE", "50000.0"))
 PROP_PHASE = int(os.getenv("PROP_PHASE", "1"))
 PROP_IS_FUNDED = os.getenv("PROP_IS_FUNDED", "False").lower() == "true"
 
+# ===== ACCOUNT BALANCE (MUST MATCH YOUR PROP FIRM OR BROKER ACCOUNT) =====
+CURRENT_BALANCE = float(os.getenv("CURRENT_BALANCE", "50000.0"))
+
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
-DRY_RUN = os.getenv("DRY_RUN", "False").lower() == "true"
+# PRODUCTION RULE: DRY_RUN defaults to True. You MUST explicitly set DRY_RUN=False in .env to trade live.
+DRY_RUN = os.getenv("DRY_RUN", "True").lower() == "true"
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "100.00"))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 COOLDOWN_AFTER_STOP = int(os.getenv("COOLDOWN_AFTER_STOP", "300"))
 KILL_SWITCH = False
 
+# ===== TRADING HOURS (UTC) =====
+# Set your allowed trading window. The bot will NOT trade outside these hours.
+# CME Globex futures are open 23 hours with 1 hour maintenance (approx 21:00-22:00 UTC).
+# Example: 12=12:00 PM UTC, 21=9:00 PM UTC. Use -1 to disable time restriction.
+TRADING_START_HOUR_UTC = int(os.getenv("TRADING_START_HOUR_UTC", "12"))
+TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
+
 # ===== TRADING MODE =====
 TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
 
 # ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
+# Native Ollama API (for /api/generate, /api/tags, model management)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+# OpenAI-compatible v1 endpoint (for /v1/chat/completions with vision)
+OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
 VAST_API_TOKEN = None
@@ -49,18 +63,33 @@ GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "20"))
 
 
 # ===== EXTERNAL BRAIN PROVIDERS =====
-# Primary OpenRouter Key (Using your main account)
-OPENROUTER_API_KEY = "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"
+# SECURITY: Load API keys from .env file only. Never hardcode keys in production.
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEYS = os.getenv("OPENROUTER_API_KEYS", "")
+GROQ_API_KEYS = os.getenv("GROQ_API_KEYS", "")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+BRAINSTORM_API_KEY = os.getenv("BRAINSTORM_API_KEY", "")
 
-# Backup OpenRouter Keys (The bot will rotate if one fails)
-OPENROUTER_API_KEYS = "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,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"
 
-# Groq Keys (For ultra-fast secondary analysis)
-GROQ_API_KEYS = "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,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,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"
+def _parse_key_list(raw: str) -> list[str]:
+    """Parse a comma-separated key string into a clean list."""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(k).strip() for k in raw if str(k).strip()]
+    return [k.strip() for k in str(raw).split(",") if k.strip()]
 
-# Nvidia and Brainstorm (The "Deep Research" layers)
-NVIDIA_API_KEY = "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"
-BRAINSTORM_API_KEY = "sk-8226971a2ecd43adb234d88b2e102597"
+
+# Parsed key lists for rotation logic.
+# Budget-friendly order: free/low-cost keys should be listed FIRST in .env.
+OPENROUTER_KEY_LIST = _parse_key_list(OPENROUTER_API_KEYS) or _parse_key_list(OPENROUTER_API_KEY)
+GROQ_KEY_LIST = _parse_key_list(GROQ_API_KEYS)
+NVIDIA_KEY_LIST = _parse_key_list(NVIDIA_API_KEY)
+BRAINSTORM_KEY_LIST = _parse_key_list(BRAINSTORM_API_KEY)
+
+# Google API Key slot (reserved, stays empty as requested)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 # Local execution settings
 LLM_TIMEOUT = 90  # Heavy local Qwen runs need more time to finish reliably
@@ -85,6 +114,20 @@ SCAN_INTERVAL = 10
 WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.5"))
 CLOUD_TICKERS = ["BTC-USD", "ES=F", "NQ=F"]
+
+# ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
+# Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
+# sends to Cloud Brain via SSH tunnel, and executes trades locally.
+MULTI_ASSET_TICKERS = ["CME_MINI:MNQ1!", "CME_MINI:MES1!", "NYMEX:MCL1!"]
+MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "30"))
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "qwen2.5:32b")
+MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
+
+# ===== EXECUTION MODE SWITCH =====
+# "UI"  = Click buttons on screen via Playwright/RPA (default)
+# "MT5" = Send orders to MetaTrader 5 via mt5.order_send()
+EXECUTION_MODE = os.getenv("EXECUTION_MODE", "UI")
+MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.1"))
 
 # Technical Signal Thresholds
 VOLUME_SPIKE_MULTIPLIER = 3.0
@@ -112,6 +155,13 @@ HOTKEY_BUY = "<ctrl>+b"
 HOTKEY_SELL = "<ctrl>+s"
 HOTKEY_CLOSE = "<ctrl>+x"
 HUMAN_LATENCY = os.getenv("HUMAN_LATENCY", "True").lower() == "true"
+
+# Safe fallback coordinates for RPA button clicks when color detection fails.
+# Update these to match your screen resolution and TradingView layout.
+FALLBACK_COORDS = {
+    "buy_button": (int(os.getenv("FALLBACK_BUY_X", "960")), int(os.getenv("FALLBACK_BUY_Y", "540"))),
+    "sell_button": (int(os.getenv("FALLBACK_SELL_X", "960")), int(os.getenv("FALLBACK_SELL_Y", "580"))),
+}
 
 # ===== SLIPPAGE GUARD =====
 MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "2.50"))
