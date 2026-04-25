@@ -683,12 +683,12 @@ class MarketSessionDetector:
         
         return f"{emoji} {tag} | Markets: {markets_str}"
 
-    def should_allow_new_trades(self) -> bool:
+    def should_allow_new_trades(self, ticker: str = "") -> bool:
         """
         Check if new trades should be allowed based on current session.
         
         Returns False for:
-        - Saturday (Close-Only/Audit day)
+        - Saturday (Close-Only/Audit day) — except crypto which trades 24/7
         - US/HK Holidays (for affected markets)
         """
         active_markets, primary_session = self.detect_active_sessions()
@@ -696,8 +696,10 @@ class MarketSessionDetector:
         if primary_session == MarketSession.ALWAYS_OPEN:
             return True
         
-        # Saturday = Close only, no new trades
+        # Saturday = Close only, no new trades — EXCEPT crypto trades 24/7
         if primary_session == MarketSession.SATURDAY_AUDIT:
+            if ticker and is_crypto_ticker(ticker):
+                return True
             return False
         
         # Sunday = Crypto only, but new trades allowed

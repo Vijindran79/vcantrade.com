@@ -3766,7 +3766,9 @@ class VcaniTradeApp:
         CloudScannerThread emits this signal only after a successful HTTP dispatch,
         so executing here would double-fire the same trade.
         """
-        if not self.can_trade:
+        from core.market_sessions import is_crypto_ticker
+        ticker = signal_data.get("ticker", "UNKNOWN")
+        if not self.can_trade and not is_crypto_ticker(ticker):
             self.cmd.log(
                 '<span style="color:#D29922;font-weight:bold">[APEX BLOCK]</span> '
                 'Cloud signal rejected — trading halted by Apex gate'
@@ -4907,7 +4909,9 @@ class VcaniTradeApp:
         Routes to MT5 or UI (RPA) based on config.EXECUTION_MODE.
         Returns True if execution succeeded.
         """
-        if not self.can_trade:
+        from core.market_sessions import is_crypto_ticker
+        is_crypto = is_crypto_ticker(symbol)
+        if not self.can_trade and not is_crypto:
             self.cmd.log(
                 f'<span style="color:#D29922;font-weight:bold">[BLOCKED]</span> '
                 f'Trade execution blocked: Apex gate or safety stop active'

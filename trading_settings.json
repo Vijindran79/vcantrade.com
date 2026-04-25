@@ -4,7 +4,11 @@
     "BTCUSD",
     "ETHUSD",
     "XRPUSD",
-    "SOLUSD"
+    "SOLUSD",
+    "BTC-USD",
+    "ETC-USD",
+    "XRP-USD",
+    "SOL-USD"
   ],
   "investment_amount": 1000.0,
   "lot_size": 2.0,
