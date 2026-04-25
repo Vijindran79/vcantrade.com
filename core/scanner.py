@@ -1,11 +1,12 @@
 """
 VcanTrade AI - Cloud Market Scanner
-Monitors 10 chosen counters using yfinance without a screen.
+Monitors chosen counters using MetaTrader 5 or yfinance data.
 Detects technical signals (RSI Cross, Volume Spike, SMA Cross) and triggers Swarm Debate.
 
 Architecture:
-- Runs on Vast.ai server (headless)
-- Uses yfinance for market data
+- Runs on Vast.ai server (headless) or local Windows machine
+- Uses MetaTrader5 (mt5.copy_rates_from_pos) when EXECUTION_MODE == "MT5"
+- Falls back to cached data when MT5 is unavailable (UI/Tradovate mode)
 - Calculates technical indicators (RSI, SMA, Volume)
 - Triggers Swarm Consensus when signal detected
 - Dispatches high-confidence signals (>0.70) to Local Executor
@@ -18,10 +19,22 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
-import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import requests
+
+# Lazy import MetaTrader5 — only loaded when EXECUTION_MODE == "MT5"
+mt5 = None
+
+def _lazy_mt5():
+    global mt5
+    if mt5 is None:
+        try:
+            import MetaTrader5 as _mt5
+            mt5 = _mt5
+        except ImportError:
+            mt5 = False  # Mark as unavailable
+    return mt5
 
 import config
 from core.brain import GeminiBrain
@@ -52,7 +65,7 @@ class TechnicalSignal:
 
 class CloudScanner:
     """
-    Cloud-based market scanner that monitors 10 tickers using yfinance.
+    Cloud-based market scanner that monitors tickers using MetaTrader 5 data.
     Detects technical signals and triggers Swarm Debate when conditions met.
 
     NOW WITH MARKET SESSION AWARENESS:
@@ -89,10 +102,63 @@ class CloudScanner:
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
 
+        # Initialize MT5 connection only when in MT5 mode
+        self._mt5_initialized = False
+        if config.EXECUTION_MODE.upper() == "MT5":
+            self._ensure_mt5()
+        else:
+            logger.info("[CLOUD] UI mode detected — MT5 initialization skipped")
+
         logger.info("[CLOUD] Cloud Scanner initialized with Market Session Awareness")
         logger.info(
             f"Circuit breaker: {self.max_consecutive_errors} consecutive errors before alert"
         )
+
+    def _ensure_mt5(self) -> bool:
+        """Lazy-initialize MetaTrader 5 connection."""
+        if self._mt5_initialized:
+            return True
+        _mt5 = _lazy_mt5()
+        if _mt5 is False:
+            logger.debug("[MT5] MetaTrader5 not installed — skipping initialization")
+            return False
+        try:
+            if not _mt5.initialize():
+                err = _mt5.last_error()
+                logger.error("[MT5] initialize() failed: %s", err)
+                return False
+            self._mt5_initialized = True
+            account = _mt5.account_info()
+            if account:
+                logger.info(
+                    "[MT5] Connected | Account: %s | Balance: %.2f %s",
+                    account.login,
+                    account.balance,
+                    account.currency,
+                )
+            else:
+                logger.warning("[MT5] Connected but no account info retrieved")
+            return True
+        except Exception as e:
+            logger.error("[MT5] Initialization error: %s", e)
+            return False
+
+    def _mt5_timeframe(self, interval: str) -> Optional[int]:
+        """Map string interval to MT5 timeframe constant. Returns None if MT5 unavailable."""
+        _mt5 = _lazy_mt5()
+        if _mt5 is False:
+            return None
+        mapping = {
+            "1m": _mt5.TIMEFRAME_M1,
+            "3m": _mt5.TIMEFRAME_M3,
+            "5m": _mt5.TIMEFRAME_M5,
+            "15m": _mt5.TIMEFRAME_M15,
+            "30m": _mt5.TIMEFRAME_M30,
+            "1h": _mt5.TIMEFRAME_H1,
+            "4h": _mt5.TIMEFRAME_H4,
+            "1d": _mt5.TIMEFRAME_D1,
+        }
+        return mapping.get(interval, _mt5.TIMEFRAME_M1)
 
     def set_runtime_context(
         self, mode: str, dashboard_tickers: Optional[List[str]] = None
@@ -115,8 +181,16 @@ class CloudScanner:
                 logger.debug(f"Status callback failed for {ticker}/{status}: {e}")
 
     def _canonical_market_ticker(self, ticker: str) -> str:
-        """Map common watchlist aliases to yfinance-compatible symbols."""
-        return settings_manager.normalize_ticker(ticker)
+        """Map watchlist aliases to yfinance-compatible symbols."""
+        # 1. Check explicit TradingView -> Yahoo Finance mapping
+        if hasattr(config, "SYMBOL_MAP") and ticker in config.SYMBOL_MAP:
+            return config.SYMBOL_MAP[ticker]
+        # 2. Normalize via settings aliases
+        normalized = settings_manager.normalize_ticker(ticker)
+        if hasattr(config, "SYMBOL_MAP") and normalized in config.SYMBOL_MAP:
+            return config.SYMBOL_MAP[normalized]
+        # 3. Fall back to normalized ticker
+        return normalized
 
     def get_scan_interval(self) -> float:
         """Scale scan cadence based on active watchlist size."""
@@ -569,9 +643,8 @@ class CloudScanner:
         period: str = "1d",
         interval: str = "1m",
     ) -> Optional[pd.DataFrame]:
-        """Fetch market data using yfinance with 3-try retry loop."""
+        """Fetch OHLCV market data from MetaTrader 5 using copy_rates_from_pos."""
         import concurrent.futures
-        import time
 
         market_ticker = self._canonical_market_ticker(ticker)
         cache_key = (market_ticker, period, interval)
@@ -579,36 +652,112 @@ class CloudScanner:
         max_retries = 3
         retry_delay = 2  # seconds
 
+        # Map period string to count of bars to fetch
+        bars_map = {
+            "1d": 1440,   # 1 day of 1m bars
+            "2d": 2880,
+            "5d": 7200,
+            "7d": 10080,
+        }
+        count = bars_map.get(period, 1440)
+
+        # If interval is 3m/5m/15m etc, adjust count proportionally
+        interval_minutes = 1
+        if interval.endswith("m"):
+            try:
+                interval_minutes = int(interval[:-1])
+            except ValueError:
+                interval_minutes = 1
+        elif interval.endswith("h"):
+            try:
+                interval_minutes = int(interval[:-1]) * 60
+            except ValueError:
+                interval_minutes = 60
+        count = max(80, count // max(1, interval_minutes))
+
+        mt5_tf = self._mt5_timeframe(interval)
+
+        # Fast path: MT5 unavailable (UI mode or not installed) — skip directly to fallback
+        if mt5_tf is None:
+            fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+            if fallback is not None:
+                return fallback
+            logger.warning("[WARN] MT5 unavailable - Skipping Cycle for %s", ticker)
+            return None
+
         for attempt in range(max_retries):
             try:
-                symbol = yf.Ticker(market_ticker)
+                if not self._ensure_mt5():
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                    if fallback is not None:
+                        return fallback
+                    logger.error("[WARN] MT5 not initialized - Skipping Cycle for %s", ticker)
+                    return None
 
-                def fetch_data():
-                    return symbol.history(period=period, interval=interval)
-
-                # Run in thread with timeout
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(fetch_data)
-                    df = future.result(timeout=15)
-
-                # Validate data quality
-                if df is None or df.empty or df["Close"].iloc[-1] is None:
+                _mt5 = _lazy_mt5()
+                # Select symbol in MarketWatch
+                if not _mt5.symbol_select(market_ticker, True):
                     if attempt < max_retries - 1:
                         logger.warning(
-                            f"Empty data for {ticker} via {market_ticker} (attempt {attempt + 1}/{max_retries}) - retrying..."
+                            "Symbol %s not in MarketWatch (attempt %d/%d) - retrying...",
+                            market_ticker, attempt + 1, max_retries
                         )
-                        time.sleep(retry_delay)
+                        await asyncio.sleep(retry_delay)
                         continue
-                    else:
-                        fallback = self._fallback_market_data(
-                            ticker, market_ticker, period, interval, cache_key
+                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                    if fallback is not None:
+                        return fallback
+                    logger.error("[WARN] Symbol %s unavailable in MT5 - Skipping Cycle", ticker)
+                    return None
+
+                def _fetch():
+                    rates = _mt5.copy_rates_from_pos(market_ticker, mt5_tf, 0, count)
+                    return rates
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(_fetch)
+                    rates = future.result(timeout=15)
+
+                if rates is None or len(rates) == 0:
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            "Empty MT5 data for %s (attempt %d/%d) - retrying...",
+                            market_ticker, attempt + 1, max_retries
                         )
-                        if fallback is not None:
-                            return fallback
-                        logger.error(
-                            f"[WARN] Market Data Timeout - Skipping Cycle for {ticker}"
-                        )
-                        return None
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                    if fallback is not None:
+                        return fallback
+                    logger.error("[WARN] Market Data Timeout - Skipping Cycle for %s", ticker)
+                    return None
+
+                df = pd.DataFrame(rates)
+                # MT5 returns time as seconds since epoch; convert to datetime
+                df["time"] = pd.to_datetime(df["time"], unit="s")
+                df = df.rename(columns={
+                    "time": "Time",
+                    "open": "Open",
+                    "high": "High",
+                    "low": "Low",
+                    "close": "Close",
+                    "tick_volume": "Volume",
+                    "real_volume": "RealVolume",
+                })
+                df = df.set_index("Time")
+
+                if df.empty or df["Close"].iloc[-1] is None:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                    if fallback is not None:
+                        return fallback
+                    logger.error("[WARN] Market Data Timeout - Skipping Cycle for %s", ticker)
+                    return None
 
                 sanitized = df.copy()
                 self.market_data_cache[cache_key] = sanitized
@@ -625,40 +774,33 @@ class CloudScanner:
             except concurrent.futures.TimeoutError:
                 if attempt < max_retries - 1:
                     logger.warning(
-                        f"Timeout fetching data for {ticker} (attempt {attempt + 1}/{max_retries}) - retrying..."
+                        "Timeout fetching MT5 data for %s (attempt %d/%d) - retrying...",
+                        ticker, attempt + 1, max_retries
                     )
-                    time.sleep(retry_delay)
+                    await asyncio.sleep(retry_delay)
                     continue
-                else:
-                    fallback = self._fallback_market_data(
-                        ticker, market_ticker, period, interval, cache_key
-                    )
-                    if fallback is not None:
-                        return fallback
-                    logger.error(f"[WARN] Market Data Timeout - Skipping Cycle for {ticker}")
-                    return None
+                fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                if fallback is not None:
+                    return fallback
+                logger.error("[WARN] Market Data Timeout - Skipping Cycle for %s", ticker)
+                return None
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(
-                        f"Error fetching data for {ticker}: {e} (attempt {attempt + 1}/{max_retries}) - retrying..."
+                        "Error fetching MT5 data for %s: %s (attempt %d/%d) - retrying...",
+                        ticker, e, attempt + 1, max_retries
                     )
-                    time.sleep(retry_delay)
+                    await asyncio.sleep(retry_delay)
                     continue
-                else:
-                    fallback = self._fallback_market_data(
-                        ticker, market_ticker, period, interval, cache_key
+                fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                if fallback is not None:
+                    logger.warning(
+                        "Using fallback market data for %s after fetch failure: %s",
+                        ticker, e,
                     )
-                    if fallback is not None:
-                        logger.warning(
-                            "Using fallback market data for %s after fetch failure: %s",
-                            ticker,
-                            e,
-                        )
-                        return fallback
-                    logger.error(
-                        f"[WARN] Market Data Timeout - Skipping Cycle for {ticker}: {e}"
-                    )
-                    return None
+                    return fallback
+                logger.error("[WARN] Market Data Timeout - Skipping Cycle for %s: %s", ticker, e)
+                return None
 
         return None
 
@@ -670,7 +812,7 @@ class CloudScanner:
         interval: str,
         cache_key: Tuple[str, str, str],
     ) -> Optional[pd.DataFrame]:
-        """Return cached bars or synthesize intraday bars from last known close/daily history."""
+        """Return cached bars if available. MT5 does not require synthetic fallback."""
         cached = self.market_data_cache.get(cache_key)
         if cached is not None and not cached.empty:
             logger.warning(
@@ -678,89 +820,21 @@ class CloudScanner:
             )
             return cached.copy()
 
-        try:
-            daily_history = yf.Ticker(market_ticker).history(period="5d", interval="1d")
-        except Exception as e:
-            daily_history = None
-            logger.debug("Daily fallback fetch failed for %s: %s", ticker, e)
+        if market_ticker in self.last_close_cache:
+            close_val = self.last_close_cache[market_ticker]
+            logger.warning(
+                "No MT5 data for %s — returning minimal single-bar fallback", ticker
+            )
+            now = datetime.utcnow()
+            df = pd.DataFrame(
+                [[close_val, close_val, close_val, close_val, 0.0]],
+                index=[now],
+                columns=["Open", "High", "Low", "Close", "Volume"],
+            )
+            self.market_data_cache[cache_key] = df.copy()
+            return df
 
-        close_values: List[float] = []
-        if (
-            daily_history is not None
-            and not daily_history.empty
-            and "Close" in daily_history
-        ):
-            close_values = [
-                float(value) for value in daily_history["Close"].dropna().tolist()
-            ]
-
-        if not close_values and market_ticker in self.last_close_cache:
-            close_values = [self.last_close_cache[market_ticker]]
-
-        if not close_values:
-            return None
-
-        fallback = self._build_synthetic_intraday_frame(close_values, interval)
-        if fallback is None or fallback.empty:
-            return None
-
-        self.market_data_cache[cache_key] = fallback.copy()
-        self.last_close_cache[market_ticker] = float(fallback["Close"].iloc[-1])
-        logger.warning(
-            "Synthesized fallback bars for %s from last known close data", ticker
-        )
-        return fallback
-
-    def _build_synthetic_intraday_frame(
-        self, close_values: List[float], interval: str
-    ) -> Optional[pd.DataFrame]:
-        """Build flat-to-gently-trended candles so weekend fetch failures don't abort analysis."""
-        normalized = [float(value) for value in close_values if value is not None]
-        if not normalized:
-            return None
-
-        freq_map = {
-            "1m": "1min",
-            "3m": "3min",
-            "5m": "5min",
-            "15m": "15min",
-            "1h": "1h",
-            "1d": "1d",
-        }
-        freq = freq_map.get(interval, "1min")
-        bar_count = max(80, len(normalized) * 24)
-
-        samples: List[float] = []
-        if len(normalized) == 1:
-            samples = [normalized[0]] * bar_count
-        else:
-            segments = len(normalized) - 1
-            bars_per_segment = max(1, bar_count // segments)
-            for index in range(segments):
-                start = normalized[index]
-                end = normalized[index + 1]
-                for step in range(bars_per_segment):
-                    ratio = step / max(1, bars_per_segment)
-                    samples.append(start + ((end - start) * ratio))
-            samples.append(normalized[-1])
-            if len(samples) < bar_count:
-                samples.extend([normalized[-1]] * (bar_count - len(samples)))
-            samples = samples[-bar_count:]
-
-        index = pd.date_range(end=datetime.utcnow(), periods=len(samples), freq=freq)
-        rows = []
-        previous_close = samples[0]
-        for close_price in samples:
-            wiggle = max(abs(close_price) * 0.0005, 0.01)
-            row_open = previous_close
-            row_high = max(row_open, close_price) + wiggle
-            row_low = min(row_open, close_price) - wiggle
-            rows.append((row_open, row_high, row_low, close_price, 0.0))
-            previous_close = close_price
-
-        return pd.DataFrame(
-            rows, index=index, columns=["Open", "High", "Low", "Close", "Volume"]
-        )
+        return None
 
     async def _evaluate_timeframe_alignment(
         self, ticker: str, action: str, signal_type: str = "", strength: float = 0.0
@@ -797,15 +871,9 @@ class CloudScanner:
                 return None
 
         for label, period, interval in timeframe_config:
-            if interval == "3m":
-                one_min_df = await self._fetch_market_data(
-                    ticker, period=period, interval="1m"
-                )
-                df = _resample_to_3m(one_min_df)
-            else:
-                df = await self._fetch_market_data(
-                    ticker, period=period, interval=interval
-                )
+            df = await self._fetch_market_data(
+                ticker, period=period, interval=interval
+            )
             if df is None or len(df) < 30:
                 votes[label] = "WAIT"
                 continue

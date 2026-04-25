@@ -154,6 +154,43 @@ class MT5Executor:
         }
         return mapping.get(tv_symbol, tv_symbol)
 
+    def _reverse_map_symbol(self, mt5_symbol: str) -> str:
+        """Map MT5 symbol names back to TradingView format."""
+        reverse = {
+            "MNQ1!": "CME_MINI:MNQ1!",
+            "MES1!": "CME_MINI:MES1!",
+            "MCL1!": "NYMEX:MCL1!",
+        }
+        return reverse.get(mt5_symbol, mt5_symbol)
+
+    def get_positions(self) -> list[dict]:
+        """Return current open positions from MT5."""
+        if not self.initialized:
+            if not self.initialize():
+                return []
+        try:
+            mt5 = self._mt5
+            raw_positions = mt5.positions_get()
+            if raw_positions is None:
+                return []
+            positions = []
+            for p in raw_positions:
+                positions.append({
+                    "ticket": p.ticket,
+                    "symbol": self._reverse_map_symbol(p.symbol),
+                    "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+                    "volume": p.volume,
+                    "open_price": p.price_open,
+                    "current_price": p.price_current,
+                    "profit": p.profit,
+                    "swap": p.swap,
+                    "comment": p.comment,
+                })
+            return positions
+        except Exception as e:
+            logger.error("[MT5] Failed to get positions: %s", e)
+            return []
+
     def get_account_info(self) -> Optional[dict]:
         """Return current account info from MT5."""
         if not self.initialized:

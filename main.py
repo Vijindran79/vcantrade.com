@@ -35,6 +35,10 @@ if sys.platform == 'win32':
         # Already wrapped (e.g. pytest capture) - nothing to do.
         pass
 
+# Patch asyncio to allow nested event loops (sync Playwright inside async QThreads)
+import nest_asyncio
+nest_asyncio.apply()
+
 import signal
 import socket
 import time
@@ -887,6 +891,7 @@ class VcaniTradeApp:
         self.positions = []
         self.locked_tickers = {}
         self.rpa_execution_enabled = True
+        self.can_trade = True
         self.command_posture = "SCANNING"
         self.bridge_last_seen_ts = 0.0
         self.bridge_status = "disconnected"
@@ -3523,6 +3528,13 @@ class VcaniTradeApp:
         CloudScannerThread emits this signal only after a successful HTTP dispatch,
         so executing here would double-fire the same trade.
         """
+        if not self.can_trade:
+            self.cmd.log(
+                '<span style="color:#D29922;font-weight:bold">[APEX BLOCK]</span> '
+                'Cloud signal rejected — trading halted by Apex gate'
+            )
+            return
+
         ticker = signal_data.get("ticker", "UNKNOWN")
         if self.current_watchlist and ticker not in self.current_watchlist:
             logger.info("CLOUD_SIGNAL: ignoring inactive ticker %s", ticker)
@@ -4429,6 +4441,13 @@ class VcaniTradeApp:
             signal_data: Trade signal data
             force_execute: If True, bypasses confidence and slippage guards (TEST MODE)
         """
+        if not self.can_trade and not force_execute:
+            self._log_ui(
+                '<span style="color:#D29922;font-weight:bold">[APEX BLOCK]</span> '
+                'Unified executor blocked — trading halted by Apex gate'
+            )
+            return
+
         ticker = signal_data.get("ticker", "UNKNOWN")
         action = signal_data.get("action", "HOLD")
 
@@ -4645,6 +4664,13 @@ class VcaniTradeApp:
         Routes to MT5 or UI (RPA) based on config.EXECUTION_MODE.
         Returns True if execution succeeded.
         """
+        if not self.can_trade:
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[BLOCKED]</span> '
+                f'Trade execution blocked: Apex gate or safety stop active'
+            )
+            return False
+
         if config.EXECUTION_MODE.upper() == "MT5":
             self.cmd.log(
                 f'<span style="color:#00D4FF;font-weight:bold">[MT5]</span> '
@@ -4817,6 +4843,146 @@ class VcaniTradeApp:
         self.ai_narrator.update_live_pnl(self.total_pnl + live_positions_pnl, len(self.positions))
         self._refresh_live_ledger()
 
+    def _reconcile_mt5_positions(self):
+        """
+        Reality Check: Query MT5 for actual open positions and sync internal state.
+        If MT5 shows no positions, reset internal memory to match reality.
+        Runs every 30 seconds when EXECUTION_MODE == 'MT5'.
+        """
+        if not self.mt5_executor or not self.mt5_executor.initialized:
+            return
+
+        try:
+            mt5_positions = self.mt5_executor.get_positions()
+            mt5_symbols = {p["symbol"] for p in mt5_positions}
+            internal_symbols = {p["asset"] for p in self.positions}
+
+            # 1. Positions in MT5 but missing internally -> add them
+            for p in mt5_positions:
+                if p["symbol"] not in internal_symbols:
+                    logger.warning(
+                        "[RECONCILE] MT5 has %s %s that bot did not track. Adding to internal state.",
+                        p["type"], p["symbol"]
+                    )
+                    self.cmd.log(
+                        f'<span style="color:#D29922;font-weight:bold">[RECONCILE]</span> '
+                        f'MT5 has {p["type"]} {p["symbol"]} (ticket {p["ticket"]}) that bot did not track. Syncing...'
+                    )
+                    self.positions.append({
+                        "asset": p["symbol"],
+                        "side": p["type"],
+                        "entry": p["open_price"],
+                        "current": p["current_price"],
+                        "amount": 0.0,
+                        "quantity": p["volume"],
+                        "tp_price": 0.0,
+                        "sl_price": 0.0,
+                        "pnl": p["profit"],
+                        "pnl_pct": 0.0,
+                        "order_id": f"mt5_sync_{p['ticket']}",
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    })
+
+            # 2. Positions internally but missing in MT5 -> remove them
+            removed = []
+            for pos in list(self.positions):
+                if pos["asset"] not in mt5_symbols:
+                    logger.warning(
+                        "[RECONCILE] Bot thought %s was open, but MT5 shows it closed. Removing.",
+                        pos["asset"]
+                    )
+                    self.cmd.log(
+                        f'<span style="color:#D29922;font-weight:bold">[RECONCILE]</span> '
+                        f'Bot thought {pos["side"]} {pos["asset"]} was open, but MT5 shows closed. Resetting.'
+                    )
+                    self.positions.remove(pos)
+                    removed.append(pos["asset"])
+
+            # 3. Update P&L for positions that exist in both
+            for pos in self.positions:
+                for mt5_pos in mt5_positions:
+                    if pos["asset"] == mt5_pos["symbol"]:
+                        pos["current"] = mt5_pos["current_price"]
+                        pos["pnl"] = mt5_pos["profit"]
+                        break
+
+            if removed or len(mt5_positions) != len(internal_symbols):
+                self.cmd.update_positions(self.positions)
+                self._refresh_live_ledger()
+                self.ai_narrator.add_activity(
+                    "[RECONCILE]",
+                    f"Synced {len(mt5_positions)} MT5 positions"
+                )
+            else:
+                logger.debug("[RECONCILE] Internal state matches MT5. No action needed.")
+
+        except Exception as e:
+            logger.error("[RECONCILE] Position reconciliation failed: %s", e)
+            self.cmd.log(f'<span style="color:#F85149">[RECONCILE ERROR]</span> {e}')
+
+    def check_apex_closing_time(self):
+        """
+        Apex Safety Gate: Enforce market close discipline.
+        - After 16:30 ET: Block new trades (can_trade = False)
+        - After 16:45 ET: Force-close all open positions
+        Called every 30 seconds via heartbeat timer.
+        """
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            hour = now_et.hour
+            minute = now_et.minute
+            time_val = hour * 100 + minute  # e.g. 1630 for 4:30 PM
+
+            # After 4:30 PM ET — block new trades
+            if time_val >= 1630 and self.can_trade:
+                self.can_trade = False
+                logger.warning("[APEX] Market closing time reached (16:30 ET). New trades BLOCKED.")
+                self.cmd.log(
+                    '<span style="color:#D29922;font-weight:bold">[APEX GATE]</span> '
+                    '16:30 ET reached — New trades BLOCKED until next session'
+                )
+                self.ai_narrator.add_activity("[APEX]", "16:30 ET — No new trades")
+
+            # After 4:45 PM ET — force close all positions
+            if time_val >= 1645 and self.positions:
+                logger.warning(
+                    "[APEX] Forced position flattening at 16:45 ET. Positions: %s",
+                    [p["asset"] for p in self.positions]
+                )
+                self.cmd.log(
+                    '<span style="color:#F85149;font-weight:bold">[APEX GATE]</span> '
+                    '16:45 ET — FORCING CLOSE of all open positions'
+                )
+                self.ai_narrator.add_activity("[APEX]", "16:45 ET — Flattening all positions")
+
+                # Close via executor if available
+                if self.executor:
+                    try:
+                        self.executor.close_all_positions(reason="Apex 16:45 ET forced close")
+                    except Exception as e:
+                        logger.error("[APEX] Executor close_all_positions failed: %s", e)
+
+                # Close via MT5 if in MT5 mode
+                if config.EXECUTION_MODE.upper() == "MT5" and self.mt5_executor:
+                    try:
+                        positions = self.mt5_executor.get_positions()
+                        for p in positions:
+                            close_action = "SELL" if p["type"] == "BUY" else "BUY"
+                            self.mt5_executor.execute_trade(p["symbol"], close_action, volume=p["volume"])
+                            logger.info("[APEX] MT5 closed %s %s", p["type"], p["symbol"])
+                    except Exception as e:
+                        logger.error("[APEX] MT5 position close failed: %s", e)
+
+                # Clear internal position state
+                self.positions.clear()
+                self.cmd.update_positions(self.positions)
+                self._refresh_live_ledger()
+                self.ai_narrator.notify_error("All positions flattened — Apex closing time")
+
+        except Exception as e:
+            logger.error("[APEX] check_apex_closing_time error: %s", e)
+
     def _on_hunter_trade_signal(self, symbol: str, action: str, reason: str):
         """Execute a trade when the Cloud Brain returns BUY/SELL from vision analysis."""
         self.cmd.log(
@@ -4945,6 +5111,20 @@ class VcaniTradeApp:
                 logger.warning("%s start failed (non-fatal): %s", svc_name, exc)
                 self.cmd.log(f"{svc_name} start failed: {exc}")
 
+        # MT5 Position Reconciliation Timer (every 30 seconds)
+        if config.EXECUTION_MODE.upper() == "MT5":
+            self._mt5_reconcile_timer = QTimer()
+            self._mt5_reconcile_timer.timeout.connect(self._reconcile_mt5_positions)
+            self._mt5_reconcile_timer.start(30000)  # 30 seconds
+            self.cmd.log("MT5 Position Reconciliation: active (30s interval)")
+
+        # Apex Safety Gate Timer (every 30 seconds)
+        if not hasattr(self, "_apex_gate_timer"):
+            self._apex_gate_timer = QTimer()
+            self._apex_gate_timer.timeout.connect(self.check_apex_closing_time)
+            self._apex_gate_timer.start(30000)  # 30 seconds
+            self.cmd.log("Apex Safety Gate: active (30s interval)")
+
         # Startup messages
         self.cmd.log("VcaniTrade AI started - Hybrid Architecture")
         self.cmd.log(f"Cloud Scanner: {'ENABLED' if config.CLOUD_SCANNER_ENABLED else 'DISABLED'}")
@@ -4956,10 +5136,11 @@ class VcaniTradeApp:
         self.cmd.log(f"Monitoring: {len(config.CLOUD_TICKERS)} tickers")
         if config.DRY_RUN:
             self.cmd.log("Mode: DRY RUN - orders simulated only")
+            self.cmd.log("VALIDATION MODE: Run for 2+ hours before disabling DRY_RUN")
         elif self.current_mode == "AUTONOMOUS":
-            self.cmd.log("Mode: AUTONOMOUS - RPA armed")
+            self.cmd.log("Mode: AUTONOMOUS - execution armed")
         else:
-            self.cmd.log("Mode: TEACHER - RPA disarmed")
+            self.cmd.log("Mode: TEACHER - execution disarmed")
 
         logger.info("Application running")
         sys.exit(self.app.exec())
@@ -4973,6 +5154,10 @@ class VcaniTradeApp:
             self.hunter.stop()
         self.cloud_bridge.stop()
         self.trade_engine.cleanup()
+        if hasattr(self, "_mt5_reconcile_timer") and self._mt5_reconcile_timer:
+            self._mt5_reconcile_timer.stop()
+        if hasattr(self, "_apex_gate_timer") and self._apex_gate_timer:
+            self._apex_gate_timer.stop()
         if self.mt5_executor:
             self.mt5_executor.shutdown()
         logger.info("Application shutdown complete")

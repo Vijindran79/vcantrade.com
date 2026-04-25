@@ -87,15 +87,46 @@ def analyze_chart_with_vision(
     Returns:
         {"signal": "BUY|SELL|NONE", "reason": "...", "raw": "..."}
     """
-    url = f"{config.OLLAMA_V1_URL}/chat/completions"
+    # Normalize base64: strip data URI prefix if present (Ollama native expects raw base64)
+    clean_b64 = screenshot_base64
+    if isinstance(clean_b64, str) and clean_b64.startswith("data:image"):
+        clean_b64 = clean_b64.split(",", 1)[-1]
+
+    # Normalize URLs to prevent double slashes or doubled paths
+    def _norm_url(base: str, path: str) -> str:
+        base = base.rstrip("/")
+        # Prevent double-appending if user included path in config
+        for suffix in ("/api/chat", "/v1/chat/completions", "/chat/completions", "/v1"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+        return f"{base.rstrip('/')}/{path.lstrip('/')}"
+
+    v1_url = _norm_url(config.OLLAMA_V1_URL, "v1/chat/completions")
+    native_url = _norm_url(config.OLLAMA_BASE_URL, "api/chat")
+    url = v1_url
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {config.OLLAMA_API_KEY}",
     }
 
     prompt = (
-        f"Analyze this {symbol} chart. Is there a high-probability trade setup? "
-        "Answer with: SIGNAL: [BUY/SELL/NONE] and REASON: [Short text]."
+        f"You are a professional futures trader analyzing a 5-minute {symbol} chart. "
+        "Your job is to find HIGH-PROBABILITY trade setups ONLY. Be strict. Most of the time the answer is NONE.\n\n"
+        "Analyze the chart in this exact order:\n"
+        "1. TREND ALIGNMENT: Is the 5-minute trend clearly UP (higher highs/higher lows) or DOWN (lower highs/lower lows)? "
+        "Only trade IN the direction of the trend. No counter-trend trades.\n"
+        "2. SUPPORT/RESISTANCE: Is price currently rejecting a clear support level (for BUY) or resistance level (for SELL)? "
+        "Look for wicks, multiple touches, or consolidation at a key level.\n"
+        "3. CANDLE CONFIRMATION: Identify the most recent 1-2 candles. Do you see a Hammer, Bullish Engulfing, Morning Star (for BUY) "
+        "OR Shooting Star, Bearish Engulfing, Evening Star (for SELL)? Weak candles = NO trade.\n"
+        "4. RISK-TO-REWARD: Estimate a reasonable stop-loss (below recent swing low for BUY, above recent swing high for SELL) "
+        "and a target at least 2x the risk distance. If you cannot get 1:2 R:R, answer NONE.\n\n"
+        "RULES:\n"
+        "- If ANY of the 4 criteria above is weak or missing, answer NONE.\n"
+        "- Do NOT trade chop, range-bound markets, or low-volume periods.\n"
+        "- Do NOT guess. If uncertain, answer NONE.\n\n"
+        "Output EXACTLY in this format (no extra text):\n"
+        "SIGNAL: [BUY/SELL/NONE] | REASON: [One sentence: trend direction + pattern + R:R ratio]"
     )
 
     payload = {
@@ -107,7 +138,7 @@ def analyze_chart_with_vision(
                     {"type": "text", "text": prompt},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{screenshot_base64}"},
+                        "image_url": {"url": f"data:image/jpeg;base64,{clean_b64}"},
                     },
                 ],
             }
@@ -118,24 +149,72 @@ def analyze_chart_with_vision(
         "top_p": 0.9,
     }
 
+    def _parse_response(data: dict) -> dict:
+        """Extract content from either OpenAI or native Ollama response."""
+        # OpenAI-compatible format
+        choices = data.get("choices", [])
+        if choices:
+            return {"content": choices[0].get("message", {}).get("content", "")}
+        # Native Ollama format
+        msg = data.get("message", {})
+        if msg:
+            return {"content": msg.get("content", "")}
+        return {"content": ""}
+
+    def _call_ollama_v1() -> dict:
+        """Try OpenAI-compatible /v1/chat/completions endpoint."""
+        response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def _call_ollama_native() -> dict:
+        """Fallback to native /api/chat endpoint."""
+        native_payload = {
+            "model": model or config.MULTI_ASSET_VISION_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [clean_b64],
+                }
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 256,
+                "top_p": 0.9,
+            },
+        }
+        logger.info("[VISION] Falling back to native Ollama endpoint: %s", native_url)
+        response = requests.post(native_url, json=native_payload, headers=headers, timeout=request_timeout)
+        response.raise_for_status()
+        return response.json()
+
     try:
         request_timeout = max(int(timeout or config.LLM_TIMEOUT), 90)
         logger.info(
             "[VISION] Sending %s chart to %s (timeout=%ss)",
             symbol,
-            config.OLLAMA_V1_URL,
+            v1_url,
             request_timeout,
         )
-        response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
-        response.raise_for_status()
-        data = response.json()
 
-        choices = data.get("choices", [])
-        if not choices:
-            logger.warning("[VISION] No choices in response for %s", symbol)
+        # Try OpenAI-compatible endpoint first
+        try:
+            data = _call_ollama_v1()
+        except requests.exceptions.HTTPError as http_err:
+            if http_err.response is not None and http_err.response.status_code == 404:
+                logger.warning("[VISION] /v1/chat/completions returned 404, trying native /api/chat")
+                data = _call_ollama_native()
+            else:
+                raise
+
+        parsed = _parse_response(data)
+        content = parsed["content"]
+        if not content:
+            logger.warning("[VISION] Empty content in response for %s", symbol)
             return {"signal": "NONE", "reason": "Empty model response", "raw": str(data)}
 
-        content = choices[0].get("message", {}).get("content", "")
         logger.info("[VISION] %s analysis received (%s chars)", symbol, len(content))
 
         # Parse SIGNAL and REASON
@@ -148,7 +227,7 @@ def analyze_chart_with_vision(
         return {"signal": signal, "reason": reason, "raw": content}
 
     except requests.exceptions.ConnectionError:
-        logger.error("[VISION] Cannot connect to Ollama v1 at %s", config.OLLAMA_V1_URL)
+        logger.error("[VISION] Cannot connect to Ollama at %s", config.OLLAMA_V1_URL)
         return {"signal": "NONE", "reason": "Ollama connection failed", "raw": ""}
     except Exception as e:
         logger.error("[VISION] Error analyzing %s: %s", symbol, e)

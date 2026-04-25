@@ -761,6 +761,28 @@ class UnifiedTradeExecutor:
 
         return trade
 
+    def close_all_positions(self, reason: str = "Apex Closing Time"):
+        """Close all active trades immediately. Returns list of closed trades."""
+        closed = []
+        if not self.active_trades:
+            self._log("[APEX] No active trades to close")
+            return closed
+
+        tickers = list(self.active_trades.keys())
+        self._log(f"[APEX] Closing all {len(tickers)} positions: {tickers}")
+
+        for ticker in tickers:
+            # Use last known price from trade data
+            trade = self.active_trades.get(ticker)
+            if trade:
+                exit_price = trade.get("current_price", trade.get("entry_price", 0))
+                closed_trade = self.close_trade(ticker, exit_price, reason)
+                if closed_trade:
+                    closed.append(closed_trade)
+
+        self._log(f"[APEX] Closed {len(closed)} positions")
+        return closed
+
     def _calculate_quantity(
         self,
         signal_data: Dict,

@@ -1,6 +1,6 @@
 """
 VcaniTrade AI - Data Scout (Remote Scanner)
-Monitors 10 assets via yfinance and triggers Swarm Consensus debates.
+Monitors assets via MetaTrader 5 and triggers Swarm Consensus debates.
 Dispatches high-confidence signals to local laptop via ngrok tunnel.
 
 Architecture:
@@ -16,7 +16,7 @@ import json
 import logging
 import asyncio
 import requests
-import yfinance as yf
+import MetaTrader5 as mt5
 
 # Add project root to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +35,7 @@ logger = logging.getLogger("DataScout")
 
 # Configuration
 TICKERS = [
-    "GC=F",  # Gold Futures (This is the most reliable for XAUUSD)
+    "GC=F",  # Gold Futures (mapped to MT5 GC1!)
     "EURUSD=X",  # Euro/USD
     "GBPUSD=X",  # GBP/USD
     "BTC-USD",  # Bitcoin
@@ -52,11 +52,57 @@ VOLATILITY_THRESHOLD = 0.002  # 0.2%
 CONFIDENCE_THRESHOLD = 0.7
 
 
+def _canonical_market_ticker(ticker: str) -> str:
+    """Map ticker aliases to MT5 broker symbols."""
+    if hasattr(config, "MT5_SYMBOL_MAP") and ticker in config.MT5_SYMBOL_MAP:
+        return config.MT5_SYMBOL_MAP[ticker]
+    return ticker
+
+
+def _mt5_timeframe(interval: str) -> int:
+    """Map string interval to MT5 timeframe constant."""
+    mapping = {
+        "1m": mt5.TIMEFRAME_M1,
+        "3m": mt5.TIMEFRAME_M3,
+        "5m": mt5.TIMEFRAME_M5,
+        "15m": mt5.TIMEFRAME_M15,
+        "30m": mt5.TIMEFRAME_M30,
+        "1h": mt5.TIMEFRAME_H1,
+        "4h": mt5.TIMEFRAME_H4,
+        "1d": mt5.TIMEFRAME_D1,
+    }
+    return mapping.get(interval, mt5.TIMEFRAME_M1)
+
+
 class DataScout:
     def __init__(self):
         self.swarm = OllamaSwarmConsensus()
         self.active_debate = False
         self.last_prices = {}
+        self._mt5_initialized = False
+        self._ensure_mt5()
+
+    def _ensure_mt5(self) -> bool:
+        if self._mt5_initialized:
+            return True
+        try:
+            if not mt5.initialize():
+                err = mt5.last_error()
+                logger.error("[MT5] initialize() failed: %s", err)
+                return False
+            self._mt5_initialized = True
+            account = mt5.account_info()
+            if account:
+                logger.info(
+                    "[MT5] Connected | Account: %s | Balance: %.2f %s",
+                    account.login,
+                    account.balance,
+                    account.currency,
+                )
+            return True
+        except Exception as e:
+            logger.error("[MT5] Initialization error: %s", e)
+            return False
 
     def get_gpu_usage(self):
         """Monitor GPU VRAM to prevent crashes."""
@@ -69,6 +115,19 @@ class DataScout:
             return info.used / info.total
         except:
             return 0.0
+
+    def _fetch_latest_price(self, ticker: str) -> float:
+        """Fetch latest close price from MT5."""
+        if not self._ensure_mt5():
+            return 0.0
+        mt5_symbol = _canonical_market_ticker(ticker)
+        if not mt5.symbol_select(mt5_symbol, True):
+            logger.warning("Symbol %s not available in MT5 MarketWatch", mt5_symbol)
+            return 0.0
+        rates = mt5.copy_rates_from_pos(mt5_symbol, mt5.TIMEFRAME_M1, 0, 2)
+        if rates is None or len(rates) == 0:
+            return 0.0
+        return float(rates[-1]["close"])
 
     async def run_debate(self, ticker, current_price, change):
         """Trigger the multi-agent swarm debate."""
@@ -156,24 +215,12 @@ class DataScout:
                     await asyncio.sleep(30)
                     continue
 
-                # 2. Fetch prices
-                # Use a smaller interval for faster updates
-                data = yf.download(
-                    TICKERS,
-                    period="1d",
-                    interval="1m",
-                    group_by="ticker",
-                    progress=False,
-                )
-
+                # 2. Fetch prices from MT5
                 for ticker in TICKERS:
                     try:
-                        # Get last valid price
-                        ticker_data = data[ticker]
-                        if ticker_data.empty:
+                        current_price = self._fetch_latest_price(ticker)
+                        if current_price <= 0:
                             continue
-
-                        current_price = ticker_data["Close"].iloc[-1]
 
                         if ticker not in self.last_prices:
                             self.last_prices[ticker] = current_price
@@ -194,7 +241,7 @@ class DataScout:
                         logger.error(f"Error processing {ticker}: {e}")
 
             except Exception as e:
-                logger.error(f"Main loop error (Internet blip?): {e}")
+                logger.error(f"Main loop error: {e}")
 
             await asyncio.sleep(SCAN_INTERVAL)
 

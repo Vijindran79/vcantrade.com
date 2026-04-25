@@ -120,7 +120,38 @@ CLOUD_TICKERS = ["BTC-USD", "ES=F", "NQ=F"]
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
 MULTI_ASSET_TICKERS = ["CME_MINI:MNQ1!", "CME_MINI:MES1!", "NYMEX:MCL1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "30"))
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "qwen2.5:32b")
+
+# Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
+SYMBOL_MAP = {
+    "CME_MINI:MNQ1!": "MNQ=F",
+    "CME_MINI:MES1!": "MES=F",
+    "NYMEX:MCL1!": "CL=F",
+}
+
+# Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
+MT5_SYMBOL_MAP = {
+    # TradingView prefixes
+    "CME_MINI:MNQ1!": "MNQ1!",
+    "CME_MINI:MES1!": "MES1!",
+    "NYMEX:MCL1!": "MCL1!",
+    # Yahoo-style aliases
+    "MNQ=F": "MNQ1!",
+    "MES=F": "MES1!",
+    "CL=F": "CL1!",
+    "NQ=F": "NQ1!",
+    "ES=F": "ES1!",
+    "GC=F": "GC1!",
+    "YM=F": "YM1!",
+    "RTY=F": "M2K1!",
+    "SI=F": "SI1!",
+    "HG=F": "HG1!",
+    "BTC-USD": "BTCUSD",
+    "ETH-USD": "ETHUSD",
+    "TSLA": "TSLA",
+    "NVDA": "NVDA",
+    "AAPL": "AAPL",
+}
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llava:34b")
 MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====
