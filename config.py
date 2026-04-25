@@ -48,9 +48,9 @@ TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
 
 # ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
 # Native Ollama API (for /api/generate, /api/tags, model management)
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # OpenAI-compatible v1 endpoint (for /v1/chat/completions with vision)
-OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://localhost:11434/v1")
+OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434/v1")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
 VAST_API_TOKEN = None
