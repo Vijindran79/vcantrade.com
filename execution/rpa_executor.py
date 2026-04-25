@@ -86,8 +86,27 @@ class RPAExecutor:
         return None
 
     def _map_ticker_to_tv(self, ticker):
-        """Hard-coded to Micro NASDAQ (MNQ1!) for cloud trading."""
-        return "CME_MINI:MNQ1!"
+        """Map internal ticker to TradingView chart symbol."""
+        if not ticker:
+            return "BTCUSD"
+        upper = str(ticker).strip().upper()
+        # Already a TradingView prefix format
+        if ":" in upper:
+            return upper
+        # Crypto pairs
+        if upper in {"BTCUSD", "BTC-USD", "BTCUSDT"}:
+            return "BTCUSD"
+        if upper in {"ETHUSD", "ETH-USD", "ETHUSDT"}:
+            return "ETHUSD"
+        if upper in {"SOLUSD", "SOL-USD", "SOLUSDT"}:
+            return "SOLUSD"
+        if upper in {"XRPUSD", "XRP-USD", "XRPUSDT"}:
+            return "XRPUSD"
+        # Futures pass-through
+        if upper.endswith("1!"):
+            return upper
+        # Default pass-through
+        return upper
 
     def _ensure_trading_panel_open(self, page):
         """Ensure TradingView trading panel is open. Uses JS + keyboard fallback."""
@@ -191,27 +210,41 @@ class RPAExecutor:
                     continue
 
             # STRATEGY 2: JavaScript DOM click + synthesized mouse events
+            # For SELL/SHORT: prioritize red-colored buttons; for BUY: blue/green-colored buttons
             clicked = page.evaluate(f"""() => {{
+                const isSell = '{action_lower}'.includes('sell') || '{action_lower}'.includes('short');
                 const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span[role="button"]'));
+                let bestMatch = null;
+                let bestScore = 0;
                 for (const btn of buttons) {{
                     const text = (btn.textContent || btn.innerText || '').toLowerCase().trim();
                     const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    if (
-                        text.includes('{action_lower}') &&
-                        (text.includes('market') || text.includes('order') || aria.includes('{action_lower}'))
-                    ) {{
-                        const rect = btn.getBoundingClientRect();
-                        const x = rect.left + rect.width / 2 + (Math.random() * 6 - 3);
-                        const y = rect.top + rect.height / 2 + (Math.random() * 6 - 3);
-                        // Synthesize full mouse event sequence
-                        const down = new MouseEvent('mousedown', {{ bubbles: true, clientX: x, clientY: y }});
-                        const up = new MouseEvent('mouseup', {{ bubbles: true, clientX: x, clientY: y }});
-                        const click = new MouseEvent('click', {{ bubbles: true, clientX: x, clientY: y }});
-                        btn.dispatchEvent(down);
-                        btn.dispatchEvent(up);
-                        btn.dispatchEvent(click);
-                        return true;
+                    let score = 0;
+                    if (text.includes('{action_lower}')) score += 10;
+                    if (text.includes('market') || text.includes('order')) score += 5;
+                    if (aria.includes('{action_lower}')) score += 3;
+                    // Color bias: sell=red, buy=blue/green
+                    const style = window.getComputedStyle(btn);
+                    const bg = style.backgroundColor || style.color || '';
+                    if (isSell && (bg.includes('255, 0') || bg.includes('red') || bg.includes('220, 38') || bg.includes('239, 68'))) score += 8;
+                    if (!isSell && (bg.includes('0, 255') || bg.includes('green') || bg.includes('34, 197') || bg.includes('16, 185'))) score += 8;
+                    if (score > bestScore) {{
+                        bestScore = score;
+                        bestMatch = btn;
                     }}
+                }}
+                if (bestMatch && bestScore >= 10) {{
+                    const rect = bestMatch.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2 + (Math.random() * 6 - 3);
+                    const y = rect.top + rect.height / 2 + (Math.random() * 6 - 3);
+                    // Synthesize full mouse event sequence
+                    const down = new MouseEvent('mousedown', {{ bubbles: true, clientX: x, clientY: y }});
+                    const up = new MouseEvent('mouseup', {{ bubbles: true, clientX: x, clientY: y }});
+                    const click = new MouseEvent('click', {{ bubbles: true, clientX: x, clientY: y }});
+                    bestMatch.dispatchEvent(down);
+                    bestMatch.dispatchEvent(up);
+                    bestMatch.dispatchEvent(click);
+                    return true;
                 }}
                 return false;
             }}""")
@@ -606,6 +639,99 @@ class RPAExecutor:
             logger.error("[PLAYWRIGHT] HTML execution error for %s: %s", trade.asset, e)
             return False
 
+    def _execute_trade_mt5(self, trade):
+        """
+        MetaTrader 5 execution via PyAutoGUI coordinate/image-based clicking.
+        For the brother's MT5 setup — uses One Click Trading or Order window.
+        """
+        action = str(trade.action).upper()
+        if action not in {"BUY", "SELL"}:
+            logger.error("[MT5-RPA] Invalid action: %s", action)
+            return False
+
+        target_key = "buy_button" if action == "BUY" else "sell_button"
+
+        # 1. Find MT5 window
+        mt5_window = None
+        for hint in getattr(config, "MT5_WINDOW_HINTS", ["MetaTrader 5"]):
+            windows = gw.getWindowsWithTitle(hint)
+            visible = [w for w in windows if getattr(w, "visible", True)]
+            if visible:
+                mt5_window = visible[0]
+                break
+
+        if not mt5_window:
+            logger.error("[MT5-RPA] No MT5 window found for %s %s", action, trade.asset)
+            return False
+
+        try:
+            mt5_window.activate()
+            if self.human_latency_enabled:
+                time.sleep(random.uniform(0.5, 1.2))
+
+            # 2. Strategy A: Color-based pixel search inside MT5 window
+            screenshot = pyautogui.screenshot(
+                region=(mt5_window.left, mt5_window.top, mt5_window.width, mt5_window.height)
+            )
+            img_data = np.array(screenshot)
+            target_rgb = self.color_targets[target_key]["rgb"]
+            tol = self.color_targets[target_key]["tol"]
+
+            # Search for the target color in the MT5 window
+            h, w = img_data.shape[:2]
+            step = 3  # Scan every 3rd pixel for speed
+            candidates = []
+            for y in range(0, h, step):
+                for x in range(0, w, step):
+                    pixel = img_data[y, x]
+                    if all(abs(int(p) - int(t)) <= tol for p, t in zip(pixel[:3], target_rgb)):
+                        candidates.append((x, y))
+
+            if candidates:
+                # Pick the center of the largest cluster
+                center_x = int(np.median([c[0] for c in candidates]))
+                center_y = int(np.median([c[1] for c in candidates]))
+                abs_x = mt5_window.left + center_x
+                abs_y = mt5_window.top + center_y
+
+                logger.info(
+                    "[MT5-RPA] %s color match at (%d, %d) in MT5 window",
+                    action, abs_x, abs_y
+                )
+
+                move_duration = random.uniform(0.4, 0.9) if self.human_latency_enabled else 0.1
+                pyautogui.moveTo(abs_x, abs_y, duration=move_duration, tween=pyautogui.easeOutQuad)
+                time.sleep(0.3)
+                pyautogui.click()
+                logger.info("[MT5-RPA] %s %s clicked via color detection", action, trade.asset)
+                return True
+
+            # 3. Strategy B: Fallback coordinates inside MT5 window
+            fallback_x, fallback_y = config.FALLBACK_COORDS.get(target_key, (960, 540))
+            # If fallback is absolute, convert to relative to MT5 window
+            rel_x = fallback_x - getattr(mt5_window, "left", 0)
+            rel_y = fallback_y - getattr(mt5_window, "top", 0)
+            # Clamp to window bounds
+            rel_x = max(10, min(rel_x, mt5_window.width - 10))
+            rel_y = max(10, min(rel_y, mt5_window.height - 10))
+            abs_x = mt5_window.left + rel_x
+            abs_y = mt5_window.top + rel_y
+
+            logger.info(
+                "[MT5-RPA] %s fallback click at (%d, %d) in MT5 window",
+                action, abs_x, abs_y
+            )
+            move_duration = random.uniform(0.4, 0.9) if self.human_latency_enabled else 0.1
+            pyautogui.moveTo(abs_x, abs_y, duration=move_duration, tween=pyautogui.easeOutQuad)
+            time.sleep(0.3)
+            pyautogui.click()
+            logger.info("[MT5-RPA] %s %s clicked via fallback coordinates", action, trade.asset)
+            return True
+
+        except Exception as e:
+            logger.error("[MT5-RPA] Execution error for %s %s: %s", action, trade.asset, e)
+            return False
+
     def _execute_trade_pyautogui(self, trade):
         """Legacy PyAutoGUI execution (mouse movement). Kept as emergency fallback."""
         target_key = "buy_button" if trade.action == "BUY" else "sell_button" if trade.action == "SELL" else None
@@ -664,6 +790,38 @@ class RPAExecutor:
         target = self.color_targets[target_key]["rgb"]
         tol = self.color_targets[target_key]["tol"]
         return all(abs(p - t) <= tol for p, t in zip(pixel_rgb, target))
+
+    def _detect_platform(self):
+        """
+        Chameleon Interface: Detect active trading platform.
+        Returns 'tradingview', 'tradovate', 'mt5', or 'unknown'.
+        """
+        try:
+            # 1. Check for MT5 window (brother's setup)
+            for hint in getattr(config, "MT5_WINDOW_HINTS", ["MetaTrader 5"]):
+                windows = gw.getWindowsWithTitle(hint)
+                if windows and any(getattr(w, "visible", True) for w in windows):
+                    logger.info("[CHAMELEON] Detected MT5 window: %s", hint)
+                    return "mt5"
+            # 2. Check Playwright page URL for TradingView/Tradovate
+            if self._page and not self._page.is_closed():
+                url = (self._page.url or "").lower()
+                if "tradingview" in url:
+                    return "tradingview"
+                if "tradovate" in url:
+                    return "tradovate"
+            # 3. Check active browser window title
+            for hint in getattr(config, "BROWSER_WINDOW_HINTS", ["TradingView", "Chrome"]):
+                windows = gw.getWindowsWithTitle(hint)
+                if windows:
+                    title = windows[0].title.lower()
+                    if "tradingview" in title:
+                        return "tradingview"
+                    if "tradovate" in title:
+                        return "tradovate"
+        except Exception as e:
+            logger.debug("[CHAMELEON] Platform detection error: %s", e)
+        return "unknown"
 
     def _lightning_strike_sequence(self, target_key, ticker):
         """The 'Lion Strike': Precise, Human-like, and Verified."""
@@ -831,20 +989,48 @@ class RPAExecutor:
         return True
 
     def execute_trade(self, trade):
-        """Execute a trade via HTML injection (Playwright) or legacy PyAutoGUI fallback."""
-        # PRIMARY: Playwright HTML injection (no mouse movement)
+        """
+        Execute a trade via Chameleon Interface.
+        Auto-detects platform (TradingView/Tradovate vs MT5) and uses the
+        appropriate clicking strategy (DOM-based vs coordinate/image-based).
+        """
+        platform = self._detect_platform()
+        action = str(trade.action).upper()
+        asset = trade.asset
+
+        logger.info(
+            "[CHAMELEON] Platform detected: %s | Action: %s | Asset: %s",
+            platform, action, asset
+        )
+
+        # MT5 path: coordinate/image-based clicking (brother's setup)
+        if platform == "mt5":
+            logger.info("[EXEC] MT5 detected — using coordinate-based clicking for %s %s", action, asset)
+            return self._execute_trade_mt5(trade)
+
+        # TradingView / Tradovate path: DOM-based Playwright clicking
+        if platform in ("tradingview", "tradovate"):
+            if self._playwright_available:
+                try:
+                    logger.info("[EXEC] Attempting HTML injection for %s %s", action, asset)
+                    html_result = self._execute_trade_html(trade)
+                    if html_result:
+                        return True
+                    logger.warning("[EXEC] HTML injection failed - will try PyAutoGUI fallback")
+                except Exception as e:
+                    logger.warning("[EXEC] HTML injection exception: %s - falling back to PyAutoGUI", e)
+            # PyAutoGUI fallback for TV/Tradovate
+            logger.info("[EXEC] Falling back to PyAutoGUI for %s %s", action, asset)
+            return self._execute_trade_pyautogui(trade)
+
+        # Unknown platform: try Playwright first, then PyAutoGUI
         if self._playwright_available:
             try:
-                logger.info("[EXEC] Attempting HTML injection for %s %s", trade.action, trade.asset)
                 html_result = self._execute_trade_html(trade)
                 if html_result:
                     return True
-                logger.warning("[EXEC] HTML injection failed - will try legacy PyAutoGUI fallback")
-            except Exception as e:
-                logger.warning("[EXEC] HTML injection exception: %s - falling back to PyAutoGUI", e)
-
-        # FALLBACK: Legacy PyAutoGUI mouse-based execution
-        logger.info("[EXEC] Falling back to PyAutoGUI for %s %s", trade.action, trade.asset)
+            except Exception:
+                pass
         return self._execute_trade_pyautogui(trade)
 
     # REMOVED: All duplicate _find_button_by_image definitions

@@ -4277,6 +4277,12 @@ class VcaniTradeApp:
         tp_price = 0.0
         if auto_risk_enabled:
             sl_price = self._derive_structure_stop_loss(action, entry_price, signal_data, risk_eval)
+            # Auto-risk TP: 1.5x the SL distance (short: TP below entry, long: TP above entry)
+            sl_dist = abs(entry_price - sl_price) if sl_price > 0 else entry_price * 0.01
+            if action == "SELL":
+                tp_price = entry_price - (sl_dist * 1.5)
+            else:
+                tp_price = entry_price + (sl_dist * 1.5)
         else:
             sl_price, tp_price = self._manual_risk_targets(action, entry_price)
             self.cmd.log(
@@ -4452,12 +4458,22 @@ class VcaniTradeApp:
         signal_data["liquidity_label"] = self._format_liquidity_label(signal_data)
         self._broadcast_trade_levels(signal_data)
 
+        # Position Safety Check for cloud RPA path
+        should_exec_rpa, conflict_note_rpa = self._check_position_conflict(ticker, action)
+        if not should_exec_rpa:
+            self.cmd.log(
+                f'<span style="color:#8B949E;font-weight:bold">[SKIP]</span> '
+                f'Cloud signal {action} {ticker} skipped: {conflict_note_rpa}'
+            )
+            return
+
+        # Short position: SL above price, TP below price (already computed above)
         rpa_trade = TradeRecord(
             asset=ticker,
             action=SignalAction.BUY if action == "BUY" else SignalAction.SELL,
             entry_price=entry_price,
             stop_loss=sl_price,
-            take_profit=None,
+            take_profit=tp_price if tp_price > 0 else None,
             confidence=ConfidenceLevel.HIGH if confidence_score >= 80 else ConfidenceLevel.MEDIUM,
             ai_reason=signal_data.get("reason", ""),
             mode="AUTONOMOUS",
@@ -4903,6 +4919,46 @@ class VcaniTradeApp:
         if self.ai_narrator:
             self.ai_narrator.add_activity(icon, message)
 
+    def _check_position_conflict(self, ticker: str, action: str, is_closing: bool = False) -> tuple[bool, str]:
+        """
+        Position Safety Check: If we already hold an opposing position,
+        decide whether to close it first (Close-and-Reverse) or block.
+        Returns (should_execute, note).
+        Set is_closing=True when calling from a close-and-reverse close to prevent recursion.
+        """
+        action = str(action).upper()
+        for pos in self.positions:
+            if pos.get("asset") == ticker:
+                current_side = str(pos.get("side", "")).upper()
+                if current_side and current_side != action and not is_closing:
+                    # Opposing position exists — Close-and-Reverse
+                    close_action = "SELL" if current_side == "BUY" else "BUY"
+                    logger.info(
+                        "[POSITION] %s already %s | Signal: %s -> Close-and-Reverse",
+                        ticker, current_side, action
+                    )
+                    self.cmd.log(
+                        f'<span style="color:#D29922;font-weight:bold">[REVERSAL]</span> '
+                        f'{ticker} reversing {current_side} -> {action} | Closing first'
+                    )
+                    self.ai_narrator.add_activity(
+                        "[REVERSAL]",
+                        f"{ticker} closing {current_side} position before {action}"
+                    )
+                    # Dispatch the close trade first (marked as closing to prevent recursion)
+                    self._dispatch_trade_execution(ticker, close_action, "Close-and-Reverse close")
+                    time.sleep(1.5)  # Brief pause for broker fill
+                    return True, "close_and_reverse"
+                elif current_side == action and not is_closing:
+                    # Same-side position already open — skip duplicate
+                    logger.info("[POSITION] %s %s position already open — skipping duplicate", ticker, action)
+                    self.cmd.log(
+                        f'<span style="color:#8B949E;font-weight:bold">[SKIP]</span> '
+                        f'{ticker} {action} position already open'
+                    )
+                    return False, "already_open"
+        return True, "no_conflict"
+
     def _dispatch_trade_execution(self, symbol: str, action: str, reason: str = "") -> bool:
         """
         Unified trade execution dispatcher.
@@ -4916,6 +4972,11 @@ class VcaniTradeApp:
                 f'<span style="color:#D29922;font-weight:bold">[BLOCKED]</span> '
                 f'Trade execution blocked: Apex gate or safety stop active'
             )
+            return False
+
+        # Position Safety Check: Close-and-Reverse or skip duplicate
+        should_exec, conflict_note = self._check_position_conflict(symbol, action)
+        if not should_exec:
             return False
 
         if self._is_mt5_mode():
@@ -4958,6 +5019,10 @@ class VcaniTradeApp:
                     mode="HUNTER",
                     status="OPEN",
                 )
+                # Position Safety Check for Hunter RPA path
+                should_exec_hunter, _ = self._check_position_conflict(symbol, action)
+                if not should_exec_hunter:
+                    return False
                 success = self.rpa_hand.execute_trade(trade)
                 if success:
                     self.cmd.log(
