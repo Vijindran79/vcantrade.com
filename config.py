@@ -158,7 +158,42 @@ MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 # "UI"  = Click buttons on screen via Playwright/RPA (default)
 # "MT5" = Send orders to MetaTrader 5 via mt5.order_send()
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "UI")
+TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_TRADOVATE")
 MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.1"))
+BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9223").strip()
+SHOW_STARTUP_SWITCHBOARD = os.getenv("SHOW_STARTUP_SWITCHBOARD", "true").lower() == "true"
+SMART_EYE_ENABLED = os.getenv("SMART_EYE_ENABLED", "true").lower() == "true"
+AUTO_SYMBOL_DETECTION = os.getenv("AUTO_SYMBOL_DETECTION", "true").lower() == "true"
+DETECTED_TRADING_WINDOW_TITLE = os.getenv("DETECTED_TRADING_WINDOW_TITLE", "").strip()
+MT5_WINDOW_HINTS = [
+    value.strip()
+    for value in os.getenv(
+        "MT5_WINDOW_HINTS",
+        "MetaTrader 5,MetaTrader5,Exness MetaTrader 5,IC Markets MetaTrader 5",
+    ).split(",")
+    if value.strip()
+]
+BROWSER_WINDOW_HINTS = [
+    value.strip()
+    for value in os.getenv(
+        "BROWSER_WINDOW_HINTS",
+        "TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
+    ).split(",")
+    if value.strip()
+]
+WINDOW_TITLE_BLACKLIST = [
+    value.strip()
+    for value in os.getenv(
+        "WINDOW_TITLE_BLACKLIST",
+        "PowerShell,pwsh,Command Prompt,cmd.exe,Terminal,Visual Studio Code",
+    ).split(",")
+    if value.strip()
+]
+MT5_CHART_CROP_LEFT_PCT = float(os.getenv("MT5_CHART_CROP_LEFT_PCT", "0.04"))
+MT5_CHART_CROP_TOP_PCT = float(os.getenv("MT5_CHART_CROP_TOP_PCT", "0.11"))
+MT5_CHART_CROP_WIDTH_PCT = float(os.getenv("MT5_CHART_CROP_WIDTH_PCT", "0.92"))
+MT5_CHART_CROP_HEIGHT_PCT = float(os.getenv("MT5_CHART_CROP_HEIGHT_PCT", "0.78"))
+FRIDAY_CLOSE_CUTOFF_UTC = int(os.getenv("FRIDAY_CLOSE_CUTOFF_UTC", "18"))
 
 # Technical Signal Thresholds
 VOLUME_SPIKE_MULTIPLIER = 3.0

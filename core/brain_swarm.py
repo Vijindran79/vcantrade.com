@@ -12,6 +12,13 @@ from typing import Any, Dict, Optional, Tuple
 import requests
 
 import config
+from core.ollama_utils import (
+    build_image_data_uri,
+    build_ollama_url,
+    normalize_base64_image,
+    normalize_ollama_base_url,
+)
+from core.symbol_mapper import normalize_to_analysis_symbol, translate_chart_symbol
 from core.models import (
     ConfidenceLevel,
     DebateTranscript,
@@ -36,7 +43,7 @@ def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = No
     Simple wrapper to call local Ollama brain.
     This is the core "brain" function that runs locally.
     """
-    url = f"{config.OLLAMA_BASE_URL}/api/generate"
+    url = build_ollama_url(config.OLLAMA_BASE_URL, "api/generate")
 
     # Simple headers for local connection
     headers = {"Content-Type": "application/json"}
@@ -87,27 +94,18 @@ def analyze_chart_with_vision(
     Returns:
         {"signal": "BUY|SELL|NONE", "reason": "...", "raw": "..."}
     """
-    # Normalize base64: strip data URI prefix if present (Ollama native expects raw base64)
-    clean_b64 = screenshot_base64
-    if isinstance(clean_b64, str) and clean_b64.startswith("data:image"):
-        clean_b64 = clean_b64.split(",", 1)[-1]
+    try:
+        clean_b64 = normalize_base64_image(screenshot_base64)
+    except ValueError as exc:
+        logger.error("[VISION] Refusing malformed screenshot payload for %s: %s", symbol, exc)
+        return {"signal": "NONE", "reason": f"Malformed screenshot payload: {exc}", "raw": ""}
 
-    # Normalize URLs to prevent double slashes or doubled paths
-    def _norm_url(base: str, path: str) -> str:
-        base = base.rstrip("/")
-        # Prevent double-appending if user included path in config
-        for suffix in ("/api/chat", "/v1/chat/completions", "/chat/completions", "/v1"):
-            if base.endswith(suffix):
-                base = base[: -len(suffix)]
-        return f"{base.rstrip('/')}/{path.lstrip('/')}"
-
-    v1_url = _norm_url(config.OLLAMA_V1_URL, "v1/chat/completions")
-    native_url = _norm_url(config.OLLAMA_BASE_URL, "api/chat")
+    v1_url = build_ollama_url(config.OLLAMA_V1_URL, "v1/chat/completions")
+    native_url = build_ollama_url(config.OLLAMA_BASE_URL, "api/chat")
     url = v1_url
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {config.OLLAMA_API_KEY}",
-    }
+    headers = {"Content-Type": "application/json"}
+    if getattr(config, "OLLAMA_API_KEY", ""):
+        headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
 
     prompt = (
         f"You are a professional futures trader analyzing a 5-minute {symbol} chart. "
@@ -138,7 +136,7 @@ def analyze_chart_with_vision(
                     {"type": "text", "text": prompt},
                     {
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{clean_b64}"},
+                        "image_url": {"url": build_image_data_uri(clean_b64)},
                     },
                 ],
             }
@@ -227,11 +225,126 @@ def analyze_chart_with_vision(
         return {"signal": signal, "reason": reason, "raw": content}
 
     except requests.exceptions.ConnectionError:
-        logger.error("[VISION] Cannot connect to Ollama at %s", config.OLLAMA_V1_URL)
+        logger.error(
+            "[VISION] Cannot connect to Ollama at %s",
+            normalize_ollama_base_url(config.OLLAMA_V1_URL),
+        )
         return {"signal": "NONE", "reason": "Ollama connection failed", "raw": ""}
     except Exception as e:
         logger.error("[VISION] Error analyzing %s: %s", symbol, e)
         return {"signal": "NONE", "reason": f"Vision analysis error: {e}", "raw": ""}
+
+
+def detect_symbol_from_chart(
+    screenshot_base64: str,
+    model: str = None,
+    timeout: Optional[int] = None,
+) -> str:
+    """
+    Ask the vision model to read the chart header and identify the symbol.
+
+    This gives MT5 mode a lightweight symbol readback path so the operator
+    does not have to keep maintaining brittle broker-specific symbol maps.
+    """
+    try:
+        clean_b64 = normalize_base64_image(screenshot_base64)
+    except ValueError as exc:
+        logger.warning("[VISION] Symbol detection skipped due to malformed image payload: %s", exc)
+        return ""
+
+    headers = {"Content-Type": "application/json"}
+    if getattr(config, "OLLAMA_API_KEY", ""):
+        headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
+
+    prompt = (
+        "Read the chart header and identify the trading symbol. "
+        "Understand broker names and futures contracts. Examples: MNQ-JUN26, MNQM26, MNQ.micro, "
+        "or Micro Nasdaq all mean Micro Nasdaq 100; MES variants mean Micro S&P 500; MCL variants mean Micro Crude Oil. "
+        "Return JSON only with keys symbol, exchange, normalized_symbol, instrument_name, confidence. "
+        "If unreadable, return symbol as an empty string."
+    )
+    request_timeout = max(int(timeout or config.LLM_TIMEOUT), 45)
+    v1_url = build_ollama_url(config.OLLAMA_V1_URL, "v1/chat/completions")
+    native_url = build_ollama_url(config.OLLAMA_BASE_URL, "api/chat")
+
+    payload = {
+        "model": model or config.MULTI_ASSET_VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": build_image_data_uri(clean_b64)}},
+                ],
+            }
+        ],
+        "stream": False,
+        "temperature": 0.0,
+        "max_tokens": 128,
+    }
+
+    def _parse_content(data: dict) -> str:
+        choices = data.get("choices", [])
+        if choices:
+            return str(choices[0].get("message", {}).get("content", "") or "")
+        msg = data.get("message", {})
+        return str(msg.get("content", "") or "")
+
+    try:
+        try:
+            response = requests.post(v1_url, json=payload, headers=headers, timeout=request_timeout)
+            response.raise_for_status()
+            raw = _parse_content(response.json())
+        except requests.exceptions.HTTPError as http_err:
+            if http_err.response is None or http_err.response.status_code != 404:
+                raise
+            native_payload = {
+                "model": model or config.MULTI_ASSET_VISION_MODEL,
+                "messages": [{"role": "user", "content": prompt, "images": [clean_b64]}],
+                "stream": False,
+                "options": {"temperature": 0.0, "num_predict": 128},
+            }
+            response = requests.post(native_url, json=native_payload, headers=headers, timeout=request_timeout)
+            response.raise_for_status()
+            raw = _parse_content(response.json())
+
+        parsed = parse_json_response(raw)
+        symbol = str(
+            parsed.get("normalized_symbol")
+            or parsed.get("symbol")
+            or ""
+        ).strip().upper()
+        if not symbol:
+            match = re.search(r"\b[A-Z0-9:_.=!-]{2,20}\b", raw.upper())
+            symbol = match.group(0) if match else ""
+        return symbol
+    except Exception as exc:
+        logger.warning("[VISION] Symbol detection failed: %s", exc)
+        return ""
+
+
+def detect_symbol_details_from_chart(
+    screenshot_base64: str,
+    model: str = None,
+    timeout: Optional[int] = None,
+) -> dict:
+    """Return raw and translated symbol details from the visible chart."""
+    detected = detect_symbol_from_chart(screenshot_base64, model=model, timeout=timeout)
+    if not detected:
+        return {}
+    translation = translate_chart_symbol(detected)
+    if translation:
+        payload = translation.to_dict()
+        payload["analysis_symbol"] = translation.tradingview_symbol
+        return payload
+    return {
+        "raw_symbol": detected,
+        "analysis_symbol": normalize_to_analysis_symbol(detected),
+        "instrument_name": detected,
+        "family": "UNKNOWN",
+        "mt5_symbol": detected,
+        "confidence": 0.35,
+    }
 
 
 def parse_json_response(raw: str) -> dict:
@@ -281,7 +394,7 @@ class OllamaSwarmConsensus:
     """Local Qwen 2.5 trading analyst - runs 100% on your machine."""
 
     def __init__(self):
-        self.base_url = config.OLLAMA_BASE_URL
+        self.base_url = normalize_ollama_base_url(config.OLLAMA_BASE_URL)
         self.model = config.OLLAMA_MODEL
         self.timeout = max(int(config.LLM_TIMEOUT), 90)
         self.devils_advocate = DevilsAdvocate()
@@ -397,6 +510,29 @@ Return JSON only:
                 logger.error("Liquidity agent failed: %s", liquidity_result["error"])
                 liquidity_result = self._default_liquidity_result(market_data)
 
+        vision_result = None
+        detected_symbol = ""
+        vision_summary = "Vision agent: no chart image supplied."
+        if chart_image_base64:
+            vision_result = analyze_chart_with_vision(
+                chart_image_base64,
+                market_data.asset,
+                model=config.MULTI_ASSET_VISION_MODEL,
+                timeout=self.timeout,
+            )
+            detected_symbol = detect_symbol_from_chart(
+                chart_image_base64,
+                model=config.MULTI_ASSET_VISION_MODEL,
+                timeout=min(self.timeout, 60),
+            )
+            if detected_symbol:
+                market_data.indicators["VISION_DETECTED_SYMBOL"] = detected_symbol
+                translation = translate_chart_symbol(detected_symbol)
+                if translation:
+                    market_data.indicators["VISION_SYMBOL_TRANSLATION"] = translation.to_dict()
+                    market_data.indicators["VISION_ANALYSIS_SYMBOL"] = translation.tradingview_symbol
+            vision_summary = self._format_vision_summary(vision_result, detected_symbol, market_data.asset)
+
         closer_prompt = self._build_analysis_prompt(
             market_data,
             news_context,
@@ -406,6 +542,7 @@ Return JSON only:
             liquidity_result=liquidity_result,
             memory_summary=memory_summary,
             skip_reason=skip_reason,
+            vision_summary=vision_summary,
         )
         result = call_local_brain(closer_prompt, model=self.model, timeout=self.timeout)
         if "error" in result:
@@ -421,6 +558,9 @@ Return JSON only:
             take_profit=result.get("take_profit", market_data.price * 1.01),
             reason=result.get("reason", "Qwen 2.5 analysis based on technical indicators"),
         )
+
+        output = self._apply_vision_guardrails(output, vision_result)
+        output = self._apply_temporal_guardrails(output, session_context)
 
         signal_label = "WAIT" if output.action == SignalAction.HOLD else output.action.value
         if "[SIGNAL]" not in output.reason.upper():
@@ -463,6 +603,7 @@ Return JSON only:
             stop_loss=output.stop_loss or market_data.price * 0.99,
             take_profit=output.take_profit or market_data.price * 1.01,
             confidence=output.confidence.value,
+            session_context=session_context,
         )
 
         # Apply confidence penalty if Devil's Advocate found issues
@@ -537,6 +678,7 @@ Return JSON only:
         liquidity_result: Optional[Dict[str, Any]] = None,
         memory_summary: str = "",
         skip_reason: str = "",
+        vision_summary: str = "",
     ) -> str:
         """Build the closer prompt that merges Vibe + Liquidity into a strike decision."""
         snapshot = self._market_snapshot(market_data)
@@ -573,10 +715,15 @@ VIBE MEMORY:
 DEBATE SKIP STATUS:
 {skip_block}
 
+VISION AGENT:
+{vision_summary or 'Vision agent unavailable.'}
+
 Rules:
 - Output action BUY, SELL, or HOLD.
 - Prefix reason with [SIGNAL] BUY, [SIGNAL] SELL, or [SIGNAL] WAIT.
 - Respect VIBE MEMORY. If a similar losing pattern is present, downgrade confidence or WAIT unless the setup is clearly stronger now.
+- If the vision agent disagrees with the setup or cannot confirm the chart, reduce aggression and prefer HOLD.
+- If session context warns about a holiday or Friday close-risk window, avoid fresh entries and prefer WAIT.
 - Include entry_price, stop_loss, and take_profit.
 - Keep reason concise and actionable.
 
@@ -651,8 +798,81 @@ JSON schema only:
             return "Session: Unknown"
         return (
             f"Session: {session_context.get('primary_session', 'Unknown')} | "
+            f"Day: {session_context.get('day_of_week', 'Unknown')} | "
+            f"UTC: {session_context.get('current_time_utc', 'Unknown')} | "
+            f"FridayCloseRisk: {session_context.get('is_friday_close_window', False)} | "
+            f"HolidayUS: {session_context.get('is_holiday_us', False)} | "
+            f"HolidayHK: {session_context.get('is_holiday_hk', False)} | "
             f"Note: {session_context.get('session_note', '')}"
         )
+
+    def _format_vision_summary(
+        self,
+        vision_result: Optional[Dict[str, Any]],
+        detected_symbol: str,
+        expected_symbol: str,
+    ) -> str:
+        if not vision_result:
+            return "Vision agent unavailable."
+        signal = str(vision_result.get("signal") or "NONE").upper()
+        reason = str(vision_result.get("reason") or "No visual reasoning provided.").strip()
+        detected = detected_symbol or "UNREADABLE"
+        return (
+            f"Detected symbol: {detected} | Expected symbol: {expected_symbol} | "
+            f"Visual signal: {signal} | Reason: {reason}"
+        )
+
+    def _apply_vision_guardrails(
+        self,
+        output: LLMAnalysisOutput,
+        vision_result: Optional[Dict[str, Any]],
+    ) -> LLMAnalysisOutput:
+        if not vision_result:
+            return output
+
+        vision_signal = str(vision_result.get("signal") or "NONE").upper()
+        if output.action == SignalAction.HOLD:
+            return output
+        if vision_signal in {"BUY", "SELL"} and vision_signal != output.action.value:
+            proposed_action = output.action.value
+            output.action = SignalAction.HOLD
+            output.confidence = ConfidenceLevel.LOW
+            output.reason = (
+                f"[SIGNAL] WAIT Vision disagreement: chart shows {vision_signal} while text agents proposed "
+                f"{proposed_action}. Standing aside."
+            )
+            return output
+        if vision_signal == "NONE":
+            output.reason = f"{output.reason} | Vision could not confirm the setup."
+            if output.confidence == ConfidenceLevel.HIGH:
+                output.confidence = ConfidenceLevel.MEDIUM
+            elif output.confidence == ConfidenceLevel.VERY_HIGH:
+                output.confidence = ConfidenceLevel.HIGH
+        return output
+
+    def _apply_temporal_guardrails(
+        self,
+        output: LLMAnalysisOutput,
+        session_context: Optional[Dict[str, Any]],
+    ) -> LLMAnalysisOutput:
+        context = session_context or {}
+        if output.action == SignalAction.HOLD:
+            return output
+        if context.get("is_holiday_us") or context.get("is_holiday_hk"):
+            holiday_name = str(context.get("holiday_name") or "Market holiday")
+            output.action = SignalAction.HOLD
+            output.confidence = ConfidenceLevel.LOW
+            output.reason = f"[SIGNAL] WAIT {holiday_name}. Fresh entries are blocked by holiday conditions."
+            return output
+        if context.get("is_friday_close_window"):
+            cutoff = int(context.get("friday_close_cutoff_utc", getattr(config, "FRIDAY_CLOSE_CUTOFF_UTC", 18)) or 18)
+            output.action = SignalAction.HOLD
+            output.confidence = ConfidenceLevel.LOW
+            output.reason = (
+                f"[SIGNAL] WAIT Friday close-risk window after {cutoff:02d}:00 UTC. "
+                "Avoiding fresh entries into the weekend."
+            )
+        return output
 
     def _format_agent_summary(self, result: Optional[Dict[str, Any]], fallback: str) -> str:
         if not result:

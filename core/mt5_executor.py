@@ -7,6 +7,7 @@ import logging
 from typing import Optional
 
 import config
+from core.symbol_mapper import translate_chart_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -144,15 +145,25 @@ class MT5Executor:
 
     def _map_symbol(self, tv_symbol: str) -> str:
         """
-        Map TradingView symbols to MT5 symbol names.
-        Adjust these mappings to match your broker's symbol naming.
+        Map known symbols to MT5 names while allowing broker-specific labels.
         """
+        raw_symbol = str(tv_symbol or "").strip()
+        if hasattr(config, "MT5_SYMBOL_MAP") and raw_symbol in config.MT5_SYMBOL_MAP:
+            return config.MT5_SYMBOL_MAP[raw_symbol]
+
         mapping = {
             "CME_MINI:MNQ1!": "MNQ1!",
             "CME_MINI:MES1!": "MES1!",
             "NYMEX:MCL1!": "MCL1!",
         }
-        return mapping.get(tv_symbol, tv_symbol)
+        if raw_symbol in mapping:
+            return mapping[raw_symbol]
+
+        translation = translate_chart_symbol(raw_symbol)
+        if translation:
+            return translation.mt5_symbol
+
+        return raw_symbol
 
     def _reverse_map_symbol(self, mt5_symbol: str) -> str:
         """Map MT5 symbol names back to TradingView format."""

@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 import requests
 
 import config
+from core.ollama_utils import build_ollama_url, normalize_ollama_base_url
 from core.models import ConfidenceLevel, TradeAutopsy, TradeRecord
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ class Grader:
 
     def __init__(self, db_path: str = "vcanitrade_ledger.db"):
         self.db_path = db_path
-        self.base_url = config.OLLAMA_BASE_URL
+        self.base_url = normalize_ollama_base_url(config.OLLAMA_BASE_URL)
         self.model = config.OLLAMA_MODEL
         self.timeout = config.LLM_TIMEOUT
 
@@ -184,7 +185,7 @@ class Grader:
         """Send grading prompt to Ollama and parse response."""
         try:
             resp = requests.post(
-                f"{self.base_url}/api/generate",
+                build_ollama_url(self.base_url, "api/generate"),
                 json={
                     "model": self.model,
                     "prompt": prompt,

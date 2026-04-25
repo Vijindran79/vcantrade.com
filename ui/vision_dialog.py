@@ -30,6 +30,7 @@ import logging
 from datetime import datetime
 
 import config
+from core.ollama_utils import build_ollama_url, normalize_base64_image
 
 logger = logging.getLogger(__name__)
 
@@ -327,14 +328,14 @@ Respond with ONLY JSON - no markdown, no explanations."""
         try:
             # Try Qwen-VL or LLaVA via Ollama
             vision_model = config.VLM_MODEL if config.USE_VISION else config.OLLAMA_MODEL
-            
-            url = f"{config.OLLAMA_BASE_URL}/api/generate"
+            clean_image = normalize_base64_image(image_base64)
+            url = build_ollama_url(config.OLLAMA_BASE_URL, "api/generate")
             
             payload = {
                 "model": vision_model,
                 "prompt": prompt,
                 "stream": False,
-                "images": [image_base64],
+                "images": [clean_image],
                 "options": {
                     "temperature": 0.1,
                     "num_predict": 512,

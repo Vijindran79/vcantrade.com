@@ -315,11 +315,11 @@ class BrowserAgent:
             self.playwright = await async_playwright().start()
 
             # CDP ONLY: Connect to existing Chrome on Vast.ai Linux server
-            self.browser = await self.playwright.chromium.connect_over_cdp("http://127.0.0.1:9223")
+            self.browser = await self.playwright.chromium.connect_over_cdp(config.BROWSER_CDP_URL)
             contexts = self.browser.contexts
             if not contexts:
                 logger.error("[FAIL] No contexts found in Chrome CDP connection")
-                raise RuntimeError("No contexts in Chrome on port 9223")
+                raise RuntimeError(f"No contexts in Chrome CDP connection: {config.BROWSER_CDP_URL}")
 
             # Search for existing TradingView tab
             for ctx in contexts:
@@ -345,7 +345,7 @@ class BrowserAgent:
             return
 
         except Exception as e:
-            logger.error(f"[FAIL] Failed to connect to Chrome on 127.0.0.1:9223: {e}")
+            logger.error(f"[FAIL] Failed to connect to Chrome at {config.BROWSER_CDP_URL}: {e}")
             raise
 
     async def _handle_login_wait(self):

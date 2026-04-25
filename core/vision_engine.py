@@ -25,6 +25,7 @@ import requests
 from PIL import Image
 
 import config
+from core.ollama_utils import build_ollama_url, normalize_ollama_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,161 @@ class VisionCapture:
             logger.error(f"VisionCapture: window search failed: {e}")
         return None
 
+    def find_best_window(
+        self,
+        title_candidates: list[str],
+        blacklist: Optional[list[str]] = None,
+    ):
+        """
+        Find the best visible window matching candidate titles while skipping
+        unsafe windows like terminals and code editors.
+        """
+        try:
+            import pygetwindow as gw
+        except ImportError:
+            logger.debug("VisionCapture: pygetwindow not available for smart window search")
+            return None
+        except Exception as exc:
+            logger.error("VisionCapture: window library failed to load: %s", exc)
+            return None
+
+        blacklist_terms = [
+            term.lower()
+            for term in (blacklist or getattr(config, "WINDOW_TITLE_BLACKLIST", []))
+            if str(term).strip()
+        ]
+        candidate_terms = [
+            term.lower()
+            for term in (title_candidates or [])
+            if str(term).strip()
+        ]
+
+        best_match = None
+        best_score = float("-inf")
+        for win in gw.getAllWindows():
+            title = str(getattr(win, "title", "") or "").strip()
+            if not title or getattr(win, "width", 0) <= 0 or getattr(win, "height", 0) <= 0:
+                continue
+
+            lowered = title.lower()
+            if any(term in lowered for term in blacklist_terms):
+                logger.debug("VisionCapture: skipping blacklisted window '%s'", title)
+                continue
+
+            score = 0
+            for index, token in enumerate(candidate_terms):
+                if token and token in lowered:
+                    score += max(100 - (index * 10), 10)
+            if score <= 0:
+                continue
+
+            if score > best_score:
+                best_score = score
+                best_match = win
+
+        if best_match:
+            logger.info(
+                "VisionCapture: smart-eye locked '%s' at %s,%s %sx%s",
+                best_match.title,
+                best_match.left,
+                best_match.top,
+                best_match.width,
+                best_match.height,
+            )
+        return best_match
+
+    def capture_window_chart(
+        self,
+        asset: str,
+        title_candidates: list[str],
+        blacklist: Optional[list[str]] = None,
+        crop: Optional[Tuple[float, float, float, float]] = None,
+    ) -> Optional[ChartScreenshot]:
+        """Capture a cropped chart region from a detected application window."""
+        window = self.find_best_window(title_candidates, blacklist=blacklist)
+        if not window:
+            logger.warning("VisionCapture: no matching window found for %s", title_candidates)
+            return None
+
+        region = self._crop_window_region(
+            int(window.left),
+            int(window.top),
+            int(window.width),
+            int(window.height),
+            crop or (
+                float(getattr(config, "MT5_CHART_CROP_LEFT_PCT", 0.04)),
+                float(getattr(config, "MT5_CHART_CROP_TOP_PCT", 0.11)),
+                float(getattr(config, "MT5_CHART_CROP_WIDTH_PCT", 0.92)),
+                float(getattr(config, "MT5_CHART_CROP_HEIGHT_PCT", 0.78)),
+            ),
+        )
+
+        image = self._capture_region(region)
+        if image is None:
+            return None
+
+        screenshot = ChartScreenshot(
+            image=image,
+            asset=asset,
+            source=f"window:{getattr(window, 'title', 'unknown')}",
+            region=region,
+        )
+        if self.save_debug_screenshots:
+            screenshot.save_debug()
+        return screenshot
+
+    def capture_active_chart(self, asset: str = "UNKNOWN") -> Optional[ChartScreenshot]:
+        """
+        Capture the active chart source based on launch mode.
+
+        MT5 mode uses Smart Eye window detection and MT5 chart cropping.
+        UI/browser mode keeps the existing fixed-region capture behavior.
+        """
+        execution_mode = str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper()
+        trading_surface = str(
+            getattr(config, "TRADING_SURFACE", "TRADINGVIEW_TRADOVATE") or "TRADINGVIEW_TRADOVATE"
+        ).upper()
+        smart_eye_enabled = bool(getattr(config, "SMART_EYE_ENABLED", True))
+
+        if execution_mode == "MT5" and trading_surface == "METATRADER_5" and smart_eye_enabled:
+            detected_title = str(getattr(config, "DETECTED_TRADING_WINDOW_TITLE", "") or "").strip()
+            candidates = []
+            if detected_title:
+                candidates.append(detected_title)
+            candidates.extend(list(getattr(config, "MT5_WINDOW_HINTS", [])))
+            return self.capture_window_chart(
+                asset=asset,
+                title_candidates=candidates,
+                blacklist=list(getattr(config, "WINDOW_TITLE_BLACKLIST", [])),
+            )
+
+        return self.capture_chart(asset=asset)
+
+    def _capture_region(self, region: Tuple[int, int, int, int]) -> Optional[Image.Image]:
+        if self._mss:
+            return self._capture_mss(region)
+        if self._pyautogui:
+            return self._capture_pyautogui(region)
+        logger.error("VisionCapture: no screenshot library available")
+        return None
+
+    def _crop_window_region(
+        self,
+        left: int,
+        top: int,
+        width: int,
+        height: int,
+        crop: Tuple[float, float, float, float],
+    ) -> Tuple[int, int, int, int]:
+        crop_left_pct, crop_top_pct, crop_width_pct, crop_height_pct = crop
+        crop_left = max(0, min(int(width * crop_left_pct), max(width - 1, 0)))
+        crop_top = max(0, min(int(height * crop_top_pct), max(height - 1, 0)))
+        crop_width = max(50, int(width * crop_width_pct))
+        crop_height = max(50, int(height * crop_height_pct))
+        crop_width = min(crop_width, max(width - crop_left, 50))
+        crop_height = min(crop_height, max(height - crop_top, 50))
+        return (left + crop_left, top + crop_top, crop_width, crop_height)
+
     def _capture_mss(self, region: Tuple[int, int, int, int]) -> Optional[Image.Image]:
         """Fast screenshot via mss."""
         try:
@@ -310,7 +466,7 @@ class VLMClient:
         model: Optional[str] = None,
         timeout: int = VLM_TIMEOUT,
     ):
-        self.base_url = base_url
+        self.base_url = normalize_ollama_base_url(base_url)
         self.model = model or config.VLM_MODEL
         self.timeout = timeout
         self._active_model = None  # Track which model is actually working
@@ -363,7 +519,7 @@ class VLMClient:
         """
         try:
             resp = requests.post(
-                f"{self.base_url}/api/generate",
+                build_ollama_url(self.base_url, "api/generate"),
                 json={
                     "model": model,
                     "prompt": prompt,
@@ -423,7 +579,7 @@ class VLMClient:
         """Check if a VLM model is loaded in Ollama."""
         target = model or self.model
         try:
-            resp = requests.get(f"{self.base_url}/api/tags", timeout=3)
+            resp = requests.get(build_ollama_url(self.base_url, "api/tags"), timeout=3)
             if resp.status_code == 200:
                 models = resp.json().get("models", [])
                 return any(target in m.get("name", "") for m in models)
@@ -434,7 +590,7 @@ class VLMClient:
     def get_available_vlm_models(self) -> list[str]:
         """List all vision-capable models available in Ollama."""
         try:
-            resp = requests.get(f"{self.base_url}/api/tags", timeout=3)
+            resp = requests.get(build_ollama_url(self.base_url, "api/tags"), timeout=3)
             if resp.status_code == 200:
                 models = resp.json().get("models", [])
                 # Filter for known vision models
@@ -463,7 +619,7 @@ class VLMClient:
         logger.info(f"VLM: Pulling model '{target}' [DASH] this may take a few minutes...")
         try:
             resp = requests.post(
-                f"{self.base_url}/api/pull",
+                build_ollama_url(self.base_url, "api/pull"),
                 json={"name": target},
                 timeout=600,
             )
@@ -480,7 +636,7 @@ class VLMClient:
         target = model or self.model
         try:
             resp = requests.post(
-                f"{self.base_url}/api/generate",
+                build_ollama_url(self.base_url, "api/generate"),
                 json={
                     "model": target,
                     "prompt": "",
@@ -500,7 +656,7 @@ class VLMClient:
         Returns dict with GPU memory info.
         """
         try:
-            resp = requests.get(f"{self.base_url}/api/ps", timeout=3)
+            resp = requests.get(build_ollama_url(self.base_url, "api/ps"), timeout=3)
             if resp.status_code == 200:
                 data = resp.json()
                 models = data.get("models", [])

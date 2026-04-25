@@ -18,6 +18,8 @@ from dataclasses import dataclass
 
 import holidays
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -468,6 +470,9 @@ class MarketSessionDetector:
         # Check special modes
         is_saturday = now.weekday() == 5
         is_sunday = self.is_sunday()
+        is_friday = now.weekday() == 4
+        friday_close_cutoff = int(getattr(config, "FRIDAY_CLOSE_CUTOFF_UTC", 18) or 18)
+        is_friday_close_window = is_friday and now.hour >= friday_close_cutoff
         
         # Build context
         context = {
@@ -476,6 +481,9 @@ class MarketSessionDetector:
             "is_weekend": self.is_weekend(),
             "is_saturday": is_saturday,
             "is_sunday": is_sunday,
+            "is_friday": is_friday,
+            "friday_close_cutoff_utc": friday_close_cutoff,
+            "is_friday_close_window": is_friday_close_window,
             "is_holiday_us": self._is_holiday_us,
             "is_holiday_hk": self._is_holiday_hk,
             "holiday_name": self._holiday_name,
@@ -534,6 +542,14 @@ class MarketSessionDetector:
         # Early close mode
         if session == MarketSession.EARLY_CLOSE:
             return f"{day_name} - {self._early_close_reason}. Market closing early. Consider tightening stops."
+
+        friday_close_cutoff = int(getattr(config, "FRIDAY_CLOSE_CUTOFF_UTC", 18) or 18)
+        now = self.get_current_datetime()
+        if now.weekday() == 4 and now.hour >= friday_close_cutoff:
+            return (
+                f"{day_name} - Post-{friday_close_cutoff:02d}:00 UTC Friday close-risk window. "
+                "Avoid fresh swings and protect profits aggressively."
+            )
         
         # Normal sessions
         if is_peak:

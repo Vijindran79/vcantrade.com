@@ -89,15 +89,16 @@ from core.executor import UnifiedTradeExecutor, ExchangeLimitExecutor, ExchangeI
 from core.risk import calculate_position_size, build_hard_stop_plan
 from core.journal import TradeJournalDB
 from core.risk_manager import RiskManager, PositionSizer
+from core.symbol_mapper import root_matches
 from core.vibe_adapter import VibeTradingAdapter
 from execution.rpa_executor import RPAExecutor
-from core.mt5_executor import MT5Executor
 from core.trade_executor import TradeExecutor
 from core.market_sessions import MarketSessionDetector
 from ui.dashboard import CommandCenter
 from ui.signal_dialog import SignalApprovalDialog
 from ui.ai_narrator import AINarratorOverlay
 from ui.calibration_dialog import CalibrationWizardDialog
+from ui.lion_switchboard import choose_launch_profile
 from ui.vision_dialog import VisionConfirmationDialog, VisionTestDialog
 
 # Setup logging with UTF-8 encoding to prevent emoji crashes
@@ -150,6 +151,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info("Logging system initialized")
+
+
+def _create_mt5_executor():
+    """Lazy factory so UI mode can boot without an MT5 dependency chain."""
+    try:
+        from core.mt5_executor import MT5Executor
+
+        return MT5Executor()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("[MT5] Executor unavailable: %s", exc)
+        return None
 
 # Cloud Dashboard: Capture last log message for remote bridge broadcast
 _last_log_message = ""
@@ -798,7 +810,7 @@ class AnalysisWorker(QThread):
                     chart_base64 = None
                     if self.vision:
                         try:
-                            screenshot = self.vision.capture_chart(asset=market_data.asset)
+                            screenshot = self.vision.capture_active_chart(asset=market_data.asset)
                             if screenshot:
                                 chart_base64 = screenshot.to_base64()
                                 logger.info(
@@ -874,7 +886,8 @@ class VcaniTradeApp:
     """
 
     def __init__(self):
-        self.app = QApplication(sys.argv)
+        self.app = QApplication.instance() or QApplication(sys.argv)
+        self.launch_profile = choose_launch_profile()
         self._main_thread_invoker = MainThreadInvoker()
 
         # Initialize account state early so downstream components can safely
@@ -902,6 +915,7 @@ class VcaniTradeApp:
         # UI - Command Center (main dashboard)
         self.cmd = CommandCenter()
         self.cmd.set_bridge_status("disconnected")
+        self.cmd.log(f"[SWITCHBOARD] {self.launch_profile.headline}")
         
         # AI Narrator Overlay (glassmorphic assistant)
         self.ai_narrator = AINarratorOverlay()
@@ -934,7 +948,9 @@ class VcaniTradeApp:
         # on_blind_error fires when TradingView is minimized or covered by another app
         self.rpa_hand = RPAExecutor(on_blind_error=self._on_rpa_blind)
         # MT5 Executor - routes trades to MetaTrader 5 when EXECUTION_MODE == "MT5"
-        self.mt5_executor = MT5Executor()
+        self.mt5_executor = None
+        if self._is_mt5_mode():
+            self.mt5_executor = self._get_mt5_executor()
         self.sql_journal = TradeJournalDB(db_path="trades.db")
         self.vibe_adapter = VibeTradingAdapter()
         self._vibe_strategy_worker = None
@@ -1076,6 +1092,18 @@ class VcaniTradeApp:
 
     def _log_ui(self, message: str):
         self._run_on_ui_thread(lambda: self.cmd.log(message))
+
+    def _is_mt5_mode(self) -> bool:
+        return str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper() == "MT5"
+
+    def _get_mt5_executor(self):
+        if not self._is_mt5_mode():
+            return None
+        if self.mt5_executor is None:
+            self.mt5_executor = _create_mt5_executor()
+            if self.mt5_executor is None:
+                logger.error("[MT5] Launch requested MetaTrader 5 mode, but the executor could not be created.")
+        return self.mt5_executor
 
     def _normalize_gatekeeper_category(self, category: str) -> str:
         mapping = {
@@ -4172,7 +4200,7 @@ class VcaniTradeApp:
                 )
 
         # -- EXECUTION: UI (RPA) or MT5 --
-        if config.EXECUTION_MODE.upper() == "MT5":
+        if self._is_mt5_mode():
             self._execute_cloud_signal_mt5(
                 ticker, action, entry_price, sl_price, tp_price,
                 quantity, amount, signal_data, brain_used,
@@ -4671,12 +4699,19 @@ class VcaniTradeApp:
             )
             return False
 
-        if config.EXECUTION_MODE.upper() == "MT5":
+        if self._is_mt5_mode():
+            mt5_executor = self._get_mt5_executor()
+            if mt5_executor is None:
+                self.cmd.log(
+                    '<span style="color:#F85149;font-weight:bold">[MT5 FAIL]</span> '
+                    'MetaTrader 5 mode selected but executor is unavailable'
+                )
+                return False
             self.cmd.log(
                 f'<span style="color:#00D4FF;font-weight:bold">[MT5]</span> '
                 f'Sending {action} {symbol} to MetaTrader 5'
             )
-            success = self.mt5_executor.execute_trade(symbol, action)
+            success = mt5_executor.execute_trade(symbol, action)
             if success:
                 self.cmd.log(
                     f'<span style="color:#3FB950;font-weight:bold">[MT5 OK]</span> '
@@ -4741,30 +4776,42 @@ class VcaniTradeApp:
         vibe_context: str,
     ):
         """MT5 execution path for cloud signals. Skips RPA pre-work and sends directly to MT5."""
+        execution_ticker = self._resolve_mt5_execution_symbol(ticker, signal_data)
         self.cmd.log(
             f'<span style="color:#00D4FF;font-weight:bold">[MT5]</span> '
             f'Cloud signal {action} {ticker} -> MetaTrader 5'
+            + (f' as {execution_ticker}' if execution_ticker != ticker else '')
         )
-        success = self.mt5_executor.execute_trade(ticker, action)
+        mt5_executor = self._get_mt5_executor()
+        if mt5_executor is None:
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">[MT5 FAIL]</span> '
+                f'Cloud signal {action} {ticker} aborted because MT5 executor is unavailable'
+            )
+            self._on_ticker_status_update(ticker, "mt5_unavailable")
+            return
+        success = mt5_executor.execute_trade(execution_ticker, action)
         order_status = "mt5_executed" if success else "mt5_failed"
 
         self.cmd.log(
             f'<span style="color:{"#3FB950" if success else "#F85149"};font-weight:bold">'
             f'{"[MT5 OK] ORDER FILLED" if success else "[MT5 FAIL] ORDER REJECTED"}</span>: '
-            f'{action} {ticker}'
+            f'{action} {execution_ticker}'
         )
 
         if not success:
             self.cmd.log(
                 f'<span style="color:#F85149">[RECEIPT] JOURNAL</span>: '
-                f'skipped DB save because MT5 order was not filled for {ticker}'
+                f'skipped DB save because MT5 order was not filled for {execution_ticker}'
             )
             self._on_ticker_status_update(ticker, "mt5_failed")
             return
 
         # Journal & Position tracking (mirrors RPA post-execution logic)
+        signal_data["requested_ticker"] = ticker
+        signal_data["execution_ticker"] = execution_ticker
         journal_id = self.sql_journal.save_trade(
-            coin=ticker,
+            coin=execution_ticker,
             entry=entry_price,
             stop_loss=sl_price,
             ai_confidence=confidence_score,
@@ -4774,14 +4821,15 @@ class VcaniTradeApp:
         )
         self.sql_journal.save_trade_vibe(
             trade_id=journal_id,
-            asset=ticker,
+            asset=execution_ticker,
             vibe_context=vibe_context,
             confidence_penalty=float(signal_data.get("vibe_memory_penalty", 0.0)),
         )
-        logger.info("EXEC_CLOUD MT5: journal saved trade_id=%s for %s", journal_id, ticker)
+        logger.info("EXEC_CLOUD MT5: journal saved trade_id=%s for %s", journal_id, execution_ticker)
 
         position = {
-            "asset": ticker,
+            "asset": execution_ticker,
+            "requested_asset": ticker,
             "side": action,
             "entry": entry_price,
             "current": entry_price,
@@ -4794,7 +4842,7 @@ class VcaniTradeApp:
             "last_trailing_check_ts": 0.0,
             "pnl": 0.0,
             "pnl_pct": 0.0,
-            "order_id": f"mt5_{ticker}_{int(datetime.now().timestamp())}",
+            "order_id": f"mt5_{execution_ticker}_{int(datetime.now().timestamp())}",
             "journal_id": journal_id,
             "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
@@ -4802,7 +4850,7 @@ class VcaniTradeApp:
         }
 
         self.profit_lock.add_position(
-            asset=ticker,
+            asset=execution_ticker,
             entry_price=entry_price,
             stop_loss=sl_price,
             take_profit=None,
@@ -4812,13 +4860,77 @@ class VcaniTradeApp:
         self.trades_today += 1
 
         self.cmd.update_positions(self.positions)
-        self.cmd.add_trade_log(ticker, action, amount, 0, "Open")
+        self.cmd.add_trade_log(execution_ticker, action, amount, 0, "Open")
 
         self.cmd.log(
             f'<span style="color:#3FB950;font-weight:bold">[OK] POSITION OPENED (MT5)</span>: '
-            f'{action} {ticker} @ ${entry_price:.2f} | Amount: ${amount:.2f} | '
+            f'{action} {execution_ticker} @ ${entry_price:.2f} | Amount: ${amount:.2f} | '
             f'Qty: {quantity:.4f} | Managed SL: ${sl_price:.2f}'
         )
+
+    def _resolve_mt5_execution_symbol(self, ticker: str, signal_data: dict) -> str:
+        """
+        In MT5 mode, prefer the visible chart's broker symbol when vision can
+        read it and it belongs to the same instrument group.
+        """
+        if not getattr(config, "AUTO_SYMBOL_DETECTION", True):
+            return ticker
+
+        try:
+            vision = getattr(self.analysis_worker, "vision", None)
+            if vision is None:
+                vision = VisionCapture(save_debug=config.SAVE_DEBUG_SCREENSHOTS)
+
+            screenshot = vision.capture_active_chart(asset=ticker)
+            if not screenshot:
+                return ticker
+
+            from core.brain_swarm import detect_symbol_details_from_chart
+
+            details = detect_symbol_details_from_chart(
+                screenshot.to_base64(),
+                model=config.MULTI_ASSET_VISION_MODEL,
+                timeout=45,
+            )
+            if not details:
+                return ticker
+
+            signal_data["vision_symbol_details"] = details
+            detected_symbol = str(details.get("mt5_symbol") or details.get("raw_symbol") or "").strip()
+            analysis_symbol = str(details.get("analysis_symbol") or "").strip()
+            instrument_name = str(details.get("instrument_name") or detected_symbol or "").strip()
+
+            if detected_symbol and (
+                root_matches(ticker, detected_symbol)
+                or root_matches(ticker, analysis_symbol)
+                or ticker in {"UNKNOWN", ""}
+            ):
+                self.cmd.log(
+                    f'<span style="color:#58A6FF;font-weight:bold">[SMART SYMBOL]</span>: '
+                    f'Vision read {detected_symbol} as {instrument_name}; using MT5 broker symbol'
+                )
+                logger.info(
+                    "[SMART SYMBOL] %s resolved to MT5 broker label %s via vision details=%s",
+                    ticker,
+                    detected_symbol,
+                    details,
+                )
+                return detected_symbol
+
+            logger.warning(
+                "[SMART SYMBOL] Vision read %s (%s), but it did not match signal ticker %s. Keeping original ticker.",
+                detected_symbol,
+                instrument_name,
+                ticker,
+            )
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[SMART SYMBOL]</span>: '
+                f'Vision read {detected_symbol or "unknown"}, but signal was {ticker}; keeping signal symbol'
+            )
+            return ticker
+        except Exception as exc:
+            logger.warning("[SMART SYMBOL] MT5 symbol auto-detection failed for %s: %s", ticker, exc)
+            return ticker
         self.cmd.log(
             f'<span style="color:#8B949E">[RECEIPT] JOURNAL</span>: SAVING TO DB... '
             f'Trade #{journal_id} | ORDER={order_status}'
@@ -4849,11 +4961,12 @@ class VcaniTradeApp:
         If MT5 shows no positions, reset internal memory to match reality.
         Runs every 30 seconds when EXECUTION_MODE == 'MT5'.
         """
-        if not self.mt5_executor or not self.mt5_executor.initialized:
+        mt5_executor = self._get_mt5_executor()
+        if not mt5_executor or not mt5_executor.initialized:
             return
 
         try:
-            mt5_positions = self.mt5_executor.get_positions()
+            mt5_positions = mt5_executor.get_positions()
             mt5_symbols = {p["symbol"] for p in mt5_positions}
             internal_symbols = {p["asset"] for p in self.positions}
 
@@ -4964,12 +5077,16 @@ class VcaniTradeApp:
                         logger.error("[APEX] Executor close_all_positions failed: %s", e)
 
                 # Close via MT5 if in MT5 mode
-                if config.EXECUTION_MODE.upper() == "MT5" and self.mt5_executor:
+                if self._is_mt5_mode():
+                    mt5_executor = self._get_mt5_executor()
+                else:
+                    mt5_executor = None
+                if mt5_executor:
                     try:
-                        positions = self.mt5_executor.get_positions()
+                        positions = mt5_executor.get_positions()
                         for p in positions:
                             close_action = "SELL" if p["type"] == "BUY" else "BUY"
-                            self.mt5_executor.execute_trade(p["symbol"], close_action, volume=p["volume"])
+                            mt5_executor.execute_trade(p["symbol"], close_action, volume=p["volume"])
                             logger.info("[APEX] MT5 closed %s %s", p["type"], p["symbol"])
                     except Exception as e:
                         logger.error("[APEX] MT5 position close failed: %s", e)
@@ -5009,7 +5126,7 @@ class VcaniTradeApp:
             self.cmd.log("Vision Engine not available - cannot test")
             return
 
-        screenshot = self.analysis_worker.vision.capture_chart(asset="TEST")
+        screenshot = self.analysis_worker.vision.capture_active_chart(asset="TEST")
         if screenshot:
             self.cmd.log(
                 f"Vision test: captured {screenshot.dimensions[0]}x{screenshot.dimensions[1]} "
@@ -5112,7 +5229,7 @@ class VcaniTradeApp:
                 self.cmd.log(f"{svc_name} start failed: {exc}")
 
         # MT5 Position Reconciliation Timer (every 30 seconds)
-        if config.EXECUTION_MODE.upper() == "MT5":
+        if self._is_mt5_mode():
             self._mt5_reconcile_timer = QTimer()
             self._mt5_reconcile_timer.timeout.connect(self._reconcile_mt5_positions)
             self._mt5_reconcile_timer.start(30000)  # 30 seconds
@@ -5178,6 +5295,7 @@ def main():
     print(f"Mode:      {initial_mode}")
     print(f"Trading:   {trading_mode}")
     print(f"Executor:  {config.EXECUTION_MODE} (UI=RPA, MT5=MetaTrader)")
+    print(f"Surface:   {config.TRADING_SURFACE}")
     print(
         f"Vision:    {config.VLM_MODEL}" if config.USE_VISION else "Vision:    Disabled"
     )
@@ -5192,14 +5310,14 @@ def main():
     app = VcaniTradeApp()
 
     # -- RPA Permission Gate ----------------------------------------------
-    # Fatal-check: if the Hand literally cannot move the mouse, crash now
-    # rather than silently failing every trade execution later.
-    try:
-        app.rpa_hand.assert_permissions_or_die()
-    except RuntimeError as perm_err:
-        print(f"\nFATAL: {perm_err}")
-        print("Relaunch with: Right-click -> 'Run as administrator'")
-        sys.exit(1)
+    # Only required when the execution surface actually uses the local hand.
+    if str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper() != "MT5":
+        try:
+            app.rpa_hand.assert_permissions_or_die()
+        except RuntimeError as perm_err:
+            print(f"\nFATAL: {perm_err}")
+            print("Relaunch with: Right-click -> 'Run as administrator'")
+            sys.exit(1)
 
     def signal_handler(sig, frame):
         print("\nShutdown signal received...")

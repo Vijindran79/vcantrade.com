@@ -88,7 +88,7 @@ class VisualChartConfirmation:
 
         try:
             # Capture chart screenshot
-            screenshot = self.vision.capture_chart(asset=asset)
+            screenshot = self.vision.capture_active_chart(asset=asset)
             if not screenshot:
                 logger.error("Chart screenshot failed")
                 self.consecutive_failures += 1

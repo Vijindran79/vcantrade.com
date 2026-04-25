@@ -44,6 +44,7 @@ from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
 from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
 from core.market_sessions import MarketSessionDetector
 from core.liquidity_engine import LiquidityEngine
+from core.symbol_mapper import translate_chart_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +190,11 @@ class CloudScanner:
         normalized = settings_manager.normalize_ticker(ticker)
         if hasattr(config, "SYMBOL_MAP") and normalized in config.SYMBOL_MAP:
             return config.SYMBOL_MAP[normalized]
-        # 3. Fall back to normalized ticker
+        # 3. Broker/chart labels like MNQ-JUN26 are translated automatically.
+        translation = translate_chart_symbol(ticker) or translate_chart_symbol(normalized)
+        if translation:
+            return translation.yahoo_symbol
+        # 4. Fall back to normalized ticker
         return normalized
 
     def get_scan_interval(self) -> float:

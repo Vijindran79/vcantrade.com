@@ -19,6 +19,7 @@ from datetime import datetime
 import requests
 
 import config
+from core.ollama_utils import build_ollama_url, normalize_ollama_base_url
 from core.models import MarketDataPoint, SignalAction
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ this trade. You are the skeptical voice that challenges every assumption.
 Trade Signal to Challenge:
 - Asset: {asset}
 - Runtime Mode: {runtime_mode}
+- Session Context: {session_context}
 - Suggested Action: {suggested_action}
 - Entry Price: ${entry_price:.2f}
 - Stop Loss: ${stop_loss:.2f}
@@ -86,7 +88,7 @@ class DevilsAdvocate:
     """
 
     def __init__(self):
-        self.base_url = config.OLLAMA_BASE_URL
+        self.base_url = normalize_ollama_base_url(config.OLLAMA_BASE_URL)
         self.model = config.OLLAMA_MODEL
         self.timeout = config.LLM_TIMEOUT
         self.challenge_count = 0
@@ -101,12 +103,13 @@ class DevilsAdvocate:
         stop_loss: float,
         take_profit: float,
         confidence: str,
+        session_context: Optional[Dict] = None,
     ) -> Dict:
         """
         Challenge a proposed trade signal.
         Returns dict with rejection reasons and confidence penalty.
         """
-        self.total_challenges += 0
+        self.total_challenges += 1
 
         try:
             runtime_mode = str(market_data.indicators.get("RUNTIME_MODE", "TEACHER") or "TEACHER").upper()
@@ -114,6 +117,7 @@ class DevilsAdvocate:
             prompt = PROMPT_DEVILS_ADVOCATE.format(
                 asset=market_data.asset,
                 runtime_mode=runtime_mode,
+                session_context=json.dumps(session_context or {}, ensure_ascii=False),
                 suggested_action=suggested_action,
                 entry_price=entry_price,
                 stop_loss=stop_loss,
@@ -131,6 +135,7 @@ class DevilsAdvocate:
                 logger.warning(f"Devil's Advocate failed: {result['error']}")
                 return self._default_challenge(suggested_action)
 
+            result = self._apply_temporal_guardrails(result, session_context=session_context)
             result = self._apply_autonomous_liquidity_override(
                 result=result,
                 market_data=market_data,
@@ -184,11 +189,39 @@ class DevilsAdvocate:
 
         return result
 
+    def _apply_temporal_guardrails(self, result: Dict, session_context: Optional[Dict]) -> Dict:
+        """Raise stronger objections during market holidays and late Friday trade windows."""
+        context = session_context or {}
+        reasons = [str(reason) for reason in result.get("rejection_reasons", [])]
+
+        if context.get("is_holiday_us") or context.get("is_holiday_hk"):
+            holiday_name = str(context.get("holiday_name") or "Market holiday")
+            reasons.insert(0, f"{holiday_name} reduces liquidity and follow-through for fresh entries.")
+            result["rating"] = "STRONG_AVOID"
+            result["confidence_penalty"] = min(float(result.get("confidence_penalty", -0.10)), -0.25)
+            result["better_entry_timing"] = "Wait for the next full market session after the holiday."
+            result["hidden_risks"] = "Holiday conditions can distort price discovery and widen slippage."
+
+        if context.get("is_friday_close_window"):
+            cutoff = int(context.get("friday_close_cutoff_utc", getattr(config, "FRIDAY_CLOSE_CUTOFF_UTC", 18)) or 18)
+            reasons.insert(
+                0,
+                f"Friday after {cutoff:02d}:00 UTC is a close-risk window with reduced follow-through and gap risk."
+            )
+            current_penalty = float(result.get("confidence_penalty", -0.10) or -0.10)
+            result["rating"] = "STRONG_AVOID" if str(result.get("rating", "")).upper() != "STRONG_AVOID" else result["rating"]
+            result["confidence_penalty"] = min(current_penalty, -0.20)
+            result["better_entry_timing"] = "Stand down into the weekend or wait for Monday liquidity."
+            result["override_conditions"] = "Only reconsider if this is an active position-management action, not a fresh entry."
+
+        result["rejection_reasons"] = reasons[:3] if reasons else result.get("rejection_reasons", [])
+        return result
+
     def _call_llm(self, prompt: str) -> Dict:
         """Call local Ollama for Devil's Advocate analysis."""
         try:
             resp = requests.post(
-                f"{self.base_url}/api/generate",
+                build_ollama_url(self.base_url, "api/generate"),
                 json={
                     "model": self.model,
                     "prompt": prompt,
