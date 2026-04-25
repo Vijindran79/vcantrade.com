@@ -151,7 +151,7 @@ MT5_SYMBOL_MAP = {
     "NVDA": "NVDA",
     "AAPL": "AAPL",
 }
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llava:34b")
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llava:7b")
 MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====

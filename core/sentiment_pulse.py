@@ -19,6 +19,13 @@ from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import requests
 import re
+from xml.etree import ElementTree as ET
+
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4 = True
+except ImportError:
+    HAS_BS4 = False
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +105,9 @@ class SentimentPulse:
         # Sentiment tracking
         self.current_sentiment: Dict[str, float] = {}  # asset -> sentiment score (-1 to +1)
         self.sentiment_history: List[Dict] = []
+        self.latest_headlines: List[Dict] = []
+        self._last_sentiment_label: str = "NEUTRAL"
+        self._last_market_context: str = "Scanning headlines..."
 
         # STAGE 4: Global Macro Confluence (DXY & US10Y tracking)
         self.dxy_trend: Optional[float] = None  # Current DXY value
@@ -132,16 +142,28 @@ class SentimentPulse:
     async def check_news(self) -> List[RedFolderEvent]:
         """
         Main news checking function.
-        Scrapes multiple sources for high-impact events.
+        Scrapes multiple sources for high-impact events and headlines.
         """
         events = []
         
         try:
-            # 1. Forex Factory (High Impact Events)
-            forex_events = await self._scrape_forex_factory()
+            # 1. Yahoo Finance headlines (real-time market sentiment)
+            yahoo_headlines = await self._scrape_yahoo_finance_headlines()
+            self.latest_headlines = yahoo_headlines[:10]
+            
+            # Analyze sentiment from headlines
+            for headline_entry in self.latest_headlines:
+                sentiment = self.analyze_sentiment(headline_entry["title"], headline_entry.get("asset"))
+                headline_entry["sentiment"] = sentiment
+            
+            # 2. Forex Factory (High Impact Events) - try live first, then fallback
+            try:
+                forex_events = await self._scrape_forex_factory_live()
+            except Exception:
+                forex_events = await self._scrape_forex_factory()
             events.extend(forex_events)
             
-            # 2. Investing.com Economic Calendar
+            # 3. Investing.com Economic Calendar
             investing_events = await self._scrape_investing_com()
             events.extend(investing_events)
             
@@ -157,12 +179,16 @@ class SentimentPulse:
             # Check for RPA pause conditions
             self._update_rpa_kill_switch()
             
+            # Update global sentiment label from latest headlines
+            self._update_sentiment_label()
+            
             self.last_check = time.time()
             
             logger.info(
                 f"[SAT] News scan complete: "
                 f"{len(events)} events found, "
                 f"{len(high_impact)} high-impact, "
+                f"{len(self.latest_headlines)} headlines, "
                 f"RPA {'PAUSED' if self.rpa_paused else 'ACTIVE'}"
             )
             
@@ -171,6 +197,116 @@ class SentimentPulse:
         except Exception as e:
             logger.error(f"News scan failed: {e}")
             return []
+
+    async def _scrape_yahoo_finance_headlines(self) -> List[Dict]:
+        """
+        Scrape Yahoo Finance RSS feed for latest market headlines.
+        Returns list of headline dicts with title, source, and pub_time.
+        """
+        headlines = []
+        try:
+            rss_urls = [
+                "https://finance.yahoo.com/news/rssindex",
+                "https://feeds.finance.yahoo.com/rss/2.0/headline?s=BTC-USD,ETH-USD,SOL-USD,XRP-USD&region=US&lang=en-US",
+            ]
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            for url in rss_urls:
+                try:
+                    resp = requests.get(url, headers=headers, timeout=15)
+                    if resp.status_code != 200:
+                        continue
+                    root = ET.fromstring(resp.content)
+                    for item in root.iter("item"):
+                        title_elem = item.find("title")
+                        pub_date_elem = item.find("pubDate")
+                        link_elem = item.find("link")
+                        if title_elem is None or not title_elem.text:
+                            continue
+                        title = title_elem.text.strip()
+                        if len(title) < 10 or title.startswith("https://"):
+                            continue
+                        pub_time = datetime.now()
+                        if pub_date_elem is not None and pub_date_elem.text:
+                            try:
+                                pub_time = datetime.strptime(pub_date_elem.text.strip(), "%a, %d %b %Y %H:%M:%S %z").replace(tzinfo=None)
+                            except Exception:
+                                pass
+                        headlines.append({"title": title, "source": "Yahoo Finance", "url": link_elem.text.strip() if link_elem is not None else "", "published": pub_time})
+                except Exception as e:
+                    logger.debug(f"Yahoo RSS scrape failed for {url}: {e}")
+                    continue
+            seen = set()
+            unique = []
+            for h in headlines:
+                key = h["title"].lower()
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(h)
+            headlines = unique
+            logger.info(f"[SAT] Yahoo Finance: {len(headlines)} headlines scraped")
+        except Exception as e:
+            logger.error(f"Yahoo Finance headline scrape failed: {e}")
+        return headlines
+
+    async def _scrape_forex_factory_live(self) -> List[RedFolderEvent]:
+        """
+        Attempt to scrape Forex Factory economic calendar for real events today.
+        Falls back gracefully if the page structure changes.
+        """
+        events = []
+        try:
+            url = "https://www.forexfactory.com/calendar?day=today"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            resp = requests.get(url, headers=headers, timeout=20)
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code}")
+            if HAS_BS4:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                rows = soup.find_all("tr", class_=re.compile(r"calendar__row"))
+                for row in rows:
+                    tds = row.find_all("td")
+                    if len(tds) < 5:
+                        continue
+                    impact = "LOW"
+                    impact_elem = row.find("span", class_=re.compile(r"impact|calendar__impact"))
+                    if impact_elem:
+                        impact_text = impact_elem.get_text(strip=True).upper()
+                        if "HIGH" in impact_text or "high" in str(impact_elem.get("class", [])):
+                            impact = "HIGH"
+                        elif "MEDIUM" in impact_text or "medium" in str(impact_elem.get("class", [])):
+                            impact = "MEDIUM"
+                    if impact != "HIGH":
+                        continue
+                    time_str = ""
+                    time_elem = row.find("td", class_=re.compile(r"calendar__time"))
+                    if time_elem:
+                        time_str = time_elem.get_text(strip=True)
+                    currency = "USD"
+                    curr_elem = row.find("td", class_=re.compile(r"calendar__currency"))
+                    if curr_elem:
+                        currency = curr_elem.get_text(strip=True).upper() or "USD"
+                    title = "Economic Event"
+                    title_elem = row.find("span", class_=re.compile(r"calendar__event"))
+                    if title_elem:
+                        title = title_elem.get_text(strip=True)
+                    event_time = datetime.now()
+                    if time_str:
+                        try:
+                            event_time = datetime.strptime(f"{datetime.now().strftime('%Y-%m-%d')} {time_str}", "%Y-%m-%d %I:%M%p")
+                        except Exception:
+                            try:
+                                event_time = datetime.strptime(f"{datetime.now().strftime('%Y-%m-%d')} {time_str}", "%Y-%m-%d %H:%M")
+                            except Exception:
+                                pass
+                    events.append(RedFolderEvent(title=title, currency=currency, impact=impact, event_time=event_time))
+            else:
+                logger.warning("[SAT] BeautifulSoup unavailable - using regex fallback for Forex Factory")
+        except Exception as e:
+            logger.warning(f"[SAT] Live Forex Factory scrape failed: {e}")
+        return events
 
     async def _scrape_forex_factory(self) -> List[RedFolderEvent]:
         """
@@ -380,6 +516,9 @@ class SentimentPulse:
             "rpa_status": "PAUSED" if self.rpa_paused else "ACTIVE",
             "safe_to_trade": self.is_safe_to_trade(),
             "sentiment_overlay": self.current_sentiment,
+            "sentiment_label": self.get_global_sentiment_label(),
+            "market_context": self.get_market_context(),
+            "headline_count": len(self.latest_headlines),
             # STAGE 4: Macro confluence data
             "dxy_value": self.dxy_trend,
             "dxy_direction": self.dxy_direction,
@@ -472,6 +611,75 @@ class SentimentPulse:
         # import yfinance as yf
         # us10y = yf.Ticker("TNX")
         # return us10y.history(period="1d")['Close'].iloc[-1]
+    def _update_sentiment_label(self):
+        """
+        Compute a human-readable global sentiment label from latest headlines
+        and upcoming news events.
+        """
+        if not self.latest_headlines:
+            self._last_sentiment_label = "NEUTRAL"
+            self._last_market_context = "No recent headlines. Market quiet."
+            return
+        avg_sentiment = sum(h.get("sentiment", 0.0) for h in self.latest_headlines) / len(self.latest_headlines)
+        bullish = sum(1 for h in self.latest_headlines if h.get("sentiment", 0.0) > 0.2)
+        bearish = sum(1 for h in self.latest_headlines if h.get("sentiment", 0.0) < -0.2)
+        next_event = self.get_next_event()
+        has_imminent_news = False
+        if next_event:
+            minutes_until = next_event.time_until_event().total_seconds() / 60
+            has_imminent_news = minutes_until < 60
+        if has_imminent_news and next_event and next_event.is_high_impact():
+            self._last_sentiment_label = "CAUTION"
+            self._last_market_context = (
+                f"High-impact news incoming: {next_event.title} "
+                f"in {self.get_time_to_next_event()}. Consider flat positions."
+            )
+        elif bearish >= 3 and avg_sentiment < -0.3:
+            self._last_sentiment_label = "BEARISH"
+            self._last_market_context = (
+                f"Negative sentiment dominating ({bearish} bearish headlines). "
+                f"Risk-off mood detected."
+            )
+        elif bullish >= 3 and avg_sentiment > 0.3:
+            self._last_sentiment_label = "BULLISH"
+            self._last_market_context = (
+                f"Positive sentiment leading ({bullish} bullish headlines). "
+                f"Risk-on momentum building."
+            )
+        elif avg_sentiment > 0.1:
+            self._last_sentiment_label = "MILDLY BULLISH"
+            self._last_market_context = "Slight positive bias in recent news flow."
+        elif avg_sentiment < -0.1:
+            self._last_sentiment_label = "MILDLY BEARISH"
+            self._last_market_context = "Slight negative bias in recent news flow."
+        else:
+            self._last_sentiment_label = "NEUTRAL"
+            self._last_market_context = "Mixed signals. No clear directional bias from headlines."
+        logger.info(
+            f"[SAT] Market Sentiment: {self._last_sentiment_label} | "
+            f"Avg={avg_sentiment:+.2f} | Bullish={bullish} | Bearish={bearish}"
+        )
+
+    def get_global_sentiment_label(self) -> str:
+        """Return a short label like 'BULLISH - Strong Momentum' for the dashboard."""
+        label = self._last_sentiment_label
+        if label == "BULLISH":
+            return "BULLISH - Strong Momentum"
+        elif label == "MILDLY BULLISH":
+            return "BULLISH - Mild Optimism"
+        elif label == "BEARISH":
+            return "BEARISH - Risk-Off"
+        elif label == "MILDLY BEARISH":
+            return "BEARISH - Mild Pessimism"
+        elif label == "CAUTION":
+            return "CAUTION - High Impact News Incoming"
+        else:
+            return "NEUTRAL - Mixed Signals"
+
+    def get_market_context(self) -> str:
+        """Return a sentence explaining WHY the market is behaving this way."""
+        return self._last_market_context
+
 
         # Simulated value for testing (replace with real data)
         import random

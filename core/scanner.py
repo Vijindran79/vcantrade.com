@@ -42,7 +42,7 @@ from core.code_architect import CodeArchitect
 from core.settings import settings_manager
 from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
 from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
-from core.market_sessions import MarketSessionDetector
+from core.market_sessions import MarketSessionDetector, is_crypto_ticker, is_weekend_closed
 from core.liquidity_engine import LiquidityEngine
 from core.symbol_mapper import translate_chart_symbol
 
@@ -102,6 +102,11 @@ class CloudScanner:
 
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
+
+        # Dynamic Eye Sync — tracks what the Browser Agent is currently viewing
+        self.eye_symbol: Optional[str] = None
+        self.eye_symbol_at: Optional[datetime] = None
+        self.eye_ttl_seconds = 300  # Eye symbol expires after 5 min if not refreshed
 
         # Initialize MT5 connection only when in MT5 mode
         self._mt5_initialized = False
@@ -167,11 +172,62 @@ class CloudScanner:
         """Keep session awareness aligned with the operator's live dashboard state."""
         self.session_detector.set_runtime_context(mode, dashboard_tickers)
 
+    def set_eye_symbol(self, symbol: str) -> None:
+        """Tell the scanner what the Browser Agent is currently looking at."""
+        if symbol and str(symbol).strip():
+            self.eye_symbol = str(symbol).strip().upper()
+            self.eye_symbol_at = datetime.utcnow()
+            logger.info("[EYE] Scanner synced to active chart: %s", self.eye_symbol)
+
     def _get_active_scan_list(self) -> List[str]:
         """Return sniper-priority list when configured; otherwise session-filtered tickers."""
         if self.priority_scan_list:
-            return list(self.priority_scan_list)
-        return [ticker for ticker in self.tickers if str(ticker).strip()]
+            candidates = list(self.priority_scan_list)
+        else:
+            candidates = [ticker for ticker in self.tickers if str(ticker).strip()]
+
+        # Dynamic Eye Sync: if Browser Agent is showing a symbol, prioritize it
+        eye = None
+        if self.eye_symbol and self.eye_symbol_at:
+            age = (datetime.utcnow() - self.eye_symbol_at).total_seconds()
+            if age <= self.eye_ttl_seconds:
+                eye = self.eye_symbol
+            else:
+                logger.debug("[EYE] Eye symbol %s expired (%.0fs old)", self.eye_symbol, age)
+                self.eye_symbol = None
+
+        # Weekend Silence: disable all Futures / Commodities / Stocks / Forex on Sat/Sun
+        # Automatic Switchboard Flip: Sunday 23:00 UTC resumes normal scanning
+        is_weekend = self.session_detector.is_weekend_mode()
+        if is_weekend:
+            filtered = [t for t in candidates if not is_weekend_closed(t)]
+            skipped = [t for t in candidates if is_weekend_closed(t)]
+            if skipped:
+                logger.info(
+                    "[CLOCK] [WEEKEND SKIP] Skipping %d closed-market symbols: %s",
+                    len(skipped),
+                    ", ".join(skipped[:8]),
+                )
+            candidates = filtered
+
+        # If eye symbol is not already in the list, prepend it for immediate scan
+        if eye and eye not in {t.upper() for t in candidates}:
+            # Map eye symbol to a yfinance-compatible ticker if possible
+            eye_ticker = eye
+            if hasattr(config, "SYMBOL_MAP") and eye in config.SYMBOL_MAP:
+                eye_ticker = config.SYMBOL_MAP[eye]
+            elif eye in {"BTC", "BTCUSD", "XBT"}:
+                eye_ticker = "BTC-USD"
+            elif eye in {"ETH", "ETHUSD"}:
+                eye_ticker = "ETH-USD"
+            elif eye in {"SOL", "SOLUSD"}:
+                eye_ticker = "SOL-USD"
+            elif eye in {"XRP", "XRPUSD"}:
+                eye_ticker = "XRP-USD"
+            candidates = [eye_ticker] + candidates
+            logger.info("[EYE] Prioritizing active chart symbol: %s", eye_ticker)
+
+        return candidates
 
     def _emit_status(self, ticker: str, status: str):
         """Emit optional per-ticker status updates for dashboard/mirror feedback."""
@@ -682,6 +738,17 @@ class CloudScanner:
 
         mt5_tf = self._mt5_timeframe(interval)
 
+        # Crypto fast path: MT5 does not carry crypto — use Yahoo Finance directly
+        if is_crypto_ticker(ticker):
+            yf_df = await self._fetch_crypto_yfinance(ticker, market_ticker, period, interval, cache_key)
+            if yf_df is not None and not yf_df.empty:
+                return yf_df
+            fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+            if fallback is not None:
+                return fallback
+            logger.warning("[WARN] Crypto data unavailable for %s - Skipping Cycle", ticker)
+            return None
+
         # Fast path: MT5 unavailable (UI mode or not installed) — skip directly to fallback
         if mt5_tf is None:
             fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
@@ -690,10 +757,19 @@ class CloudScanner:
             logger.warning("[WARN] MT5 unavailable - Skipping Cycle for %s", ticker)
             return None
 
+        # Futures/Forex on weekends: markets are closed, skip MT5 noise entirely
+        if self.session_detector.is_weekend() and is_weekend_closed(ticker):
+            fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+            if fallback is not None:
+                return fallback
+            logger.info("[CLOCK] [WEEKEND SKIP] %s market closed - Skipping Cycle", ticker)
+            return None
+
         for attempt in range(max_retries):
             try:
                 if not self._ensure_mt5():
-                    if attempt < max_retries - 1:
+                    # MT5 terminal not running — retry once then abort
+                    if attempt < 1:
                         await asyncio.sleep(retry_delay)
                         continue
                     fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
@@ -705,13 +781,8 @@ class CloudScanner:
                 _mt5 = _lazy_mt5()
                 # Select symbol in MarketWatch
                 if not _mt5.symbol_select(market_ticker, True):
-                    if attempt < max_retries - 1:
-                        logger.warning(
-                            "Symbol %s not in MarketWatch (attempt %d/%d) - retrying...",
-                            market_ticker, attempt + 1, max_retries
-                        )
-                        await asyncio.sleep(retry_delay)
-                        continue
+                    # Symbol missing from MarketWatch — do not retry, it won't appear in 4s
+                    logger.warning("[WARN] Symbol %s not in MarketWatch - Skipping Cycle", market_ticker)
                     fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                     if fallback is not None:
                         return fallback
@@ -840,6 +911,113 @@ class CloudScanner:
             return df
 
         return None
+
+    async def _fetch_crypto_yfinance(
+        self,
+        ticker: str,
+        market_ticker: str,
+        period: str,
+        interval: str,
+        cache_key: Tuple[str, str, str],
+    ) -> Optional[pd.DataFrame]:
+        """Fetch crypto OHLCV from Yahoo Finance (yfinance) asynchronously."""
+        try:
+            import yfinance as yf
+        except ImportError:
+            logger.debug("yfinance not installed — skipping Yahoo Finance crypto fetch for %s", ticker)
+            return None
+
+        try:
+            # Map period/interval to yfinance params
+            yf_period = period or "1d"
+            yf_interval = interval or "1m"
+            if yf_interval.endswith("m"):
+                mins = int(yf_interval[:-1])
+                # yfinance supports 1m, 2m, 5m, 15m, 30m, 60m, 90m
+                if mins not in {1, 2, 5, 15, 30, 60, 90}:
+                    yf_interval = "5m"
+            elif yf_interval.endswith("h"):
+                hrs = int(yf_interval[:-1])
+                yf_interval = f"{hrs}h"
+
+            symbol = market_ticker if market_ticker else ticker
+            # Ensure crypto uses Yahoo format (BTC-USD)
+            if "-" not in symbol and any(symbol.upper().endswith(s) for s in ("USD", "USDT")):
+                pass  # already in some format
+            elif symbol.upper() in {"BTC", "BTCUSD", "XBT"}:
+                symbol = "BTC-USD"
+            elif symbol.upper() in {"ETH", "ETHUSD"}:
+                symbol = "ETH-USD"
+            elif symbol.upper() in {"SOL", "SOLUSD"}:
+                symbol = "SOL-USD"
+            elif symbol.upper() in {"XRP", "XRPUSD"}:
+                symbol = "XRP-USD"
+
+            logger.info("[CRYPTO] Fetching %s from Yahoo Finance (%s/%s)", symbol, yf_period, yf_interval)
+
+            # Run blocking yfinance call in thread pool
+            import concurrent.futures
+
+            def _download():
+                return yf.download(
+                    symbol,
+                    period=yf_period,
+                    interval=yf_interval,
+                    progress=False,
+                    threads=False,
+                )
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(_download)
+                raw_df = future.result(timeout=20)
+
+            if raw_df is None or raw_df.empty:
+                logger.warning("[CRYPTO] Yahoo Finance returned empty data for %s", symbol)
+                return None
+
+            # yfinance returns MultiIndex columns like ('Close', 'BTC-USD'); flatten them
+            if isinstance(raw_df.columns, pd.MultiIndex):
+                raw_df.columns = raw_df.columns.get_level_values(0)
+
+            # Normalize column names
+            rename_map = {}
+            for col in raw_df.columns:
+                col_str = str(col).strip()
+                lower = col_str.lower()
+                if lower in {"open", "opens"}:
+                    rename_map[col_str] = "Open"
+                elif lower in {"high", "highs"}:
+                    rename_map[col_str] = "High"
+                elif lower in {"low", "lows"}:
+                    rename_map[col_str] = "Low"
+                elif lower in {"close", "closes", "adj close", "adj_close"}:
+                    rename_map[col_str] = "Close"
+                elif lower in {"volume", "volumes"}:
+                    rename_map[col_str] = "Volume"
+            if rename_map:
+                raw_df = raw_df.rename(columns=rename_map)
+
+            # Ensure required columns exist
+            for required in ("Open", "High", "Low", "Close", "Volume"):
+                if required not in raw_df.columns:
+                    logger.warning("[CRYPTO] Missing %s column in Yahoo data for %s", required, symbol)
+                    return None
+
+            # Drop NaN rows and ensure index is DatetimeIndex
+            raw_df = raw_df.dropna(subset=["Open", "High", "Low", "Close"])
+            if raw_df.empty:
+                logger.warning("[CRYPTO] All rows NaN after drop for %s", symbol)
+                return None
+
+            self.market_data_cache[cache_key] = raw_df.copy()
+            last_close = float(raw_df["Close"].dropna().iloc[-1])
+            self.last_close_cache[market_ticker] = last_close
+            logger.info("[CRYPTO] Yahoo Finance returned %d bars for %s | last=%.2f", len(raw_df), symbol, last_close)
+            return raw_df
+
+        except Exception as exc:
+            logger.warning("[CRYPTO] Yahoo Finance fetch failed for %s: %s", ticker, exc)
+            return None
 
     async def _evaluate_timeframe_alignment(
         self, ticker: str, action: str, signal_type: str = "", strength: float = 0.0
@@ -1217,6 +1395,16 @@ class CloudScanner:
         FAST MODE: Single agent call with 15s timeout for local execution.
         """
         if not signals:
+            return None
+
+        # Sunday Gap Guard: block execution during the first 15 minutes after
+        # futures markets open on Sunday (22:00-22:15 UTC) to avoid gap volatility.
+        if self.session_detector.is_sunday_gap_window():
+            logger.warning(
+                "[SUNDAY-GAP] Execution PAUSED: Sunday gap window active "
+                "(22:00-22:15 UTC). Waiting for spreads to stabilize."
+            )
+            self._emit_status("GLOBAL", "sunday_gap_guard")
             return None
 
         for signal in signals:

@@ -105,10 +105,22 @@ def run() -> int:
     profile = choose_launch_profile()
     config.SHOW_STARTUP_SWITCHBOARD = False
 
+    # Resolve execution mode from profile or config (support both EXECUTION_MODE and EXECUTOR_TYPE)
+    exec_mode = str(
+        getattr(profile, "execution_mode", "")
+        or getattr(config, "EXECUTION_MODE", "")
+        or getattr(config, "EXECUTOR_TYPE", "")
+        or "UI"
+    ).upper().strip()
+
     checks = [_check_cloud_brain()]
-    if profile.execution_mode == "UI":
+    if exec_mode == "UI":
         checks.append(_check_browser_cdp())
-    if profile.execution_mode == "MT5":
+    elif exec_mode == "MT5":
+        checks.append(_check_mt5())
+    else:
+        # Unknown mode — check both so the operator sees what is missing
+        checks.append(_check_browser_cdp())
         checks.append(_check_mt5())
 
     if not _print_preflight(checks):

@@ -1,9 +1,10 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "MNQ1!",
-    "MES1!",
-    "MCL1!"
+    "BTCUSD",
+    "ETHUSD",
+    "XRPUSD",
+    "SOLUSD"
   ],
   "investment_amount": 1000.0,
   "lot_size": 2.0,

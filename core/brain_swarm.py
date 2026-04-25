@@ -31,6 +31,51 @@ from core.devils_advocate import DevilsAdvocate
 
 logger = logging.getLogger(__name__)
 
+# Cache for available Ollama models to avoid repeated /api/tags calls
+_OLLAMA_MODEL_CACHE: Dict[str, bool] = {}
+
+
+def _validate_vision_model(model_name: str) -> Tuple[bool, str]:
+    """
+    Check whether the requested vision model exists in the local Ollama registry.
+    Returns (is_valid, error_message).
+    """
+    if not model_name:
+        return False, "VISION_MODEL is empty"
+
+    # Use cached result if we already checked this model
+    cached = _OLLAMA_MODEL_CACHE.get(model_name)
+    if cached is not None:
+        if cached:
+            return True, ""
+        return False, f"Model '{model_name}' not found in Ollama. Run: ollama pull {model_name}"
+
+    tags_url = build_ollama_url(config.OLLAMA_BASE_URL, "api/tags")
+    try:
+        response = requests.get(tags_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        models = {m.get("name", m.get("model", "")) for m in data.get("models", [])}
+        # Ollama sometimes reports models as 'llava:7b' and sometimes just 'llava'
+        model_stripped = model_name.split(":")[0]
+        available = any(
+            model_name == avail or model_stripped == avail or avail.startswith(model_name + "-")
+            for avail in models
+        )
+        _OLLAMA_MODEL_CACHE[model_name] = available
+        if available:
+            return True, ""
+        return False, (
+            f"Model '{model_name}' not found in Ollama. "
+            f"Available: {', '.join(sorted(models)[:8])}. "
+            f"Run: ollama pull {model_name}"
+        )
+    except Exception as exc:
+        logger.warning("[VISION] Could not query Ollama model list (%s): %s", tags_url, exc)
+        # If we can't check, allow the request to proceed (fail later with clearer error)
+        return True, ""
+
+
 PREDATOR_SYSTEM_INSTRUCTION = (
     "System instruction: You are an elite trader in April 2026. "
     "If the 1m and 5m charts are Bullish, you MUST signal BUY. "
@@ -107,6 +152,12 @@ def analyze_chart_with_vision(
     if getattr(config, "OLLAMA_API_KEY", ""):
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
 
+    chosen_model = model or config.MULTI_ASSET_VISION_MODEL
+    is_valid, model_err = _validate_vision_model(chosen_model)
+    if not is_valid:
+        logger.error("[VISION] %s", model_err)
+        return {"signal": "NONE", "reason": model_err, "raw": ""}
+
     prompt = (
         f"You are a professional futures trader analyzing a 5-minute {symbol} chart. "
         "Your job is to find HIGH-PROBABILITY trade setups ONLY. Be strict. Most of the time the answer is NONE.\n\n"
@@ -123,12 +174,15 @@ def analyze_chart_with_vision(
         "- If ANY of the 4 criteria above is weak or missing, answer NONE.\n"
         "- Do NOT trade chop, range-bound markets, or low-volume periods.\n"
         "- Do NOT guess. If uncertain, answer NONE.\n\n"
+        "Also rate your conviction:\n"
+        "CONFIDENCE: [0-100] where 100 = absolute certainty, 0 = pure guess\n"
+        "THREAT: [LOW/MEDIUM/HIGH] where HIGH = dangerous chop, LOW = clean setup\n\n"
         "Output EXACTLY in this format (no extra text):\n"
-        "SIGNAL: [BUY/SELL/NONE] | REASON: [One sentence: trend direction + pattern + R:R ratio]"
+        "SIGNAL: [BUY/SELL/NONE] | CONFIDENCE: [0-100] | THREAT: [LOW/MEDIUM/HIGH] | REASON: [One sentence: trend direction + pattern + R:R ratio]"
     )
 
     payload = {
-        "model": model or config.MULTI_ASSET_VISION_MODEL,
+        "model": chosen_model,
         "messages": [
             {
                 "role": "user",
@@ -145,6 +199,24 @@ def analyze_chart_with_vision(
         "temperature": 0.1,
         "max_tokens": 256,
         "top_p": 0.9,
+    }
+
+    # Native fallback payload (uses stripped base64, no data URI prefix)
+    native_payload = {
+        "model": chosen_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [clean_b64],
+            }
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+            "num_predict": 256,
+            "top_p": 0.9,
+        },
     }
 
     def _parse_response(data: dict) -> dict:
@@ -167,22 +239,6 @@ def analyze_chart_with_vision(
 
     def _call_ollama_native() -> dict:
         """Fallback to native /api/chat endpoint."""
-        native_payload = {
-            "model": model or config.MULTI_ASSET_VISION_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                    "images": [clean_b64],
-                }
-            ],
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 256,
-                "top_p": 0.9,
-            },
-        }
         logger.info("[VISION] Falling back to native Ollama endpoint: %s", native_url)
         response = requests.post(native_url, json=native_payload, headers=headers, timeout=request_timeout)
         response.raise_for_status()
@@ -215,14 +271,21 @@ def analyze_chart_with_vision(
 
         logger.info("[VISION] %s analysis received (%s chars)", symbol, len(content))
 
-        # Parse SIGNAL and REASON
+        # Parse SIGNAL, CONFIDENCE, THREAT, and REASON
         signal_match = re.search(r"SIGNAL:\s*(BUY|SELL|NONE)", content, re.IGNORECASE)
         signal = signal_match.group(1).upper() if signal_match else "NONE"
+
+        confidence_match = re.search(r"CONFIDENCE:\s*(\d{1,3})", content, re.IGNORECASE)
+        confidence = int(confidence_match.group(1)) if confidence_match else 50
+        confidence = max(0, min(100, confidence))
+
+        threat_match = re.search(r"THREAT:\s*(LOW|MEDIUM|HIGH)", content, re.IGNORECASE)
+        threat = threat_match.group(1).upper() if threat_match else "MEDIUM"
 
         reason_match = re.search(r"REASON:\s*(.+?)(?:\n|$)", content, re.IGNORECASE)
         reason = reason_match.group(1).strip() if reason_match else content[:240].strip()
 
-        return {"signal": signal, "reason": reason, "raw": content}
+        return {"signal": signal, "confidence": confidence, "threat": threat, "reason": reason, "raw": content}
 
     except requests.exceptions.ConnectionError:
         logger.error(
@@ -256,6 +319,12 @@ def detect_symbol_from_chart(
     if getattr(config, "OLLAMA_API_KEY", ""):
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
 
+    chosen_model = model or config.MULTI_ASSET_VISION_MODEL
+    is_valid, model_err = _validate_vision_model(chosen_model)
+    if not is_valid:
+        logger.error("[VISION] %s", model_err)
+        return ""
+
     prompt = (
         "Read the chart header and identify the trading symbol. "
         "Understand broker names and futures contracts. Examples: MNQ-JUN26, MNQM26, MNQ.micro, "
@@ -268,7 +337,7 @@ def detect_symbol_from_chart(
     native_url = build_ollama_url(config.OLLAMA_BASE_URL, "api/chat")
 
     payload = {
-        "model": model or config.MULTI_ASSET_VISION_MODEL,
+        "model": chosen_model,
         "messages": [
             {
                 "role": "user",
@@ -281,6 +350,13 @@ def detect_symbol_from_chart(
         "stream": False,
         "temperature": 0.0,
         "max_tokens": 128,
+    }
+
+    native_payload = {
+        "model": chosen_model,
+        "messages": [{"role": "user", "content": prompt, "images": [clean_b64]}],
+        "stream": False,
+        "options": {"temperature": 0.0, "num_predict": 128},
     }
 
     def _parse_content(data: dict) -> str:
@@ -298,12 +374,6 @@ def detect_symbol_from_chart(
         except requests.exceptions.HTTPError as http_err:
             if http_err.response is None or http_err.response.status_code != 404:
                 raise
-            native_payload = {
-                "model": model or config.MULTI_ASSET_VISION_MODEL,
-                "messages": [{"role": "user", "content": prompt, "images": [clean_b64]}],
-                "stream": False,
-                "options": {"temperature": 0.0, "num_predict": 128},
-            }
             response = requests.post(native_url, json=native_payload, headers=headers, timeout=request_timeout)
             response.raise_for_status()
             raw = _parse_content(response.json())

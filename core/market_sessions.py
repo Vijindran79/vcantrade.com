@@ -81,22 +81,70 @@ HK_HOLIDAYS = holidays.HK(years=datetime.now(timezone.utc).year)
 TICKER_BY_MARKET = {
     # Crypto (24/7)
     "CRYPTO": ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD", "ADA-USD"],
-    
+
     # Forex (24/5 - Mon-Fri)
     "FOREX": ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCAD=X"],
-    
+
     # Asian Markets (HK/Tokyo stocks)
     "ASIAN": ["700.HK", "9988.HK", "TCEHY", "NTDOY", "SNE"],
-    
+
     # European (London/Frankfurt)
     "EUROPEAN": ["^FTSE", "^GDAXI", "BP.L", "SIE.DE"],
-    
+
     # US Stocks/Indices
     "US": ["TSLA", "AAPL", "NVDA", "SPY", "QQQ", "MSFT", "AMZN", "GOOGL", "META", "^GSPC", "^DJI"],
-    
+
     # Commodities (mostly trade during US/London overlap)
     "COMMODITIES": ["GC=F", "CL=F", "SI=F", "HG=F"],
 }
+
+# Fast-lookup set for weekend filtering
+_CRYPTO_SYMBOLS: set[str] = set()
+for _sym in TICKER_BY_MARKET["CRYPTO"]:
+    _CRYPTO_SYMBOLS.add(_sym.upper())
+    _CRYPTO_SYMBOLS.add(_sym.upper().replace("-", ""))
+
+_CME_FUTURES_HINTS = ("MNQ", "MES", "MCL", "ES", "NQ", "GC", "CL", "SI", "HG", "YM")
+
+
+def is_crypto_ticker(ticker: str) -> bool:
+    """Return True if the ticker is a known crypto pair."""
+    if not ticker:
+        return False
+    upper = str(ticker).strip().upper()
+    # Direct match or dash-stripped match
+    if upper in _CRYPTO_SYMBOLS or upper.replace("-", "") in _CRYPTO_SYMBOLS:
+        return True
+    # Common crypto suffix/prefix patterns
+    if any(upper.endswith(s) for s in ("USD", "USDT", "BTC", "ETH")):
+        if any(upper.startswith(p) for p in ("BTC", "ETH", "SOL", "XRP", "ADA", "BNB")):
+            return True
+    return False
+
+
+def is_futures_ticker(ticker: str) -> bool:
+    """Return True if the ticker looks like a CME/NYMEX futures symbol."""
+    if not ticker:
+        return False
+    upper = str(ticker).strip().upper()
+    # TradingView prefixes
+    if any(upper.startswith(p + ":") for p in ("CME_MINI", "NYMEX", "CME", "COMEX", "CBOT")):
+        return True
+    # Yahoo futures suffix
+    if upper.endswith("=F"):
+        return True
+    # Contract month codes (e.g., MNQM6, MESM6, MCLM6)
+    if any(upper.startswith(h) for h in _CME_FUTURES_HINTS):
+        return True
+    return False
+
+
+def is_weekend_closed(ticker: str) -> bool:
+    """
+    Return True if the ticker should NOT be scanned on Saturday/Sunday.
+    Crypto trades 24/7; everything else is closed on weekends.
+    """
+    return not is_crypto_ticker(ticker)
 
 
 # ===================================================================
@@ -223,6 +271,47 @@ class MarketSessionDetector:
     def is_weekday(self) -> bool:
         """Check if current day is Monday-Friday."""
         return self.get_current_datetime().weekday() < 5
+
+    def is_sunday_gap_window(self) -> bool:
+        """
+        Sunday Gap Guard: Returns True during the first 15 minutes after
+        futures markets open on Sunday (22:00-22:15 UTC).
+        This prevents trading on unstable spreads and high-volatility gaps.
+        """
+        now = self.get_current_datetime()
+        if now.weekday() != 6:  # Not Sunday
+            return False
+        # Sunday 22:00 to 22:15 UTC = gap window
+        return 22 <= now.hour < 23 and now.minute < 15
+
+    def is_weekend_mode(self) -> bool:
+        """
+        Weekend override check with Automatic Switchboard Flip.
+        Returns True if:
+          - Saturday (any time)
+          - Sunday before 23:00 UTC
+        Returns False if:
+          - Sunday 23:00 UTC or later (futures resume)
+          - Monday-Friday
+        """
+        now = self.get_current_datetime()
+        weekday = now.weekday()
+        if weekday == 5:  # Saturday = always weekend
+            return True
+        if weekday == 6:  # Sunday
+            # Before 23:00 UTC = weekend mode
+            # At/after 23:00 UTC = normal mode resumes
+            return now.hour < 23
+        return False
+
+    def is_sunday_transition_complete(self) -> bool:
+        """
+        Returns True if we are on Sunday at or after 23:00 UTC,
+        meaning the automatic switchboard flip has occurred and
+        normal MULTI_ASSET_TICKERS should resume.
+        """
+        now = self.get_current_datetime()
+        return now.weekday() == 6 and now.hour >= 23
 
     def detect_active_sessions(self) -> Tuple[List[str], MarketSession]:
         """

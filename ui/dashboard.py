@@ -1246,6 +1246,15 @@ class CommandCenter(QWidget):
         instruction.setWordWrap(True)
         layout.addWidget(instruction)
 
+        # Market Sentiment Banner (Global Context)
+        self.market_sentiment_banner = QLabel("[SAT] Market Sentiment: Scanning headlines...")
+        self.market_sentiment_banner.setStyleSheet(f"""
+            QLabel {{ color: {CYAN}; font-size: 11px; font-weight: bold; font-family: 'Consolas';
+                     background: {BG_INPUT}; border: 1px solid {CYAN}; border-radius: 6px; padding: 6px; }}
+        """)
+        self.market_sentiment_banner.setWordWrap(True)
+        layout.addWidget(self.market_sentiment_banner)
+
         # Chat display (AI responses + user messages)
         self.copilot_chat = QTextEdit()
         self.copilot_chat.setReadOnly(True)
@@ -1746,6 +1755,31 @@ class CommandCenter(QWidget):
         else:
             self.rpa_status_label.setText("[STOP] PAUSED")
             self.rpa_status_label.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
+
+        # Market Sentiment Banner
+        sentiment_label = data.get("sentiment_label", "NEUTRAL - Mixed Signals")
+        market_context = data.get("market_context", "")
+        headline_count = data.get("headline_count", 0)
+        if hasattr(self, "market_sentiment_banner"):
+            banner_text = f"[SAT] {sentiment_label}"
+            if market_context:
+                banner_text += f" | {market_context}"
+            if headline_count > 0:
+                banner_text += f" ({headline_count} headlines)"
+            self.market_sentiment_banner.setText(banner_text)
+            # Color based on sentiment
+            if "CAUTION" in sentiment_label:
+                banner_color = RED
+            elif "BEARISH" in sentiment_label:
+                banner_color = ORANGE
+            elif "BULLISH" in sentiment_label:
+                banner_color = GREEN
+            else:
+                banner_color = CYAN
+            self.market_sentiment_banner.setStyleSheet(
+                f"QLabel {{ color: {banner_color}; font-size: 11px; font-weight: bold; font-family: 'Consolas';"
+                f"background: {BG_INPUT}; border: 1px solid {banner_color}; border-radius: 6px; padding: 6px; }}"
+            )
 
         # Walk Away Protocol
         walk_away_active = data.get("walk_away_can_trade", True)

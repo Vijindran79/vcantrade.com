@@ -698,11 +698,49 @@ class MultiAssetHunterThread(QThread):
         self.index = 0
 
     def run(self):
-        logger.info("[HUNTER] Multi-Asset Hunter started. Symbols: %s", self.symbols)
+        from core.market_sessions import is_weekend_closed
+        from datetime import timezone
+
+        # Use UTC-aware time checks for market transitions
+        now_utc = datetime.now(timezone.utc)
+        weekday = now_utc.weekday()
+        hour_utc = now_utc.hour
+
+        # Automatic Switchboard Flip:
+        # Saturday = weekend mode (crypto only)
+        # Sunday before 23:00 UTC = weekend mode
+        # Sunday 23:00 UTC+ = normal mode resumes
+        is_weekend = (weekday == 5) or (weekday == 6 and hour_utc < 23)
+
+        # Weekend: pull from the live watchlist (crypto) instead of MULTI_ASSET_TICKERS
+        if is_weekend:
+            watchlist = getattr(self.app, "current_watchlist", [])
+            if watchlist:
+                active_symbols = [s for s in watchlist if not is_weekend_closed(s)]
+                logger.info("[HUNTER] Weekend mode: Hunter using session watchlist: %s", active_symbols)
+            else:
+                active_symbols = []
+            # Reset Monday re-sync flag so it triggers again next week
+            if getattr(self.app, "_monday_resync_done", False):
+                self.app._monday_resync_done = False
+                logger.info("[RESYNC] Monday re-sync flag reset for next week")
+        else:
+            active_symbols = list(self.symbols)
+
+        if not active_symbols:
+            logger.info("[HUNTER] No active symbols to hunt. Hunter paused.")
+            return
+
+        # Monday State Re-Sync (Anti-Ghosting):
+        # On first weekday scan after weekend, clear stale signals and re-sync account.
+        if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
+            self._perform_monday_resync()
+
+        logger.info("[HUNTER] Multi-Asset Hunter started. Symbols: %s", active_symbols)
         while self.running:
-            symbol = self.symbols[self.index]
+            symbol = active_symbols[self.index % len(active_symbols)]
             self._cycle_symbol(symbol)
-            self.index = (self.index + 1) % len(self.symbols)
+            self.index = (self.index + 1) % len(active_symbols)
             # Sleep in 1-second chunks for responsive stop
             for _ in range(self.interval_sec):
                 if not self.running:
@@ -712,6 +750,16 @@ class MultiAssetHunterThread(QThread):
 
     def _cycle_symbol(self, symbol: str):
         try:
+            # Silent skip for weekend-closed symbols so Activity Feed stays clean
+            from core.market_sessions import is_weekend_closed
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc)
+            # Saturday = weekend, Sunday before 23:00 UTC = weekend
+            is_weekend_now = (now_utc.weekday() == 5) or (now_utc.weekday() == 6 and now_utc.hour < 23)
+            if is_weekend_now and is_weekend_closed(symbol):
+                logger.debug("[HUNTER] Skipping weekend-closed symbol: %s", symbol)
+                return
+
             self.status_update.emit(symbol, "NAVIGATING", f"Switching to {symbol}...")
 
             # 1. Navigate browser to symbol
@@ -728,6 +776,13 @@ class MultiAssetHunterThread(QThread):
             if not nav_ok:
                 self.status_update.emit(symbol, "ERROR", "Navigation failed")
                 return
+
+            # Sync scanner to the symbol now visible in the browser
+            if hasattr(self.app, "cloud_scanner") and self.app.cloud_scanner:
+                try:
+                    self.app.cloud_scanner.scanner.set_eye_symbol(symbol)
+                except Exception:
+                    pass
 
             self.status_update.emit(symbol, "SCREENSHOT", "Capturing chart...")
 
@@ -747,20 +802,155 @@ class MultiAssetHunterThread(QThread):
             from core.brain_swarm import analyze_chart_with_vision
             result = analyze_chart_with_vision(screenshot_b64, symbol)
             signal = result.get("signal", "NONE")
+            confidence = result.get("confidence", 50)
+            threat = result.get("threat", "MEDIUM")
             reason = result.get("reason", "No reason")
 
             self.status_update.emit(symbol, f"SIGNAL_{signal}", reason)
 
-            # 4. Execute if BUY/SELL
+            # 4. INTELLIGENCE LAYER: Rich analysis narrative to Activity Feed
+            self._emit_hunter_intelligence(symbol, signal, confidence, threat, reason)
+
+            # 5. Sunday Gap Guard: block execution during gap window
+            if self._is_sunday_gap_window():
+                logger.warning(
+                    "[SUNDAY-GAP] %s %s signal BLOCKED: Sunday gap window active "
+                    "(22:00-22:15 UTC). Waiting for spreads to stabilize.",
+                    symbol, signal
+                )
+                self.status_update.emit(symbol, "SUNDAY_GAP_BLOCKED", "Gap guard active - no execution")
+                if hasattr(self.app, "ai_narrator") and self.app.ai_narrator:
+                    self.app.ai_narrator.add_activity(
+                        "[STOP]",
+                        f"SUNDAY GAP GUARD: {symbol} {signal} blocked (22:00-22:15 UTC)"
+                    )
+                return
+
+            # 6. Execute if BUY/SELL AND confidence meets threshold
             if signal in ("BUY", "SELL"):
-                logger.critical("[HUNTER] %s SIGNAL: %s | %s", symbol, signal, reason)
-                self.trade_signal.emit(symbol, signal, reason)
+                if confidence >= config.MIN_CONFIDENCE_THRESHOLD:
+                    logger.critical(
+                        "[HUNTER] %s SIGNAL: %s | Confidence: %d%% | Threat: %s | %s",
+                        symbol, signal, confidence, threat, reason
+                    )
+                    self.trade_signal.emit(symbol, signal, reason)
+                else:
+                    logger.info(
+                        "[HUNTER] %s %s signal REJECTED | Confidence %d%% < threshold %d%% | %s",
+                        symbol, signal, confidence, config.MIN_CONFIDENCE_THRESHOLD, reason
+                    )
+                    self.status_update.emit(
+                        symbol, "SKIPPED_LOW_CONFIDENCE",
+                        f"Confidence {confidence}% below {config.MIN_CONFIDENCE_THRESHOLD}%"
+                    )
             else:
                 logger.info("[HUNTER] %s no trade setup | %s", symbol, reason)
 
         except Exception as e:
             logger.error("[HUNTER] Cycle error for %s: %s", symbol, e)
             self.status_update.emit(symbol, "ERROR", str(e)[:100])
+
+    def _emit_hunter_intelligence(self, symbol: str, signal: str, confidence: int, threat: str, reason: str):
+        """
+        Emit rich trade intelligence to the Activity Feed so the operator
+        understands WHY the bot is making this decision.
+        """
+        app = self.app
+        if not hasattr(app, "ai_narrator") or not app.ai_narrator:
+            return
+
+        narrator = app.ai_narrator
+
+        # Step 1: Brain analysis start
+        narrator.add_activity("[BRAIN]", f"Analyzing {symbol} chart...")
+
+        # Step 2: Threat / Opportunity assessment
+        if threat == "HIGH":
+            threat_icon = "[STOP]"
+            threat_msg = f"Threat Level: HIGH | Chop/uncertain conditions detected"
+        elif threat == "MEDIUM":
+            threat_icon = "[YELLOW]"
+            threat_msg = f"Threat Level: MEDIUM | Caution advised"
+        else:
+            threat_icon = "[GREEN]"
+            threat_msg = f"Threat Level: LOW | Clean setup"
+        narrator.add_activity(threat_icon, threat_msg)
+
+        # Step 3: Confidence / Conviction score
+        if confidence >= 85:
+            conv_icon = "[TARGET]"
+            conv_msg = f"Conviction: {confidence}% | HIGH CONFIDENCE setup"
+        elif confidence >= 70:
+            conv_icon = "[COMPASS]"
+            conv_msg = f"Conviction: {confidence}% | Moderate confidence"
+        elif confidence >= 50:
+            conv_icon = "[YELLOW]"
+            conv_msg = f"Conviction: {confidence}% | Weak edge"
+        else:
+            conv_icon = "[RED]"
+            conv_msg = f"Conviction: {confidence}% | Low probability"
+        narrator.add_activity(conv_icon, conv_msg)
+
+        # Step 4: Setup reason
+        narrator.add_activity("[CHART]", f"Setup: {reason}")
+
+        # Step 5: Verdict
+        if signal in ("BUY", "SELL"):
+            if confidence >= config.MIN_CONFIDENCE_THRESHOLD:
+                verdict_icon = "[BOLT]" if confidence >= 80 else "[OK]"
+                verdict_msg = f"VERDICT: {signal} {symbol} | Passing to execution gate"
+            else:
+                verdict_icon = "[PAUSE]"
+                verdict_msg = f"VERDICT: {signal} {symbol} | BLOCKED by confidence gate (< {config.MIN_CONFIDENCE_THRESHOLD}%)"
+            narrator.add_activity(verdict_icon, verdict_msg)
+        else:
+            narrator.add_activity("[PAUSE]", f"VERDICT: NO TRADE | {reason[:60]}")
+
+    def _perform_monday_resync(self):
+        """
+        Monday State Re-Sync (Anti-Ghosting).
+        Called once on the first weekday scan after a weekend.
+        Clears stale weekend signals and pulls a fresh account summary.
+        """
+        logger.info("[RESYNC] Monday state re-sync initiated. Clearing weekend ghosts...")
+        app = self.app
+        if hasattr(app, "ai_narrator") and app.ai_narrator:
+            app.ai_narrator.add_activity("[BROOM]", "Monday Re-Sync: Clearing weekend stale state...")
+
+        # 1. Clear any pending/weekend signals from the scanner
+        if hasattr(app, "cloud_scanner") and app.cloud_scanner:
+            try:
+                scanner = app.cloud_scanner.scanner
+                # Reset eye symbol and any cached weekend state
+                scanner.eye_symbol = None
+                scanner.eye_symbol_at = None
+                scanner.priority_scan_list = []
+                logger.info("[RESYNC] Scanner eye symbol and priority list cleared")
+            except Exception as e:
+                logger.warning("[RESYNC] Scanner clear failed: %s", e)
+
+        # 2. Pull fresh account summary from UI/MT5 if available
+        try:
+            if hasattr(app, "_sync_live_balance"):
+                app._sync_live_balance()
+                logger.info("[RESYNC] Live balance re-synced")
+            if hasattr(app, "_update_institutional_governor_ui"):
+                app._update_institutional_governor_ui()
+                logger.info("[RESYNC] Governor UI refreshed")
+        except Exception as e:
+            logger.warning("[RESYNC] Account re-sync failed: %s", e)
+
+        # 3. Mark re-sync as complete for this week
+        app._monday_resync_done = True
+        logger.info("[RESYNC] Monday state re-sync COMPLETE. Clean slate for the new week.")
+        if hasattr(app, "ai_narrator") and app.ai_narrator:
+            app.ai_narrator.add_activity("[OK]", "Monday Re-Sync COMPLETE. Fresh week, fresh slate.")
+
+    def _is_sunday_gap_window(self) -> bool:
+        """Return True if we are in the Sunday gap guard window (22:00-22:15 UTC)."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        return now.weekday() == 6 and now.hour == 22 and now.minute < 15
 
     def stop(self):
         self.running = False
@@ -3130,6 +3320,15 @@ class VcaniTradeApp:
 
     def _update_institutional_governor_ui(self):
         """STAGE 3: Update Institutional Governor panel in dashboard."""
+        # Trigger live news scan if due
+        if self.sentiment_pulse.should_check():
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(self.sentiment_pulse.check_news())
+            except Exception as e:
+                logger.warning("[SAT] Sentiment news check failed: %s", e)
+        
         # Collect risk governor data
         risk_summary = self.risk_governor.get_portfolio_summary()
         
@@ -3138,6 +3337,15 @@ class VcaniTradeApp:
         
         # Collect profit lock data
         profit_lock_summary = self.profit_lock.get_dashboard_summary()
+        
+        # Detect sentiment changes for Activity Feed
+        sentiment_label = sentiment_summary.get("sentiment_label", "NEUTRAL - Mixed Signals")
+        market_context = sentiment_summary.get("market_context", "")
+        if hasattr(self, "_last_sentiment_label"):
+            if self._last_sentiment_label != sentiment_label and market_context:
+                self.cmd.log(f"[SAT] Market Context: {sentiment_label}")
+                self.ai_narrator.add_activity("[SAT]", f"{sentiment_label} | {market_context}")
+        self._last_sentiment_label = sentiment_label
         
         # Merge data for dashboard
         governor_data = {
@@ -3150,6 +3358,9 @@ class VcaniTradeApp:
             "next_event": sentiment_summary["next_event"],
             "time_to_event": sentiment_summary["time_to_event"],
             "rpa_enabled": (sentiment_summary["rpa_status"] == "ACTIVE") and self.rpa_execution_enabled,
+            "sentiment_label": sentiment_label,
+            "market_context": market_context,
+            "headline_count": sentiment_summary.get("headline_count", 0),
             
             # Profit Lock
             "stops_locked": profit_lock_summary["stops_locked"],
