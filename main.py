@@ -688,6 +688,7 @@ class MultiAssetHunterThread(QThread):
 
     status_update = pyqtSignal(str, str, str)  # symbol, status, message
     trade_signal = pyqtSignal(str, str, str)    # symbol, action, reason
+    narrator_update = pyqtSignal(str, str)      # icon, message (thread-safe Activity Feed)
 
     def __init__(self, app, symbols=None, interval_sec=None):
         super().__init__()
@@ -819,11 +820,10 @@ class MultiAssetHunterThread(QThread):
                     symbol, signal
                 )
                 self.status_update.emit(symbol, "SUNDAY_GAP_BLOCKED", "Gap guard active - no execution")
-                if hasattr(self.app, "ai_narrator") and self.app.ai_narrator:
-                    self.app.ai_narrator.add_activity(
-                        "[STOP]",
-                        f"SUNDAY GAP GUARD: {symbol} {signal} blocked (22:00-22:15 UTC)"
-                    )
+                self.narrator_update.emit(
+                    "[STOP]",
+                    f"SUNDAY GAP GUARD: {symbol} {signal} blocked (22:00-22:15 UTC)"
+                )
                 return
 
             # 6. Execute if BUY/SELL AND confidence meets threshold
@@ -854,15 +854,14 @@ class MultiAssetHunterThread(QThread):
         """
         Emit rich trade intelligence to the Activity Feed so the operator
         understands WHY the bot is making this decision.
+        Uses narrator_update signal for thread-safe GUI updates.
         """
         app = self.app
         if not hasattr(app, "ai_narrator") or not app.ai_narrator:
             return
 
-        narrator = app.ai_narrator
-
         # Step 1: Brain analysis start
-        narrator.add_activity("[BRAIN]", f"Analyzing {symbol} chart...")
+        self.narrator_update.emit("[BRAIN]", f"Analyzing {symbol} chart...")
 
         # Step 2: Threat / Opportunity assessment
         if threat == "HIGH":
@@ -874,7 +873,7 @@ class MultiAssetHunterThread(QThread):
         else:
             threat_icon = "[GREEN]"
             threat_msg = f"Threat Level: LOW | Clean setup"
-        narrator.add_activity(threat_icon, threat_msg)
+        self.narrator_update.emit(threat_icon, threat_msg)
 
         # Step 3: Confidence / Conviction score
         if confidence >= 85:
@@ -889,10 +888,10 @@ class MultiAssetHunterThread(QThread):
         else:
             conv_icon = "[RED]"
             conv_msg = f"Conviction: {confidence}% | Low probability"
-        narrator.add_activity(conv_icon, conv_msg)
+        self.narrator_update.emit(conv_icon, conv_msg)
 
         # Step 4: Setup reason
-        narrator.add_activity("[CHART]", f"Setup: {reason}")
+        self.narrator_update.emit("[CHART]", f"Setup: {reason}")
 
         # Step 5: Verdict
         if signal in ("BUY", "SELL"):
@@ -902,9 +901,9 @@ class MultiAssetHunterThread(QThread):
             else:
                 verdict_icon = "[PAUSE]"
                 verdict_msg = f"VERDICT: {signal} {symbol} | BLOCKED by confidence gate (< {config.MIN_CONFIDENCE_THRESHOLD}%)"
-            narrator.add_activity(verdict_icon, verdict_msg)
+            self.narrator_update.emit(verdict_icon, verdict_msg)
         else:
-            narrator.add_activity("[PAUSE]", f"VERDICT: NO TRADE | {reason[:60]}")
+            self.narrator_update.emit("[PAUSE]", f"VERDICT: NO TRADE | {reason[:60]}")
 
     def _perform_monday_resync(self):
         """
@@ -913,9 +912,9 @@ class MultiAssetHunterThread(QThread):
         Clears stale weekend signals and pulls a fresh account summary.
         """
         logger.info("[RESYNC] Monday state re-sync initiated. Clearing weekend ghosts...")
+        self.narrator_update.emit("[BROOM]", "Monday Re-Sync: Clearing weekend stale state...")
+
         app = self.app
-        if hasattr(app, "ai_narrator") and app.ai_narrator:
-            app.ai_narrator.add_activity("[BROOM]", "Monday Re-Sync: Clearing weekend stale state...")
 
         # 1. Clear any pending/weekend signals from the scanner
         if hasattr(app, "cloud_scanner") and app.cloud_scanner:
@@ -941,10 +940,9 @@ class MultiAssetHunterThread(QThread):
             logger.warning("[RESYNC] Account re-sync failed: %s", e)
 
         # 3. Mark re-sync as complete for this week
-        app._monday_resync_done = True
+        self.app._monday_resync_done = True
         logger.info("[RESYNC] Monday state re-sync COMPLETE. Clean slate for the new week.")
-        if hasattr(app, "ai_narrator") and app.ai_narrator:
-            app.ai_narrator.add_activity("[OK]", "Monday Re-Sync COMPLETE. Fresh week, fresh slate.")
+        self.narrator_update.emit("[OK]", "Monday Re-Sync COMPLETE. Fresh week, fresh slate.")
 
     def _is_sunday_gap_window(self) -> bool:
         """Return True if we are in the Sunday gap guard window (22:00-22:15 UTC)."""
@@ -1622,6 +1620,7 @@ class VcaniTradeApp:
         if self.hunter:
             self.hunter.status_update.connect(self._on_hunter_status_update)
             self.hunter.trade_signal.connect(self._on_hunter_trade_signal)
+            self.hunter.narrator_update.connect(self._on_hunter_narrator_update)
 
         # Cloud Scanner -> UI + Narrator
         self.cloud_scanner.signal_detected.connect(self._on_cloud_signal)
@@ -4896,6 +4895,11 @@ class VcaniTradeApp:
         """Update UI when the Multi-Asset Hunter cycles through symbols."""
         self.cmd.log(f"[HUNTER] {symbol} | {status}: {message}")
         self.ai_narrator.add_activity("[HUNTER]", f"{symbol} {status}")
+
+    def _on_hunter_narrator_update(self, icon: str, message: str):
+        """Thread-safe relay: Hunter thread -> main GUI thread -> Activity Feed."""
+        if self.ai_narrator:
+            self.ai_narrator.add_activity(icon, message)
 
     def _dispatch_trade_execution(self, symbol: str, action: str, reason: str = "") -> bool:
         """

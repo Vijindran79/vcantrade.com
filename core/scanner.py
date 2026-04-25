@@ -943,7 +943,12 @@ class CloudScanner:
             symbol = market_ticker if market_ticker else ticker
             # Ensure crypto uses Yahoo format (BTC-USD)
             if "-" not in symbol and any(symbol.upper().endswith(s) for s in ("USD", "USDT")):
-                pass  # already in some format
+                # Convert BTCUSD -> BTC-USD, ETHUSD -> ETH-USD, etc.
+                for suffix in ("USDT", "USD"):
+                    if symbol.upper().endswith(suffix):
+                        base = symbol[:-len(suffix)]
+                        symbol = f"{base}-USD"
+                        break
             elif symbol.upper() in {"BTC", "BTCUSD", "XBT"}:
                 symbol = "BTC-USD"
             elif symbol.upper() in {"ETH", "ETHUSD"}:
