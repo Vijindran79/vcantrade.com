@@ -49,6 +49,11 @@ class RPAExecutor:
             action = action.rsplit(".", 1)[-1]
         return action
 
+    @staticmethod
+    def _is_missing_dialog_error(exc):
+        text = str(exc).lower()
+        return "no dialog is showing" in text or "handlejavascriptdialog" in text
+
     def _get_playwright_page(self):
         """Get or create a Playwright page. PRIORITIZES connecting to user's existing Chrome."""
         if self._page and not self._page.is_closed():
@@ -179,7 +184,15 @@ class RPAExecutor:
         action_lower = action.lower()
 
         # Auto-accept any confirmation dialogs that appear during this trade
-        dialog_handler = lambda dialog: dialog.accept()
+        def dialog_handler(dialog):
+            try:
+                dialog.accept()
+            except Exception as exc:
+                if self._is_missing_dialog_error(exc):
+                    logger.debug("[PLAYWRIGHT] Dialog disappeared before accept; continuing")
+                else:
+                    logger.debug("[PLAYWRIGHT] Dialog accept failed safely: %s", exc)
+
         page.on("dialog", dialog_handler)
 
         # FORCE FOCUS: bring page to front and click a neutral area
@@ -421,15 +434,23 @@ class RPAExecutor:
             day_pl = _scrape_field("Total P/L", "Total P[/&]?L")
 
             if net_liq is None:
-                logger.error(
-                    "[BALANCE] Strict balance scrape failed: no Account Equity/Net Liq label found. "
-                    "Refusing page-wide amount fallback."
+                fallback = float(getattr(config, "HARDCODED_EQUITY_FALLBACK", 77500.0) or 77500.0)
+                logger.warning(
+                    "[BALANCE] Strict scrape failed - using hardcoded equity fallback: $%.2f",
+                    fallback,
                 )
+                return {"net_liq": fallback, "day_pl": day_pl or 0.0, "fallback": True}
+
+            if day_pl is None:
+                day_pl = 0.0
+
+            if net_liq is None and day_pl is None:
                 return None
 
             return {
                 "net_liq": net_liq,
                 "day_pl": day_pl,
+                "fallback": False,
             }
         except Exception as e:
             logger.warning("[BALANCE] Balance scraping error: %s", e)

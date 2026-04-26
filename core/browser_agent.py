@@ -47,8 +47,42 @@ class BrowserAgent:
         self.last_error: Optional[str] = None
         self.restart_count = 0  # Total restarts performed
         self.max_restarts = 5  # Maximum restart attempts before giving up
+        self._dialog_handler_page: Optional[Page] = None
 
         logger.info(f"[GLOBE] Browser Agent initialized (headless={headless})")
+
+    @staticmethod
+    def _is_missing_dialog_error(exc: Exception) -> bool:
+        """Return True for harmless browser errors raised after a dialog already disappeared."""
+        text = str(exc).lower()
+        return "no dialog is showing" in text or "handlejavascriptdialog" in text
+
+    def _install_safe_dialog_handler(self):
+        """Auto-dismiss JavaScript dialogs without letting ProtocolError crash navigation."""
+        if not self.page or self._dialog_handler_page is self.page:
+            return
+
+        async def _safe_accept(dialog):
+            try:
+                await dialog.accept()
+                logger.debug("[DIALOG] Auto-accepted JavaScript dialog")
+            except Exception as exc:
+                if self._is_missing_dialog_error(exc):
+                    logger.debug("[DIALOG] Dialog disappeared before accept; continuing")
+                else:
+                    logger.debug("[DIALOG] Dialog accept failed safely: %s", exc)
+
+        def _handler(dialog):
+            try:
+                asyncio.create_task(_safe_accept(dialog))
+            except Exception as exc:
+                logger.debug("[DIALOG] Could not schedule dialog handler: %s", exc)
+
+        try:
+            self.page.on("dialog", _handler)
+            self._dialog_handler_page = self.page
+        except Exception as exc:
+            logger.debug("[DIALOG] Could not install dialog handler: %s", exc)
 
     async def get_current_url(self) -> str:
         """Get the current URL of the active browser tab."""
@@ -389,6 +423,7 @@ class BrowserAgent:
                     if pg.url and "tradingview" in pg.url.lower():
                         self.page = pg
                         self.context = ctx
+                        self._install_safe_dialog_handler()
                         self.is_running = True
                         logger.info("[OK] Browser agent connected to TradingView tab: %s", pg.url[:80])
                         return
@@ -397,6 +432,7 @@ class BrowserAgent:
             self.context = contexts[0]
             logger.info("[AUTO] No TradingView tab found. Creating new tab via CDP context...")
             self.page = await self.context.new_page()
+            self._install_safe_dialog_handler()
             await self.page.goto("https://www.tradingview.com/chart/", wait_until="domcontentloaded", timeout=30000)
             logger.info("[AUTO] Navigated to TradingView chart: %s", self.page.url[:80])
 
@@ -757,11 +793,16 @@ class BrowserAgent:
         if not self.page:
             return
 
+        self._install_safe_dialog_handler()
+
         try:
             await self.page.keyboard.press("Escape")
             await asyncio.sleep(0.15)
         except Exception as exc:
-            logger.debug("[POPUP] Escape dismiss failed: %s", exc)
+            if self._is_missing_dialog_error(exc):
+                logger.debug("[POPUP] Escape hit after dialog disappeared; continuing")
+            else:
+                logger.debug("[POPUP] Escape dismiss failed safely: %s", exc)
 
         try:
             closed_count = await self.page.evaluate("""() => {
@@ -819,7 +860,10 @@ class BrowserAgent:
                 logger.info("[POPUP] Closed %s blocking TradingView pop-up element(s)", closed_count)
                 await asyncio.sleep(0.25)
         except Exception as exc:
-            logger.debug("[POPUP] JS pop-up cleanup failed: %s", exc)
+            if self._is_missing_dialog_error(exc):
+                logger.debug("[POPUP] Dialog vanished during popup cleanup; continuing")
+            else:
+                logger.debug("[POPUP] JS pop-up cleanup failed safely: %s", exc)
 
     async def take_screenshot(self, save_path: str = None) -> Optional[str]:
         """Take a screenshot and return as base64. Waits for chart to be fully loaded first."""
@@ -827,6 +871,7 @@ class BrowserAgent:
             return None
 
         try:
+            self._install_safe_dialog_handler()
             await self._close_blocking_popups()
             # PAGE STATE CHECK: Wait for chart candles to be visible before screenshot
             await self._wait_for_chart_ready()

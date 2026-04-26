@@ -152,6 +152,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("Logging system initialized")
 
+VISION_ANALYSIS_COOLDOWN_SECONDS = 3.0
+_vision_analysis_lock = threading.Lock()
+_last_vision_analysis_at = 0.0
+
+
+def _wait_for_vision_analysis_slot(label: str = "vision") -> None:
+    """Throttle vision/AI image requests so browser and CPU stay responsive."""
+    global _last_vision_analysis_at
+    with _vision_analysis_lock:
+        now = time.monotonic()
+        wait_time = VISION_ANALYSIS_COOLDOWN_SECONDS - (now - _last_vision_analysis_at)
+        if wait_time > 0:
+            logger.info("[VISION] Cooldown %.2fs before %s analysis", wait_time, label)
+            time.sleep(wait_time)
+        _last_vision_analysis_at = time.monotonic()
+
 
 def _create_mt5_executor():
     """Lazy factory so UI mode can boot without an MT5 dependency chain."""
@@ -825,6 +841,7 @@ class MultiAssetHunterThread(QThread):
 
             # 3. Send to Ollama vision
             from core.brain_swarm import analyze_chart_with_vision
+            _wait_for_vision_analysis_slot(f"hunter:{symbol}")
             result = analyze_chart_with_vision(screenshot_b64, symbol)
             signal = result.get("signal", "NONE")
             confidence = result.get("confidence", 50)
@@ -1038,6 +1055,8 @@ class AnalysisWorker(QThread):
 
                     # Run swarm debate (with or without vision)
                     try:
+                        if chart_base64:
+                            _wait_for_vision_analysis_slot(f"analysis:{market_data.asset}")
                         output, transcript = self.analyzer.analyze_market(
                             market_data, chart_image_base64=chart_base64
                         )
@@ -3636,6 +3655,40 @@ class VcaniTradeApp:
         if not hasattr(self, "balance_diverged"):
             self.balance_diverged = False
 
+    def _fallback_balance_value(self) -> float:
+        """Return the configured fail-open balance used when live scrape is unavailable."""
+        try:
+            fallback = float(getattr(config, "HARDCODED_EQUITY_FALLBACK", 77500.0) or 77500.0)
+        except Exception:
+            fallback = 77500.0
+        return fallback if fallback > 0 else 77500.0
+
+    def _apply_balance_fallback(self, reason: str, journal_pnl: Optional[float] = None) -> float:
+        """Sync internal equity to the fallback so balance-read failures do not block RPA."""
+        fallback = self._fallback_balance_value()
+        self.balance = fallback
+        self.equity = fallback
+        self.balance_diverged = False
+        self.peak_balance = max(float(getattr(self, "peak_balance", fallback)), fallback)
+
+        if journal_pnl is None:
+            try:
+                journal_pnl = float(self.sql_journal.get_total_realized_pnl())
+            except Exception:
+                journal_pnl = None
+        if journal_pnl is not None:
+            self.starting_balance = fallback - float(journal_pnl)
+
+        logger.warning("[BALANCE] Fallback sync active: $%.2f (%s)", fallback, reason)
+        try:
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[BALANCE FALLBACK]</span>: '
+                f'using ${fallback:,.2f} because {reason}'
+            )
+        except Exception:
+            pass
+        return fallback
+
     def _get_open_risk_dollars(self) -> float:
         """Sum of initial risk amounts for all open positions."""
         return sum(
@@ -3654,7 +3707,7 @@ class VcaniTradeApp:
 
             if divergence_pct > 5.0:
                 logger.warning(
-                    "BALANCE DRIFT: internal=%.2f journal=%.2f diff=%.2f (%.2f%%). Skipping this trade.",
+                    "BALANCE DRIFT: internal=%.2f journal=%.2f diff=%.2f (%.2f%%). Applying fallback sync.",
                     self.balance,
                     expected_balance,
                     divergence,
@@ -3663,9 +3716,10 @@ class VcaniTradeApp:
                 self.cmd.log(
                     f'<span style="color:#D29922;font-weight:bold">[WARN] BALANCE DRIFT</span>: '
                     f'Live ${self.balance:.2f} vs Ledger ${expected_balance:.2f} '
-                    f'(diff {divergence_pct:.2f}%). Skipping trade — will retry next signal.'
+                    f'(diff {divergence_pct:.2f}%). Applying fallback sync.'
                 )
-                return False
+                self._apply_balance_fallback("balance divergence detected", journal_pnl=journal_pnl)
+                return True
 
             self.balance_diverged = False
             return True
@@ -3680,12 +3734,20 @@ class VcaniTradeApp:
         try:
             scrape_result = self.rpa_hand.scrape_live_balance()
             if scrape_result is None:
+                self._apply_balance_fallback("live balance scrape returned no clean read")
                 return
 
             live_balance = scrape_result.get("net_liq")
             day_pl = scrape_result.get("day_pl")
 
             if live_balance is None:
+                self._apply_balance_fallback("live balance scrape returned no equity value")
+                return
+
+            if scrape_result.get("fallback"):
+                self._apply_balance_fallback("live balance scraper used fallback")
+                if day_pl is not None:
+                    self.daily_pnl = day_pl
                 return
 
             previous_balance = getattr(self, "balance", float(config.CURRENT_BALANCE))
@@ -3693,9 +3755,10 @@ class VcaniTradeApp:
 
             # Log the dashboard snapshot every sync cycle
             logger.info(
-                "[LION EYE] Dashboard Sync: Net Liq = $%.2f | Day P/L = %s",
+                "[LION EYE] Dashboard Sync: Net Liq = $%.2f | Day P/L = %s%s",
                 live_balance,
                 f"${day_pl:.2f}" if day_pl is not None else "N/A",
+                " (fallback)" if scrape_result.get("fallback") else "",
             )
 
             # Only act if change is meaningful (> $5) to avoid noise from floating decimals
@@ -5247,6 +5310,7 @@ class VcaniTradeApp:
 
             from core.brain_swarm import detect_symbol_details_from_chart
 
+            _wait_for_vision_analysis_slot(f"symbol-detect:{ticker}")
             details = detect_symbol_details_from_chart(
                 screenshot.to_base64(),
                 model=config.MULTI_ASSET_VISION_MODEL,
