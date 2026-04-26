@@ -761,18 +761,17 @@ class MultiAssetHunterThread(QThread):
             # Sunday 22:00 UTC+ = normal mode resumes
             is_weekend = (weekday == 5) or (weekday == 6 and hour_utc < 22)
 
+            watchlist = getattr(self.app, "current_watchlist", [])
             if is_weekend:
-                watchlist = getattr(self.app, "current_watchlist", [])
                 # Only crypto on weekends — MNQ/MES/OIL are closed
                 active_symbols = [s for s in watchlist if is_crypto_ticker(s)]
                 if not active_symbols:
                     active_symbols = ["BTC-USD"]  # Fallback: always scan at least BTC
                 logger.debug("[HUNTER] Weekend mode: only crypto: %s", active_symbols)
             else:
-                # Weekday: merge watchlist + multi-asset tickers, deduplicated
-                watchlist = getattr(self.app, "current_watchlist", [])
-                all_symbols = list(set(watchlist + list(self.symbols)))
-                active_symbols = all_symbols
+                # RESPECT DASHBOARD WATCHLIST: Only scan what the user manually entered.
+                # Never auto-add MNQ/MES/MCL — the user controls the watchlist.
+                active_symbols = list(watchlist) if watchlist else []
 
             # Monday State Re-Sync (Anti-Ghosting)
             if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
