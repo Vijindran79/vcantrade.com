@@ -63,7 +63,7 @@ async def main():
         import config
         report_test("Config loaded", True)
         report_test(f"PROP_FIRM: {config.PROP_FIRM_NAME}", config.PROP_FIRM_ENABLED)
-        report_test(f"OLLAMA_URL: {config.OLLAMA_BASE_URL}", "localhost" in config.OLLAMA_BASE_URL)
+        report_test(f"OLLAMA_URL: {config.OLLAMA_BASE_URL}", "localhost" in config.OLLAMA_BASE_URL or "127.0.0.1" in config.OLLAMA_BASE_URL)
         report_test(f"MODEL: {config.OLLAMA_MODEL}", config.OLLAMA_MODEL)
         report_test(f"SCANNER: {'ENABLED' if config.CLOUD_SCANNER_ENABLED else 'DISABLED'}", config.CLOUD_SCANNER_ENABLED)
         report_test(f"Tickers: {len(config.CLOUD_TICKERS)}", len(config.CLOUD_TICKERS) > 0, str(config.CLOUD_TICKERS))

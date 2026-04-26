@@ -5406,6 +5406,8 @@ class VcaniTradeApp:
             f'Vision signal: {action} {symbol}'
         )
         self.ai_narrator.add_activity("[HUNTER]", f"{action} {symbol}")
+        # Trigger the green border blink — this is the missing feature!
+        self.ai_narrator.notify_signal_detected(symbol, action, 0.85)
 
         if config.TEACHER_MODE:
             self.cmd.log(f"[TEACHER] Would execute {action} {symbol} | {reason}")
