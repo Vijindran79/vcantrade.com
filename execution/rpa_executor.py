@@ -872,6 +872,50 @@ class RPAExecutor:
             logger.error(f"[WARN] Strike Sequence failed: {e}")
             return False
 
+    def force_hand_test_move(self):
+        """Test method: move cursor to center of TradingView Buy button and back to screen center."""
+        import pyautogui
+        logger.info("[HAND-TEST] Starting force hand test move...")
+        window = self._get_browser_window()
+        if not window:
+            logger.error("[HAND-TEST] No TradingView/Chrome window found")
+            return False
+        try:
+            window.activate()
+            time.sleep(0.5)
+            screenshot = pyautogui.screenshot(
+                region=(window.left, window.top, window.width, window.height)
+            )
+            img_data = np.array(screenshot)
+            target_rgb = self.color_targets["buy_button"]["rgb"]
+            tol = self.color_targets["buy_button"]["tol"]
+            candidates = []
+            for y in range(0, img_data.shape[0], 4):
+                for x in range(0, img_data.shape[1], 4):
+                    pixel = img_data[y, x]
+                    if all(abs(int(p) - int(t)) <= tol for p, t in zip(pixel[:3], target_rgb)):
+                        candidates.append((x, y))
+            if candidates:
+                center_x = int(np.median([c[0] for c in candidates]))
+                center_y = int(np.median([c[1] for c in candidates]))
+                abs_x = window.left + center_x
+                abs_y = window.top + center_y
+            else:
+                abs_x, abs_y = config.FALLBACK_COORDS.get("buy_button", (960, 540))
+            screen_center_x, screen_center_y = pyautogui.size()
+            screen_center_x //= 2
+            screen_center_y //= 2
+            logger.info("[HAND-TEST] Moving to Buy button center (%d, %d)", abs_x, abs_y)
+            pyautogui.moveTo(abs_x, abs_y, duration=0.5, tween=pyautogui.easeOutQuad)
+            time.sleep(0.5)
+            logger.info("[HAND-TEST] Moving back to screen center (%d, %d)", screen_center_x, screen_center_y)
+            pyautogui.moveTo(screen_center_x, screen_center_y, duration=0.5, tween=pyautogui.easeOutQuad)
+            logger.info("[HAND-TEST] Force hand test move complete — connection alive")
+            return True
+        except Exception as e:
+            logger.error("[HAND-TEST] Force hand test move failed: %s", e)
+            return False
+
     def verify_position_opened(self, ticker):
         """Screenshot-based confirmation that the position appears in TradingView."""
         time.sleep(4)  # Wait for broker fill (extended for TradingView delay)

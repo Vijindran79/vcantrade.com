@@ -5327,10 +5327,24 @@ class VcaniTradeApp:
         """
         try:
             from zoneinfo import ZoneInfo
+            from core.market_sessions import is_crypto_ticker
             now_et = datetime.now(ZoneInfo("America/New_York"))
             hour = now_et.hour
             minute = now_et.minute
             time_val = hour * 100 + minute  # e.g. 1630 for 4:30 PM
+
+            # CRYPTO NEVER BLOCKED: If watchlist or positions are all crypto, skip Apex gate
+            watchlist = getattr(self, "current_watchlist", [])
+            positions = getattr(self, "positions", [])
+            all_crypto = (
+                (bool(watchlist) and all(is_crypto_ticker(t) for t in watchlist))
+                or (bool(positions) and all(is_crypto_ticker(p.get("asset", "")) for p in positions))
+            )
+            if all_crypto:
+                if not self.can_trade:
+                    self.can_trade = True
+                    logger.info("[APEX] Crypto-only mode detected — Apex gate lifted, trading ALLOWED")
+                return
 
             # After 4:30 PM ET — block new trades
             if time_val >= 1630 and self.can_trade:

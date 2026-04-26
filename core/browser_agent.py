@@ -157,6 +157,9 @@ class BrowserAgent:
         elif "ADA" in tv_symbol:
             tv_symbol = "ADAUSD"
 
+        # Give the browser a moment to breathe between symbol switches
+        await asyncio.sleep(2)
+
         current_url = await self.get_current_url()
         
         # WARM START LOGIC: If already on a TradingView chart, use keyboard RPA to flip symbol
