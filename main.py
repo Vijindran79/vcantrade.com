@@ -2705,9 +2705,33 @@ class VcaniTradeApp:
         buy_votes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == "BUY")
         sell_votes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == "SELL")
         one_min_rsi = timeframe_rsi.get("1m")
+        five_min_rsi = timeframe_rsi.get("5m")
         mtf_bias = "SELL" if sell_votes > buy_votes else "BUY" if buy_votes > sell_votes else "MIXED"
         votes["1m_rsi"] = round(one_min_rsi, 2) if isinstance(one_min_rsi, (int, float)) else None
+        votes["5m_rsi"] = round(five_min_rsi, 2) if isinstance(five_min_rsi, (int, float)) else None
         votes["mtf_bias"] = mtf_bias
+
+        # Strong 5m BUY override: let the higher timeframe lead if 1m is neutral.
+        strong_5m_buy = (
+            action == "BUY"
+            and votes.get("5m") == "BUY"
+            and votes.get("1m") == "WAIT"
+            and isinstance(five_min_rsi, (int, float))
+            and five_min_rsi >= getattr(config, "MTF_STRONG_BUY_RSI", 58.0)
+        )
+        if (
+            not passed
+            and getattr(config, "MTF_ALLOW_STRONG_5M_BUY_WITH_NEUTRAL_1M", True)
+            and strong_5m_buy
+        ):
+            votes["override"] = "STRONG_5M_BUY_NEUTRAL_1M"
+            logger.warning(
+                "[TARGET] STRONG 5M BUY OVERRIDE: BUY %s allowed with neutral 1m because 5m RSI is %.2f | votes=%s",
+                ticker,
+                five_min_rsi,
+                votes,
+            )
+            return True, votes
 
         # LIQUIDITY SIGNAL OVERRIDE: SMAs naturally oppose sweep direction.
         # If scanner already approved the liquidity signal, don't let lagging MTF block it
@@ -4472,6 +4496,12 @@ class VcaniTradeApp:
                 f'BUY {ticker} allowed against SELL-biased MTF because 1m RSI is oversold ({mtf_votes.get("1m_rsi")})'
             )
             self.ai_narrator.add_activity("[REFRESH]", f"Reversal override armed for BUY {ticker}")
+        elif mtf_votes.get("override") == "STRONG_5M_BUY_NEUTRAL_1M":
+            self.cmd.log(
+                f'<span style="color:#3FB950;font-weight:bold">[TARGET] STRONG 5M BUY</span>: '
+                f'BUY {ticker} allowed while 1m is neutral (5m RSI {mtf_votes.get("5m_rsi")})'
+            )
+            self.ai_narrator.add_activity("[TARGET]", f"Strong 5m BUY override armed for {ticker}")
         elif not mtf_passed:
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">[BRAIN] OPENROUTER OVERRIDE</span>: '

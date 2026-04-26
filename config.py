@@ -115,6 +115,13 @@ WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.5"))
 CLOUD_TICKERS = ["BTC-USD", "ES=F", "NQ=F"]
 
+# Sniper gate tuning: allow a strong 5m BUY to pass when 1m is neutral/WAIT.
+MTF_ALLOW_STRONG_5M_BUY_WITH_NEUTRAL_1M = os.getenv(
+    "MTF_ALLOW_STRONG_5M_BUY_WITH_NEUTRAL_1M",
+    "True",
+).lower() == "true"
+MTF_STRONG_BUY_RSI = float(os.getenv("MTF_STRONG_BUY_RSI", "58.0"))
+
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.

@@ -752,14 +752,85 @@ class BrowserAgent:
         
         logger.warning("[CHART] Chart readiness timeout — proceeding with screenshot anyway")
 
+    async def _close_blocking_popups(self):
+        """Dismiss TradingView pop-ups that can cover the chart before screenshots."""
+        if not self.page:
+            return
+
+        try:
+            await self.page.keyboard.press("Escape")
+            await asyncio.sleep(0.15)
+        except Exception as exc:
+            logger.debug("[POPUP] Escape dismiss failed: %s", exc)
+
+        try:
+            closed_count = await self.page.evaluate("""() => {
+                const blockerText = /need help|intraday|upgrade|trial|paper trading|got it/i;
+                let closed = 0;
+
+                const clickCloseButton = (root) => {
+                    const selectors = [
+                        'button[aria-label*="Close" i]',
+                        'button[title*="Close" i]',
+                        '[data-name*="close" i]',
+                        '[class*="close" i]',
+                    ];
+                    for (const selector of selectors) {
+                        const button = root.querySelector(selector);
+                        if (button) {
+                            button.click();
+                            closed += 1;
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                const candidates = Array.from(document.querySelectorAll(
+                    '[role="dialog"], [class*="modal" i], [class*="popup" i], [class*="toast" i], [class*="notification" i], [class*="tooltip" i]'
+                ));
+
+                for (const el of candidates) {
+                    const text = (el.innerText || el.textContent || '').trim();
+                    const rect = el.getBoundingClientRect();
+                    const visible = rect.width > 0 && rect.height > 0;
+                    if (!visible || !blockerText.test(text)) {
+                        continue;
+                    }
+
+                    if (!clickCloseButton(el)) {
+                        el.style.display = 'none';
+                        closed += 1;
+                    }
+                }
+
+                const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                for (const button of buttons) {
+                    const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
+                    if (/^(got it|dismiss|close|no thanks|maybe later|ok)$/i.test(text)) {
+                        button.click();
+                        closed += 1;
+                    }
+                }
+
+                return closed;
+            }""")
+            if closed_count:
+                logger.info("[POPUP] Closed %s blocking TradingView pop-up element(s)", closed_count)
+                await asyncio.sleep(0.25)
+        except Exception as exc:
+            logger.debug("[POPUP] JS pop-up cleanup failed: %s", exc)
+
     async def take_screenshot(self, save_path: str = None) -> Optional[str]:
         """Take a screenshot and return as base64. Waits for chart to be fully loaded first."""
         if not self.page:
             return None
 
         try:
+            await self._close_blocking_popups()
             # PAGE STATE CHECK: Wait for chart candles to be visible before screenshot
             await self._wait_for_chart_ready()
+            await self._close_blocking_popups()
             
             screenshot_bytes = await self.page.screenshot(full_page=True)
             base64_screenshot = base64.b64encode(screenshot_bytes).decode('utf-8')

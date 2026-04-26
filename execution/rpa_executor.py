@@ -925,13 +925,13 @@ class RPAExecutor:
             logger.error(f"[WARN] Strike Sequence failed: {e}")
             return False
 
-    def force_hand_test_move(self):
+    def force_hand_test_move(self, ticker_hint=None):
         """Test method: move cursor to center of TradingView Buy button and back to screen center."""
         import pyautogui
-        logger.info("[HAND-TEST] Starting force hand test move...")
-        window = self._get_browser_window()
+        logger.info("[HAND-TEST] Starting force hand test move for %s...", ticker_hint or "active chart")
+        window = self._get_browser_window(ticker_hint)
         if not window:
-            logger.error("[HAND-TEST] No TradingView/Chrome window found")
+            logger.error("[HAND-TEST] No TradingView/Chrome window found for %s", ticker_hint or "active chart")
             return False
         try:
             window.activate()
