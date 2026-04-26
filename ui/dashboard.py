@@ -12,6 +12,7 @@ Complete command center with:
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Dict, List
 
@@ -95,6 +96,7 @@ class CommandCenter(QWidget):
     ticker_changed = pyqtSignal(str)
     test_browser_requested = pyqtSignal()
     force_test_trade_requested = pyqtSignal()
+    dry_run_changed = pyqtSignal(bool)
     user_command_sent = pyqtSignal(str)  # NEW: Co-Pilot Command Bridge
 
     def __init__(self):
@@ -861,14 +863,12 @@ class CommandCenter(QWidget):
         test_row.addWidget(self.force_test_btn)
 
         # Dry Run toggle
-        self.dry_run_btn = QPushButton("DRY RUN: ON")
+        initial_dry_run = bool(getattr(config, "DRY_RUN", True))
+        self.dry_run_btn = QPushButton()
         self.dry_run_btn.setMinimumHeight(32)
         self.dry_run_btn.setCheckable(True)
-        self.dry_run_btn.setChecked(True)
-        self.dry_run_btn.setStyleSheet(f"""
-            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
-                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
-        """)
+        self.dry_run_btn.setChecked(initial_dry_run)
+        self._apply_dry_run_button_state(initial_dry_run)
         self.dry_run_btn.clicked.connect(self._toggle_dry_run)
         test_row.addWidget(self.dry_run_btn)
 
@@ -898,22 +898,31 @@ class CommandCenter(QWidget):
         QTimer.singleShot(100, lambda: self.force_test_trade_requested.emit())
         self.log("[BOLT] FORCE HAND TEST: visible TradingView hand-move requested")
 
-    def _toggle_dry_run(self):
-        """Toggle dry run mode."""
-        is_dry_run = self.dry_run_btn.isChecked()
+    def _apply_dry_run_button_state(self, is_dry_run: bool):
+        """Render the dry-run button from the actual backend state."""
         if is_dry_run:
             self.dry_run_btn.setText("DRY RUN: ON")
             self.dry_run_btn.setStyleSheet(f"""
                 QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
             """)
-            self.log("[OK] DRY RUN: ON - Paper trading mode")
         else:
             self.dry_run_btn.setText("DRY RUN: OFF")
             self.dry_run_btn.setStyleSheet(f"""
                 QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 6px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
             """)
+
+    def _toggle_dry_run(self):
+        """Toggle dry run mode and sync the runtime backend flag."""
+        is_dry_run = self.dry_run_btn.isChecked()
+        config.DRY_RUN = is_dry_run
+        os.environ["DRY_RUN"] = "True" if is_dry_run else "False"
+        self._apply_dry_run_button_state(is_dry_run)
+        self.dry_run_changed.emit(is_dry_run)
+        if is_dry_run:
+            self.log("[OK] DRY RUN: ON - Paper trading mode")
+        else:
             self.log("[WARN] DRY RUN: OFF - Live trading mode (CAUTION!)")
 
     def _apply_auto_risk_state(self, initial: bool = False):

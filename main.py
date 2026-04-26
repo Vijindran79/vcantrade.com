@@ -1629,6 +1629,7 @@ class VcaniTradeApp:
         """Wire all backend threads to the CommandCenter UI."""
         # Command Center
         self.cmd.mode_changed.connect(self._on_mode_changed)
+        self.cmd.dry_run_changed.connect(self._on_dry_run_changed)
         self.cmd.kill_switch_triggered.connect(self._on_kill_switch)
         self.cmd.watchlist_updated.connect(self._on_watchlist_updated)
         self.cmd.settings_changed.connect(self._on_settings_changed)
@@ -4482,6 +4483,15 @@ class VcaniTradeApp:
         signal_data["liquidity_label"] = self._format_liquidity_label(signal_data)
         self._broadcast_trade_levels(signal_data)
 
+        if config.DRY_RUN:
+            self.cmd.log(
+                f'<span style="color:#3FB950;font-weight:bold">[DRY RUN]</span>: '
+                f'would execute {action} {ticker} @ ${entry_price:.2f}; no live RPA click sent'
+            )
+            logger.info("EXEC_CLOUD: dry-run blocked live RPA click for %s %s", action, ticker)
+            self._on_ticker_status_update(ticker, "dry_run")
+            return
+
         # Position Safety Check for cloud RPA path
         should_exec_rpa, conflict_note_rpa = self._check_position_conflict(ticker, action)
         if not should_exec_rpa:
@@ -4893,6 +4903,17 @@ class VcaniTradeApp:
         logger.info(f"Mode changed to {mode}")
         self.cmd.log(f"[REFRESH] Mode changed to: {mode}")
         self.ai_narrator.set_status("idle", f"Mode: {mode}")
+
+    def _on_dry_run_changed(self, is_dry_run: bool):
+        """Keep the runtime engine aligned with the dashboard dry-run toggle."""
+        config.DRY_RUN = bool(is_dry_run)
+        if is_dry_run and self.current_mode == "AUTONOMOUS":
+            self.current_mode = "TEACHER"
+            self._sync_runtime_session_context()
+            self.cmd._set_teacher_mode()
+        else:
+            self._sync_runtime_session_context()
+        logger.info("Dry run changed to %s", config.DRY_RUN)
 
     def _on_ticker_changed(self, ticker: str):
         """Handle ticker selection change."""

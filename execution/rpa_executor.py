@@ -39,6 +39,16 @@ class RPAExecutor:
             logger.warning("[PLAYWRIGHT] Sync API not available - HTML injection disabled")
             return False
 
+    @staticmethod
+    def _normalize_action(action):
+        """Return BUY/SELL from plain strings or SignalAction enum values."""
+        if hasattr(action, "value"):
+            action = action.value
+        action = str(action).strip().upper()
+        if "." in action:
+            action = action.rsplit(".", 1)[-1]
+        return action
+
     def _get_playwright_page(self):
         """Get or create a Playwright page. PRIORITIZES connecting to user's existing Chrome."""
         if self._page and not self._page.is_closed():
@@ -51,8 +61,9 @@ class RPAExecutor:
         self._playwright = sync_playwright().start()
 
         # PRIMARY: Connect to existing Chrome via CDP ( user's logged-in browser )
+        cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9223").strip()
         try:
-            self._browser = self._playwright.chromium.connect_over_cdp("http://127.0.0.1:9223")
+            self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
             contexts = self._browser.contexts
             if contexts:
                 # Scan all contexts and pages for a TradingView tab
@@ -74,14 +85,16 @@ class RPAExecutor:
                 return self._page
         except Exception:
             logger.warning(
-                "[STEALTH] Could not connect to Chrome on 127.0.0.1:9223. "
-                "Ensure Chrome is running with: --remote-debugging-port=9223"
+                "[STEALTH] Could not connect to Chrome on %s. "
+                "Ensure Chrome is running with: --remote-debugging-port=9223",
+                cdp_url,
             )
 
         # NO FALLBACK: CDP-only. No ghost browsers on headless Linux.
         logger.error(
-            "[PLAYWRIGHT] No Chrome debug connection on 127.0.0.1:9223. "
-            "Start Chrome: google-chrome --remote-debugging-port=9223 --user-data-dir=/root/ChromeDebug"
+            "[PLAYWRIGHT] No Chrome debug connection on %s. "
+            "Start Chrome: google-chrome --remote-debugging-port=9223 --user-data-dir=/root/ChromeDebug",
+            cdp_url,
         )
         return None
 
@@ -159,6 +172,10 @@ class RPAExecutor:
     def _click_via_html(self, action, page):
         """Click Buy/Sell via Playwright MOUSE ONLY. No keyboard shortcuts.
         Uses physical mouse clicks on button locators or JS fallback."""
+        action = self._normalize_action(action)
+        if action not in {"BUY", "SELL"}:
+            logger.error("[PLAYWRIGHT] Invalid HTML click action: %s", action)
+            return False
         action_lower = action.lower()
 
         # Auto-accept any confirmation dialogs that appear during this trade
@@ -299,7 +316,7 @@ class RPAExecutor:
 
     def scrape_live_balance(self):
         """Scrape Net Liq and Day P/L from TradingView/Tradovate account dashboard.
-        Uses 'Super-Eye' regex scan across the entire page text as a last resort.
+        Uses strict nearby-label reads only; never guesses from page-wide amounts.
         Returns a dict: {"net_liq": float, "day_pl": float} or None."""
         page = self._get_playwright_page()
         if not page:
@@ -389,40 +406,25 @@ class RPAExecutor:
                     logger.debug("[BALANCE] Field '%s' scrape error: %s", field_name, inner)
                 return None
 
-            # Primary target: Net Liq
-            net_liq = _scrape_field("Net Liq", "Net Liq")
+            # Primary target: account equity / net liquidation, but only from a nearby label/value pair.
+            net_liq = None
+            for label, pattern in [
+                ("Account Equity", r"Account\s+Equity"),
+                ("Net Liq", r"Net\s*Liq(?:uidation)?"),
+                ("Equity", r"\bEquity\b"),
+            ]:
+                net_liq = _scrape_field(label, pattern)
+                if net_liq is not None:
+                    break
 
             # Secondary target: Total P/L
             day_pl = _scrape_field("Total P/L", "Total P[/&]?L")
 
-            # SUPER-EYE LAST RESORT: scan entire page text for dollar amounts
             if net_liq is None:
-                try:
-                    import re
-                    full_text = page.evaluate("""() => document.body.innerText || ''""")
-                    # Regex: 2-3 digits, comma, 3 digits, dot, 2 decimals  (e.g. 48,243.74)
-                    matches = re.findall(r"(\d{2,3},\d{3}\.\d{2})", full_text)
-                    valid_vals = []
-                    for raw in matches:
-                        try:
-                            val = float(raw.replace(",", ""))
-                            if 1000 <= val <= 1000000:
-                                valid_vals.append(val)
-                        except ValueError:
-                            continue
-                    if valid_vals:
-                        # The largest amount is usually Net Liq (not a P/L or fee)
-                        net_liq = max(valid_vals)
-                        logger.info(
-                            "[BALANCE] Super-Eye found Net Liq $%.2f from page text (candidates: %s)",
-                            net_liq,
-                            valid_vals,
-                        )
-                except Exception as eye_err:
-                    logger.debug("[BALANCE] Super-Eye scan failed: %s", eye_err)
-
-            if net_liq is None and day_pl is None:
-                logger.warning("[BALANCE] Could not find Net Liq or Total P/L on dashboard")
+                logger.error(
+                    "[BALANCE] Strict balance scrape failed: no Account Equity/Net Liq label found. "
+                    "Refusing page-wide amount fallback."
+                )
                 return None
 
             return {
@@ -594,16 +596,8 @@ class RPAExecutor:
             page.bring_to_front()
             time.sleep(0.5)
 
-            # MICRO CONTRACT SAFETY CHECK: verify URL contains 'M' for Micro
             current_url = page.url or ""
-            if "M" not in current_url.upper():
-                logger.error(
-                    "[ALARM] TRADE ABORTED: Chart URL '%s' does not contain 'M' (Micro contract not loaded). "
-                    "Expected micro symbol like MNQ1!, MES1!, or MCL1!.",
-                    current_url,
-                )
-                return False
-            logger.info("[SAFETY] Micro contract confirmed in URL: %s", current_url)
+            logger.info("[PLAYWRIGHT] Chart loaded for %s at %s", tv_symbol, current_url)
 
             # Ensure trading panel is open
             panel_ok = self._ensure_trading_panel_open(page)
@@ -620,9 +614,10 @@ class RPAExecutor:
                 return False
 
             # Execute the click
-            clicked = self._click_via_html(trade.action, page)
+            action = self._normalize_action(trade.action)
+            clicked = self._click_via_html(action, page)
             if not clicked:
-                logger.error("[PLAYWRIGHT] Failed to click %s for %s", trade.action, trade.asset)
+                logger.error("[PLAYWRIGHT] Failed to click %s for %s", action, trade.asset)
                 return False
 
             time.sleep(1)  # Wait for order to process
@@ -630,9 +625,9 @@ class RPAExecutor:
             # Verify
             verified = self._verify_position_html(trade.asset, page)
             if verified:
-                logger.info("[PLAYWRIGHT] %s %s executed and verified via HTML", trade.action, trade.asset)
+                logger.info("[PLAYWRIGHT] %s %s executed and verified via HTML", action, trade.asset)
                 return True
-            logger.warning("[PLAYWRIGHT] %s %s clicked but verification inconclusive", trade.action, trade.asset)
+            logger.warning("[PLAYWRIGHT] %s %s clicked but verification inconclusive", action, trade.asset)
             return True  # Consider click success as partial success
 
         except Exception as e:
@@ -644,7 +639,7 @@ class RPAExecutor:
         MetaTrader 5 execution via PyAutoGUI coordinate/image-based clicking.
         For the brother's MT5 setup — uses One Click Trading or Order window.
         """
-        action = str(trade.action).upper()
+        action = self._normalize_action(trade.action)
         if action not in {"BUY", "SELL"}:
             logger.error("[MT5-RPA] Invalid action: %s", action)
             return False
@@ -734,20 +729,21 @@ class RPAExecutor:
 
     def _execute_trade_pyautogui(self, trade):
         """Legacy PyAutoGUI execution (mouse movement). Kept as emergency fallback."""
-        target_key = "buy_button" if trade.action == "BUY" else "sell_button" if trade.action == "SELL" else None
+        action = self._normalize_action(trade.action)
+        target_key = "buy_button" if action == "BUY" else "sell_button" if action == "SELL" else None
         if not target_key:
-            logger.error(f"[RPA] Invalid trade action: {trade.action}")
+            logger.error("[RPA] Invalid trade action: %s", action)
             return False
 
         for attempt in range(1, 4):
-            logger.info(f"[RPA] Attempt {attempt}/3 for {trade.action} {trade.asset}")
+            logger.info("[RPA] Attempt %s/3 for %s %s", attempt, action, trade.asset)
             success = self._lightning_strike_sequence(target_key, trade.asset)
             if success:
                 verified = self.verify_position_opened(trade.asset)
                 if verified:
-                    logger.info(f"[RPA] {trade.action} {trade.asset} executed and verified")
+                    logger.info("[RPA] %s %s executed and verified", action, trade.asset)
                     return True
-                logger.warning(f"[RPA] Click succeeded but verification failed for {trade.asset}")
+                logger.warning("[RPA] Click succeeded but verification failed for %s", trade.asset)
             if attempt < 3:
                 backoff = 2 ** (attempt - 1)
                 logger.info(f"[RPA] Retrying in {backoff}s...")
@@ -760,14 +756,14 @@ class RPAExecutor:
             debug_dir = "/root/vcantrade/logs/debug_failures"
             os.makedirs(debug_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{debug_dir}/{trade.action}_{trade.asset}_{timestamp}.png"
+            filename = f"{debug_dir}/{action}_{trade.asset}_{timestamp}.png"
             fail_shot = pyautogui.screenshot()
             fail_shot.save(filename)
             logger.warning("[DEBUG] Saved failure screenshot to %s", filename)
         except Exception as ss_err:
             logger.warning("[DEBUG] Could not save failure screenshot: %s", ss_err)
 
-        logger.error("[RPA] All 3 attempts failed for %s %s", trade.action, trade.asset)
+        logger.error("[RPA] All 3 attempts failed for %s %s", action, trade.asset)
         return False
 
     def set_human_latency(self, enabled: bool):
@@ -775,14 +771,71 @@ class RPAExecutor:
         self.human_latency_enabled = bool(enabled)
         logger.info("[LION] Human latency %s", "enabled" if self.human_latency_enabled else "disabled")
 
-    def _get_browser_window(self):
-        """Clean implementation: Targeted window locking only."""
-        targets = ["TradingView", "Tradovate", "Google Chrome"]
-        for title in targets:
-            windows = [w for w in gw.getWindowsWithTitle(title) if w.visible]
-            if windows:
-                # Return the most active/top-most window
-                return windows[0]
+    def _ticker_window_terms(self, ticker):
+        """Build title terms that can identify a ticker-only browser title."""
+        if not ticker:
+            return []
+        raw = str(ticker).strip().upper()
+        compact = raw.replace("-", "").replace("/", "").replace(":", "")
+        base = raw.split("-", 1)[0].split("/", 1)[0].split(":", 1)[-1]
+        terms = {raw, compact, base}
+        if base and len(base) >= 3:
+            terms.update({f"{base}USD", f"{base}USDT"})
+        return [term.lower() for term in terms if term and len(term) >= 3]
+
+    def _get_browser_window(self, ticker_hint=None):
+        """Find the active broker/browser window using config hints and ticker titles."""
+        default_hints = ["TradingView", "Tradovate", "Google Chrome", "Chrome", "Brave", "Microsoft Edge", "Edge"]
+        hints = list(getattr(config, "BROWSER_WINDOW_HINTS", default_hints)) or default_hints
+        hint_terms = {str(hint).lower() for hint in hints if str(hint).strip()}
+        ticker_terms = self._ticker_window_terms(ticker_hint)
+        scored_windows = []
+
+        try:
+            windows = gw.getAllWindows()
+        except Exception as e:
+            logger.debug("[WINDOW] getAllWindows failed: %s", e)
+            windows = []
+
+        for window in windows:
+            try:
+                if not getattr(window, "visible", True):
+                    continue
+                title = (getattr(window, "title", "") or "").strip()
+                if not title:
+                    continue
+                lowered = title.lower()
+                score = 0
+                if "tradingview" in lowered:
+                    score += 100
+                if "tradovate" in lowered:
+                    score += 100
+                if any(term in lowered for term in ticker_terms):
+                    score += 60
+                if any(hint in lowered for hint in hint_terms):
+                    score += 40
+                if getattr(window, "isActive", False):
+                    score += 5
+                if score:
+                    scored_windows.append((score, window))
+            except Exception:
+                continue
+
+        if scored_windows:
+            scored_windows.sort(key=lambda item: item[0], reverse=True)
+            selected = scored_windows[0][1]
+            logger.info("[WINDOW] Selected browser window: %s", getattr(selected, "title", ""))
+            return selected
+
+        for hint in hints:
+            try:
+                windows = [w for w in gw.getWindowsWithTitle(hint) if getattr(w, "visible", True)]
+                if windows:
+                    logger.info("[WINDOW] Selected browser window by hint '%s': %s", hint, windows[0].title)
+                    return windows[0]
+            except Exception:
+                continue
+
         return None
 
     def _check_color_match(self, pixel_rgb, target_key):
@@ -825,7 +878,7 @@ class RPAExecutor:
 
     def _lightning_strike_sequence(self, target_key, ticker):
         """The 'Lion Strike': Precise, Human-like, and Verified."""
-        window = self._get_browser_window()
+        window = self._get_browser_window(ticker)
         if not window:
             logger.error(f"[FAIL] Could not find TradingView window for {ticker}")
             return False
@@ -971,7 +1024,7 @@ class RPAExecutor:
 
     def bring_tradingview_to_front(self, ticker_hint=None):
         """Focus the TradingView browser window. Returns True if successful."""
-        window = self._get_browser_window()
+        window = self._get_browser_window(ticker_hint)
         if not window:
             logger.warning("[FOCUS] Could not find TradingView window for %s", ticker_hint or "unknown")
             return False
@@ -988,12 +1041,13 @@ class RPAExecutor:
     def describe_entry_target(self, action, ticker_hint=None):
         """Return target coordinates for the specified trade action.
         Returns a dict with point_name, relative, and absolute coordinates."""
+        action = self._normalize_action(action)
         target_key = "buy_button" if action == "BUY" else "sell_button" if action == "SELL" else None
         if not target_key:
             logger.error("[TARGET] Invalid action for entry target: %s", action)
             return None
 
-        window = self._get_browser_window()
+        window = self._get_browser_window(ticker_hint)
         abs_x, abs_y = config.FALLBACK_COORDS.get(target_key, (960, 540))
         rel_x, rel_y = abs_x, abs_y
         if window:
@@ -1039,7 +1093,7 @@ class RPAExecutor:
         appropriate clicking strategy (DOM-based vs coordinate/image-based).
         """
         platform = self._detect_platform()
-        action = str(trade.action).upper()
+        action = self._normalize_action(trade.action)
         asset = trade.asset
 
         logger.info(
