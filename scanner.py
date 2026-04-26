@@ -49,7 +49,7 @@ TICKERS = [
 TUNNEL_URL = "https://89ad-82-18-221-251.ngrok-free.app/signal"
 SCAN_INTERVAL = 15  # seconds
 VOLATILITY_THRESHOLD = 0.002  # 0.2%
-CONFIDENCE_THRESHOLD = 0.7
+CONFIDENCE_THRESHOLD = 0.60  # TEMPORARY TEST: lowered from 0.7 for Sunday signal testing
 
 
 def _canonical_market_ticker(ticker: str) -> str:

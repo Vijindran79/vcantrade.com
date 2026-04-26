@@ -2834,7 +2834,7 @@ class VcaniTradeApp:
             signal_label = self._signal_label(llm_signal)
             signal_banner = f"[SIGNAL] {signal_label}"
             force_action_override = self.force_action_armed and llm_signal in {"BUY", "SELL"}
-            self.analysis_mode_status = "APPROVED" if (confidence_score >= 85 or force_action_override) and llm_signal in {"BUY", "SELL"} else "READY"
+            self.analysis_mode_status = "APPROVED" if (confidence_score >= config.MIN_CONFIDENCE_THRESHOLD or force_action_override) and llm_signal in {"BUY", "SELL"} else "READY"
             
             # Parse AI response
             thoughts = f"{signal_banner} {output.reason}"

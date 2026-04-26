@@ -57,6 +57,7 @@ CRITICAL RULES:
 - You MUST be contrarian - even if the trade looks good, find weaknesses
 - Be specific about technical reasons (RSI divergence, low volume, news risk, etc.)
 - In AUTONOMOUS mode, do NOT penalize trades just because RSI is neutral; liquidity sweep context should dominate neutral-RSI hesitation
+- Do NOT downgrade trades solely because it is Saturday, Sunday, or the weekend. Crypto and futures markets operate through weekends.
 - If the setup is genuinely terrible, give it a "STRONG_AVOID" rating
 - If it has minor issues, give it "CAUTIOUS" rating with warnings
 - Only give "NEUTRAL" if you truly can't find major flaws (rare!)
@@ -136,6 +137,7 @@ class DevilsAdvocate:
                 return self._default_challenge(suggested_action)
 
             result = self._apply_temporal_guardrails(result, session_context=session_context)
+            result = self._apply_weekend_relaxation(result, session_context=session_context)
             result = self._apply_autonomous_liquidity_override(
                 result=result,
                 market_data=market_data,
@@ -187,6 +189,23 @@ class DevilsAdvocate:
                     "Autonomous liquidity-sweep setup retained; neutral RSI alone is not a blocker."
                 ]
 
+        return result
+
+    def _apply_weekend_relaxation(self, result: Dict, session_context: Optional[Dict]) -> Dict:
+        """TEMPORARY TEST: Reduce Devil's Advocate penalties during weekend signal testing."""
+        context = session_context or {}
+        if not context.get("is_weekend"):
+            return result
+        rating = str(result.get("rating", "NEUTRAL") or "NEUTRAL").upper()
+        current_penalty = float(result.get("confidence_penalty", -0.01) or -0.01)
+        # Weekend relaxation: downgrade STRONG_AVOID to CAUTIOUS, cap penalty at -0.02
+        if rating == "STRONG_AVOID":
+            result["rating"] = "CAUTIOUS"
+            result["confidence_penalty"] = max(current_penalty, -0.02)
+            logger.info("[DEVIL] WEEKEND RELAXATION: STRONG_AVOID downgraded to CAUTIOUS for weekend testing")
+        elif current_penalty < -0.02:
+            result["confidence_penalty"] = max(current_penalty, -0.02)
+            logger.info("[DEVIL] WEEKEND RELAXATION: penalty capped at -0.02 for weekend testing")
         return result
 
     def _apply_temporal_guardrails(self, result: Dict, session_context: Optional[Dict]) -> Dict:
@@ -248,7 +267,7 @@ class DevilsAdvocate:
             "hidden_risks": "Analysis failed - unknown risks",
             "better_entry_timing": "Wait for clearer confirmation",
             "override_conditions": "Higher volume and stronger technical setup",
-            "confidence_penalty": -0.01,
+            "confidence_penalty": 0.0,
         }
 
     def get_challenge_stats(self) -> Dict:
