@@ -48,6 +48,8 @@ class BrowserAgent:
         self.restart_count = 0  # Total restarts performed
         self.max_restarts = 5  # Maximum restart attempts before giving up
         self._dialog_handler_page: Optional[Page] = None
+        # STURDY BRIDGE: Navigation lock flag
+        self._navigating: bool = False
 
         logger.info(f"[GLOBE] Browser Agent initialized (headless={headless})")
 
@@ -56,6 +58,29 @@ class BrowserAgent:
         """Return True for harmless browser errors raised after a dialog already disappeared."""
         text = str(exc).lower()
         return "no dialog is showing" in text or "handlejavascriptdialog" in text
+
+    def is_browser_busy(self) -> bool:
+        """STURDY BRIDGE: Check if the browser is currently busy (navigating or loading).
+        Returns True if the bot should SKIP this cycle and wait for the next one.
+        This prevents crashes when the user is manually interacting with the chart.
+        Thread-safe: uses _navigating flag (no async calls needed)."""
+        # Check navigation lock flag first (fast, thread-safe)
+        if self._navigating:
+            logger.debug("[BRIDGE] Browser is navigating — skipping cycle")
+            return True
+        # Quick DOM readiness check — only if page is accessible
+        # NOTE: page.evaluate() can only be called on the browser event loop thread,
+        # so we use a lightweight JS check wrapped in broad exception handling.
+        # If it fails (threading issue), we assume NOT busy and proceed.
+        if self.page:
+            try:
+                ready_state = self.page.evaluate("() => document.readyState")
+                if ready_state != "complete":
+                    logger.debug("[BRIDGE] Page readyState=%s — skipping cycle", ready_state)
+                    return True
+            except Exception:
+                pass  # Threading mismatch or page unavailable — assume not busy
+        return False
 
     def _install_safe_dialog_handler(self):
         """Auto-dismiss JavaScript dialogs without letting ProtocolError crash navigation.
@@ -401,49 +426,74 @@ class BrowserAgent:
             return False
 
     async def start(self):
-        """Connect to existing Chrome via CDP. Auto-creates TradingView tab if missing."""
+        """Connect to existing Chrome via CDP. Auto-creates TradingView tab if missing.
+        STURDY BRIDGE: Retries CDP connection 5 times with 5s delay on ECONNREFUSED."""
         if self.is_running:
             logger.warning("Browser agent already running")
             return
 
-        try:
-            self.playwright = await async_playwright().start()
+        MAX_CDP_RETRIES = 5
+        CDP_RETRY_DELAY = 5  # seconds
 
-            # CDP ONLY: Connect to existing Chrome on Vast.ai Linux server
-            self.browser = await self.playwright.chromium.connect_over_cdp(config.BROWSER_CDP_URL)
-            contexts = self.browser.contexts
-            if not contexts:
-                logger.error("[FAIL] No contexts found in Chrome CDP connection")
-                raise RuntimeError(f"No contexts in Chrome CDP connection: {config.BROWSER_CDP_URL}")
+        for attempt in range(1, MAX_CDP_RETRIES + 1):
+            try:
+                self.playwright = await async_playwright().start()
 
-            # Search for existing TradingView tab
-            for ctx in contexts:
-                for pg in ctx.pages:
-                    if pg.url and "tradingview" in pg.url.lower():
-                        self.page = pg
-                        self.context = ctx
-                        self._install_safe_dialog_handler()
-                        self.is_running = True
-                        logger.info("[OK] Browser agent connected to TradingView tab: %s", pg.url[:80])
-                        return
+                # CDP ONLY: Connect to existing Chrome on Vast.ai Linux server
+                self.browser = await self.playwright.chromium.connect_over_cdp(config.BROWSER_CDP_URL)
+                contexts = self.browser.contexts
+                if not contexts:
+                    logger.error("[FAIL] No contexts found in Chrome CDP connection")
+                    raise RuntimeError(f"No contexts in Chrome CDP connection: {config.BROWSER_CDP_URL}")
 
-            # No TradingView tab found — create one via CDP context
-            self.context = contexts[0]
-            logger.info("[AUTO] No TradingView tab found. Creating new tab via CDP context...")
-            self.page = await self.context.new_page()
-            self._install_safe_dialog_handler()
-            await self.page.goto("https://www.tradingview.com/chart/", wait_until="domcontentloaded", timeout=30000)
-            logger.info("[AUTO] Navigated to TradingView chart: %s", self.page.url[:80])
+                # Search for existing TradingView tab
+                for ctx in contexts:
+                    for pg in ctx.pages:
+                        if pg.url and "tradingview" in pg.url.lower():
+                            self.page = pg
+                            self.context = ctx
+                            self._install_safe_dialog_handler()
+                            self.is_running = True
+                            logger.info("[OK] Browser agent connected to TradingView tab: %s", pg.url[:80])
+                            return
 
-            # Login detection
-            await self._handle_login_wait()
+                # No TradingView tab found — create one via CDP context
+                self.context = contexts[0]
+                logger.info("[AUTO] No TradingView tab found. Creating new tab via CDP context...")
+                self.page = await self.context.new_page()
+                self._install_safe_dialog_handler()
+                await self.page.goto("https://www.tradingview.com/chart/", wait_until="domcontentloaded", timeout=30000)
+                logger.info("[AUTO] Navigated to TradingView chart: %s", self.page.url[:80])
 
-            self.is_running = True
-            return
+                # Login detection
+                await self._handle_login_wait()
 
-        except Exception as e:
-            logger.error(f"[FAIL] Failed to connect to Chrome at {config.BROWSER_CDP_URL}: {e}")
-            raise
+                self.is_running = True
+                return  # SUCCESS — exit retry loop
+
+            except Exception as e:
+                err_text = str(e).lower()
+                is_conn_refused = "econnrefused" in err_text or "10061" in err_text or "connection refused" in err_text or "actively refused" in err_text
+
+                if is_conn_refused and attempt < MAX_CDP_RETRIES:
+                    logger.warning(
+                        "[BRIDGE] CDP ECONNREFUSED on attempt %d/%d — Chrome may be restarting. "
+                        "Waiting %ds before retry...",
+                        attempt, MAX_CDP_RETRIES, CDP_RETRY_DELAY,
+                    )
+                    # Clean up partial Playwright instance before retry
+                    try:
+                        await self.playwright.stop()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(CDP_RETRY_DELAY)
+                    continue  # Retry
+                else:
+                    # Non-ECONNREFUSED error or final retry exhausted
+                    logger.error("[FAIL] CDP connection failed on attempt %d/%d: %s", attempt, MAX_CDP_RETRIES, e)
+                    if attempt >= MAX_CDP_RETRIES:
+                        logger.error("[BRIDGE] All %d CDP retries exhausted — triggering self-heal", MAX_CDP_RETRIES)
+                    raise
 
     async def _handle_login_wait(self):
         """Detect login screen and wait for manual login if needed."""
@@ -470,11 +520,13 @@ class BrowserAgent:
         return await self.navigate_to_symbol("CME_MINI:MNQ1!")
 
     async def navigate_to_symbol(self, symbol: str):
-        """Navigate to any TradingView symbol chart."""
+        """Navigate to any TradingView symbol chart.
+        STURDY BRIDGE: Sets navigation lock during transit so other cycles skip."""
         if not self.is_running or not self.page:
             logger.warning("[NAV] Browser agent not running, starting...")
             await self.start()
 
+        self._navigating = True  # Lock: other cycles will see busy and skip
         try:
             tv_url = f"https://www.tradingview.com/chart/?symbol={symbol}"
             logger.info("[NAV] Navigating to %s chart: %s", symbol, tv_url)
@@ -490,6 +542,8 @@ class BrowserAgent:
         except Exception as e:
             logger.error("[NAV] Failed to navigate to TradingView %s: %s", symbol, e)
             return False
+        finally:
+            self._navigating = False  # Unlock: navigation complete
 
     async def stop(self):
         """Close the browser agent and cleanup all resources."""

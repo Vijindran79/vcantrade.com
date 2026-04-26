@@ -807,6 +807,12 @@ class MultiAssetHunterThread(QThread):
                 logger.debug("[HUNTER] Skipping weekend-closed symbol: %s", symbol)
                 return
 
+            # STURDY BRIDGE: Skip this cycle if browser is busy (user interacting / chart loading)
+            if hasattr(self.app, 'browser_agent') and self.app.browser_agent and self.app.browser_agent.is_browser_busy():
+                logger.debug("[BRIDGE] Browser busy — skipping %s cycle (user may be interacting)", symbol)
+                self.status_update.emit(symbol, "WAITING", "Browser busy — will retry next cycle")
+                return
+
             self.status_update.emit(symbol, "NAVIGATING", f"Switching to {symbol}...")
 
             # 1. Navigate browser to symbol
