@@ -4697,14 +4697,15 @@ class VcaniTradeApp:
             signal_data: Trade signal data
             force_execute: If True, bypasses confidence and slippage guards (TEST MODE)
         """
-        if not self.can_trade and not force_execute:
+        ticker = signal_data.get("ticker", "UNKNOWN")
+        from core.market_sessions import is_crypto_ticker
+        if not self.can_trade and not force_execute and not is_crypto_ticker(ticker):
             self._log_ui(
                 '<span style="color:#D29922;font-weight:bold">[APEX BLOCK]</span> '
                 'Unified executor blocked — trading halted by Apex gate'
             )
             return
 
-        ticker = signal_data.get("ticker", "UNKNOWN")
         action = signal_data.get("action", "HOLD")
 
         mode_label = "[BOLT] FORCE TEST" if force_execute else "[SUCCESS] UNIFIED EXECUTOR"

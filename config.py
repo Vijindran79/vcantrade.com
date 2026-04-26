@@ -92,7 +92,7 @@ BRAINSTORM_KEY_LIST = _parse_key_list(BRAINSTORM_API_KEY)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 # Local execution settings
-LLM_TIMEOUT = 90  # Heavy local Qwen runs need more time to finish reliably
+LLM_TIMEOUT = 180  # Heavy local Qwen runs need more time to finish reliably
 OLLAMA_TIMEOUT = LLM_TIMEOUT  # Alias used by llm_analyzer swarm runner
 JSON_OUTPUT = True
 

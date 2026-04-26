@@ -160,25 +160,11 @@ def analyze_chart_with_vision(
 
     prompt = (
         f"You are a professional futures trader analyzing a 5-minute {symbol} chart. "
-        "Your job is to find HIGH-PROBABILITY trade setups ONLY. Be strict. Most of the time the answer is NONE.\n\n"
-        "Analyze the chart in this exact order:\n"
-        "1. TREND ALIGNMENT: Is the 5-minute trend clearly UP (higher highs/higher lows) or DOWN (lower highs/lower lows)? "
-        "Only trade IN the direction of the trend. No counter-trend trades.\n"
-        "2. SUPPORT/RESISTANCE: Is price currently rejecting a clear support level (for BUY) or resistance level (for SELL)? "
-        "Look for wicks, multiple touches, or consolidation at a key level.\n"
-        "3. CANDLE CONFIRMATION: Identify the most recent 1-2 candles. Do you see a Hammer, Bullish Engulfing, Morning Star (for BUY) "
-        "OR Shooting Star, Bearish Engulfing, Evening Star (for SELL)? Weak candles = NO trade.\n"
-        "4. RISK-TO-REWARD: Estimate a reasonable stop-loss (below recent swing low for BUY, above recent swing high for SELL) "
-        "and a target at least 2x the risk distance. If you cannot get 1:2 R:R, answer NONE.\n\n"
-        "RULES:\n"
-        "- If ANY of the 4 criteria above is weak or missing, answer NONE.\n"
-        "- Do NOT trade chop, range-bound markets, or low-volume periods.\n"
-        "- Do NOT guess. If uncertain, answer NONE.\n\n"
-        "Also rate your conviction:\n"
-        "CONFIDENCE: [0-100] where 100 = absolute certainty, 0 = pure guess\n"
-        "THREAT: [LOW/MEDIUM/HIGH] where HIGH = dangerous chop, LOW = clean setup\n\n"
-        "Output EXACTLY in this format (no extra text):\n"
-        "SIGNAL: [BUY/SELL/NONE] | CONFIDENCE: [0-100] | THREAT: [LOW/MEDIUM/HIGH] | REASON: [One sentence: trend direction + pattern + R:R ratio]"
+        "Give a 1-sentence verdict ONLY. Be strict.\n\n"
+        "Check: trend direction, support/resistance rejection, candle pattern, 1:2 R:R. "
+        "If any is weak, answer NONE.\n\n"
+        "Output EXACTLY (no extra text):\n"
+        "SIGNAL: [BUY/SELL/NONE] | CONFIDENCE: [0-100] | THREAT: [LOW/MEDIUM/HIGH] | REASON: [1 sentence only]"
     )
 
     payload = {
@@ -197,7 +183,7 @@ def analyze_chart_with_vision(
         ],
         "stream": False,
         "temperature": 0.1,
-        "max_tokens": 256,
+        "max_tokens": 128,
         "top_p": 0.9,
     }
 
@@ -214,7 +200,7 @@ def analyze_chart_with_vision(
         "stream": False,
         "options": {
             "temperature": 0.1,
-            "num_predict": 256,
+            "num_predict": 128,
             "top_p": 0.9,
         },
     }
@@ -466,7 +452,7 @@ class OllamaSwarmConsensus:
     def __init__(self):
         self.base_url = normalize_ollama_base_url(config.OLLAMA_BASE_URL)
         self.model = config.OLLAMA_MODEL
-        self.timeout = max(int(config.LLM_TIMEOUT), 90)
+        self.timeout = max(int(config.LLM_TIMEOUT), 180)
         self.devils_advocate = DevilsAdvocate()
         logger.info(f"[BRAIN] Local Brain initialized: {self.model} at {self.base_url}")
 
