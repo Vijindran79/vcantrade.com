@@ -776,6 +776,18 @@ class MultiAssetHunterThread(QThread):
             nav_ok = future.result(timeout=35)
             if not nav_ok:
                 self.status_update.emit(symbol, "ERROR", "Navigation failed")
+                # Trigger self-healing: record error and attempt browser restart
+                self.app.browser_agent.record_error("Navigation failed for " + symbol)
+                if self.app.browser_agent.error_count >= self.app.browser_agent.error_threshold:
+                    logger.warning("[WRENCH] Navigation failures reached threshold — triggering browser self-heal")
+                    try:
+                        heal_future = asyncio.run_coroutine_threadsafe(
+                            self.app.browser_agent.self_heal_restart(), loop,
+                        )
+                        heal_future.result(timeout=30)
+                        logger.info("[WRENCH] Browser self-heal completed after navigation failure")
+                    except Exception as heal_err:
+                        logger.error("[WRENCH] Browser self-heal failed: %s", heal_err)
                 return
 
             # Sync scanner to the symbol now visible in the browser
@@ -795,6 +807,18 @@ class MultiAssetHunterThread(QThread):
             screenshot_b64 = future.result(timeout=15)
             if not screenshot_b64:
                 self.status_update.emit(symbol, "ERROR", "Screenshot failed")
+                # Trigger self-healing for screenshot failures
+                self.app.browser_agent.record_error("Screenshot failed for " + symbol)
+                if self.app.browser_agent.error_count >= self.app.browser_agent.error_threshold:
+                    logger.warning("[WRENCH] Screenshot failures reached threshold — triggering browser self-heal")
+                    try:
+                        heal_future = asyncio.run_coroutine_threadsafe(
+                            self.app.browser_agent.self_heal_restart(), loop,
+                        )
+                        heal_future.result(timeout=30)
+                        logger.info("[WRENCH] Browser self-heal completed after screenshot failure")
+                    except Exception as heal_err:
+                        logger.error("[WRENCH] Browser self-heal failed: %s", heal_err)
                 return
 
             self.status_update.emit(symbol, "ANALYZING", "Sending to Cloud Brain...")
@@ -5336,15 +5360,26 @@ class VcaniTradeApp:
             # CRYPTO NEVER BLOCKED: If watchlist or positions are all crypto, skip Apex gate
             watchlist = getattr(self, "current_watchlist", [])
             positions = getattr(self, "positions", [])
+            # Check if ANY crypto is in the watchlist or positions — don't block just because stocks exist
+            has_crypto = (
+                any(is_crypto_ticker(t) for t in watchlist)
+                or any(is_crypto_ticker(p.get("asset", "")) for p in positions)
+            )
             all_crypto = (
                 (bool(watchlist) and all(is_crypto_ticker(t) for t in watchlist))
                 or (bool(positions) and all(is_crypto_ticker(p.get("asset", "")) for p in positions))
             )
+            # If everything is crypto, skip Apex gate entirely
             if all_crypto:
                 if not self.can_trade:
                     self.can_trade = True
                     logger.info("[APEX] Crypto-only mode detected — Apex gate lifted, trading ALLOWED")
                 return
+            # If mixed (crypto + stocks), only block the stock portion — crypto still allowed
+            if has_crypto and not self.can_trade:
+                logger.info("[APEX] Mixed watchlist — crypto positions bypass Apex block, stocks blocked")
+                # Don't return; let the stock block apply, but crypto execution paths
+                # use is_crypto_ticker() to bypass can_trade individually
 
             # After 4:30 PM ET — block new trades
             if time_val >= 1630 and self.can_trade:
@@ -5356,45 +5391,58 @@ class VcaniTradeApp:
                 )
                 self.ai_narrator.add_activity("[APEX]", "16:30 ET — No new trades")
 
-            # After 4:45 PM ET — force close all positions
+            # After 4:45 PM ET — force close all NON-CRYPTO positions
             if time_val >= 1645 and self.positions:
-                logger.warning(
-                    "[APEX] Forced position flattening at 16:45 ET. Positions: %s",
-                    [p["asset"] for p in self.positions]
-                )
-                self.cmd.log(
-                    '<span style="color:#F85149;font-weight:bold">[APEX GATE]</span> '
-                    '16:45 ET — FORCING CLOSE of all open positions'
-                )
-                self.ai_narrator.add_activity("[APEX]", "16:45 ET — Flattening all positions")
+                # Split positions: crypto stays open, everything else gets flattened
+                crypto_positions = [p for p in self.positions if is_crypto_ticker(p.get("asset", ""))]
+                non_crypto_positions = [p for p in self.positions if not is_crypto_ticker(p.get("asset", ""))]
 
-                # Close via executor if available
-                if self.executor:
-                    try:
-                        self.executor.close_all_positions(reason="Apex 16:45 ET forced close")
-                    except Exception as e:
-                        logger.error("[APEX] Executor close_all_positions failed: %s", e)
+                if non_crypto_positions:
+                    logger.warning(
+                        "[APEX] Forced position flattening at 16:45 ET. Non-crypto positions: %s. "
+                        "Crypto positions PRESERVED: %s",
+                        [p["asset"] for p in non_crypto_positions],
+                        [p["asset"] for p in crypto_positions],
+                    )
+                    self.cmd.log(
+                        '<span style="color:#F85149;font-weight:bold">[APEX GATE]</span> '
+                        '16:45 ET — FORCING CLOSE of non-crypto positions (crypto preserved)'
+                    )
+                    self.ai_narrator.add_activity("[APEX]", "16:45 ET — Flattening non-crypto positions")
 
-                # Close via MT5 if in MT5 mode
-                if self._is_mt5_mode():
-                    mt5_executor = self._get_mt5_executor()
+                    # Close non-crypto via executor if available
+                    if self.executor:
+                        try:
+                            for p in non_crypto_positions:
+                                self.executor.close_position(p.get("asset", ""), reason="Apex 16:45 ET forced close")
+                        except Exception as e:
+                            logger.error("[APEX] Executor close_position failed: %s", e)
+
+                    # Close non-crypto via MT5 if in MT5 mode
+                    if self._is_mt5_mode():
+                        mt5_executor = self._get_mt5_executor()
+                    else:
+                        mt5_executor = None
+                    if mt5_executor:
+                        try:
+                            mt5_positions = mt5_executor.get_positions()
+                            for p in mt5_positions:
+                                if is_crypto_ticker(p.get("symbol", "")):
+                                    continue  # Skip crypto positions
+                                close_action = "SELL" if p["type"] == "BUY" else "BUY"
+                                mt5_executor.execute_trade(p["symbol"], close_action, volume=p["volume"])
+                                logger.info("[APEX] MT5 closed %s %s", p["type"], p["symbol"])
+                        except Exception as e:
+                            logger.error("[APEX] MT5 position close failed: %s", e)
+
+                    # Update positions: keep crypto, remove non-crypto
+                    self.positions = crypto_positions
+                    self.cmd.update_positions(self.positions)
+                    self._refresh_live_ledger()
+                    self.ai_narrator.notify_error("Non-crypto positions flattened — Apex closing time (crypto preserved)")
                 else:
-                    mt5_executor = None
-                if mt5_executor:
-                    try:
-                        positions = mt5_executor.get_positions()
-                        for p in positions:
-                            close_action = "SELL" if p["type"] == "BUY" else "BUY"
-                            mt5_executor.execute_trade(p["symbol"], close_action, volume=p["volume"])
-                            logger.info("[APEX] MT5 closed %s %s", p["type"], p["symbol"])
-                    except Exception as e:
-                        logger.error("[APEX] MT5 position close failed: %s", e)
-
-                # Clear internal position state
-                self.positions.clear()
-                self.cmd.update_positions(self.positions)
-                self._refresh_live_ledger()
-                self.ai_narrator.notify_error("All positions flattened — Apex closing time")
+                    # All positions are crypto — do nothing
+                    logger.info("[APEX] 16:45 ET — All positions are crypto, no flattening needed")
 
         except Exception as e:
             logger.error("[APEX] check_apex_closing_time error: %s", e)

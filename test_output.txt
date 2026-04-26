@@ -1,19 +1,19 @@
 ============================================================
 VcaniTrade AI - Full System Test
 ============================================================
-✅ Config loaded
-   PROP_FIRM: TopStep
-   OLLAMA_URL: http://localhost:11434
+[OK] Config loaded
+   PROP_FIRM: Apex Trader Funding
+   OLLAMA_URL: http://127.0.0.1:11434
    MODEL: qwen2.5:latest
-   TIMEOUT: 90
-✅ Models loaded
-✅ Prop Firm Engine works
+   TIMEOUT: 180
+[OK] Models loaded
+[OK] Prop Firm Engine works
    Can trade: True, Violations: 0
-✅ Swarm Consensus works
-   Action: BUY, Confidence: HIGH
-✅ Scanner loaded
-✅ Dashboard created
-✅ Dashboard shown
+[OK] Swarm Consensus works
+   Action: BUY, Confidence: MEDIUM
+[OK] Scanner loaded
+[OK] Dashboard created
+[OK] Dashboard shown
 
 ============================================================
 TEST SUMMARY

@@ -617,6 +617,7 @@ Return JSON only:
 
         output = self._apply_vision_guardrails(output, vision_result)
         output = self._apply_temporal_guardrails(output, session_context)
+        output = self._apply_sentiment_guardrails(output, news_context)
 
         signal_label = "WAIT" if output.action == SignalAction.HOLD else output.action.value
         if "[SIGNAL]" not in output.reason.upper():
@@ -877,6 +878,46 @@ JSON schema only:
             f"Detected symbol: {detected} | Expected symbol: {expected_symbol} | "
             f"Visual signal: {signal} | Reason: {reason}"
         )
+
+    def _apply_sentiment_guardrails(
+        self,
+        output: LLMAnalysisOutput,
+        news_context: Optional[Dict[str, Any]],
+    ) -> LLMAnalysisOutput:
+        """Conflict Resolution: If Vision (BUY) conflicts with Sentiment (bearish / Red Folder),
+        default to the safer side (HOLD or confidence downgrade)."""
+        if not news_context or output.action == SignalAction.HOLD:
+            return output
+
+        # Red Folder kill switch: any active high-impact event blocks fresh entries
+        red_folder_active = bool(news_context.get("red_folder_active", False))
+        if red_folder_active:
+            proposed = output.action.value
+            output.action = SignalAction.HOLD
+            output.confidence = ConfidenceLevel.LOW
+            output.reason = (
+                f"[SIGNAL] WAIT Sentiment conflict: Red Folder event active. "
+                f"Vision proposed {proposed} but news kills the entry. Standing aside."
+            )
+            logger.warning("[CRO] Sentiment guardrail: Red Folder blocked %s signal", proposed)
+            return output
+
+        # Softer conflict: negative sentiment disagrees with Vision direction
+        sentiment_bias = str(news_context.get("sentiment_bias", "")).upper()
+        if sentiment_bias and sentiment_bias != output.action.value:
+            # Vision says BUY but news is bearish (or vice versa) — downgrade confidence
+            if output.confidence in (ConfidenceLevel.HIGH, ConfidenceLevel.VERY_HIGH):
+                prev = output.confidence
+                output.confidence = ConfidenceLevel.MEDIUM
+                output.reason = (
+                    f"{output.reason} | Sentiment conflict: news bias is {sentiment_bias}, "
+                    f"downgraded from {prev.value} to MEDIUM."
+                )
+                logger.info(
+                    "[CRO] Sentiment/Vision conflict: news=%s vs signal=%s — confidence downgraded",
+                    sentiment_bias, output.action.value,
+                )
+        return output
 
     def _apply_vision_guardrails(
         self,

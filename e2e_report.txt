@@ -1,5 +1,5 @@
-Tests: 23
+Tests: 22
 Passed: 22
-Failed: 1
-Warnings: 0
-Status: NEEDS FIXES
+Failed: 0
+Warnings: 2
+Status: PRODUCTION READY

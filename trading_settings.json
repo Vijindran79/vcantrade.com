@@ -1,10 +1,6 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "BTCUSD",
-    "ETHUSD",
-    "XRPUSD",
-    "SOLUSD",
     "BTC-USD",
     "ETC-USD",
     "XRP-USD",

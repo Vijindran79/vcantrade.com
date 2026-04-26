@@ -130,6 +130,7 @@ class BrowserAgent:
         """
         Navigate to TradingView chart for specific ticker.
         Uses fast load strategy or 'Warm Start' if already on TV.
+        RETRY: Will attempt navigation up to 3 times with 3s delay.
 
         Args:
             ticker: Symbol like BTC-USD, TSLA, EURUSD=X
@@ -160,6 +161,24 @@ class BrowserAgent:
         # Give the browser a moment to breathe between symbol switches
         await asyncio.sleep(2)
 
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = await self._navigate_once(ticker, tv_symbol)
+                if result:
+                    return True
+            except Exception as e:
+                logger.warning(f"[WARN] Navigation attempt {attempt}/{max_retries} failed for {ticker}: {e}")
+            
+            if attempt < max_retries:
+                logger.info(f"[RETRY] Waiting 3s before navigation retry {attempt + 1}...")
+                await asyncio.sleep(3)
+        
+        logger.error(f"[FAIL] Navigation failed for {ticker} after {max_retries} attempts")
+        return False
+
+    async def _navigate_once(self, ticker: str, tv_symbol: str) -> bool:
+        """Single navigation attempt (Warm Start or Cold Start)."""
         current_url = await self.get_current_url()
         
         # WARM START LOGIC: If already on a TradingView chart, use keyboard RPA to flip symbol
@@ -209,7 +228,7 @@ class BrowserAgent:
     async def get_live_price(self) -> float:
         """
         Read the current live price from the TradingView chart.
-        Uses multiple selector strategies for reliability.
+        Uses multiple selector strategies for reliability including aria-label and JS fallback.
 
         Returns:
             Current price as float, or 0.0 if failed
@@ -217,12 +236,27 @@ class BrowserAgent:
         try:
             import asyncio
             
-            # Try multiple selectors that TradingView might use
+            # ROBUST SELECTORS: Try aria-label, class, and data-attribute based selectors
             selectors_to_try = [
+                # TradingView last-price container (most reliable)
+                '[aria-label*="Last"]',
+                '[aria-label*="last"]',
+                '[aria-label*="Price"]',
+                '[aria-label*="price"]',
+                # Common TV class names
                 '.js-symbol-last',
                 '.tv-symbol-price',
+                '.last-price',
+                '.last-price-value',
+                '[class*="lastPrice"]',
+                '[class*="last-price"]',
+                '[class*="current-price"]',
+                # Data test IDs
                 '[data-testid="qsp-price"]',
+                '[data-name="last-price"]',
+                # Generic price spans
                 'span[class*="price"]',
+                'div[class*="price"]',
             ]
             
             for selector in selectors_to_try:
@@ -234,15 +268,40 @@ class BrowserAgent:
                     if price_elem:
                         price_text = await price_elem.inner_text()
                         # Clean up: remove commas, currency symbols, etc.
-                        price_text = price_text.replace(',', '').replace('$', '').strip()
-                        if price_text and price_text.replace('.', '').isdigit():
+                        price_text = price_text.replace(',', '').replace('$', '').replace('€', '').replace('£', '').strip()
+                        if price_text and price_text.replace('.', '').replace('-', '').isdigit():
                             price = float(price_text)
                             logger.info(f"[CHART] Live price fetched: ${price:.2f}")
                             return price
                 except Exception:
                     continue  # Try next selector
             
-            # Last resort: try to extract price from page title or URL
+            # JAVASCRIPT FALLBACK: Search DOM for price-like text near the symbol header
+            try:
+                price_from_js = await self.page.evaluate("""() => {
+                    // Look for elements that contain a number with 2+ decimals (price pattern)
+                    const allElements = document.querySelectorAll('span, div');
+                    for (const el of allElements) {
+                        const text = el.textContent.trim();
+                        // Match patterns like 123.45, 1,234.56, 0.1234
+                        if (/^\\d{1,3}(,\\d{3})*\\.?\\d+$|^\\d+\\.\\d{2,}$/.test(text)) {
+                            const num = parseFloat(text.replace(/,/g, ''));
+                            if (num > 0 && num < 1000000) {
+                                return text;
+                            }
+                        }
+                    }
+                    return null;
+                }""")
+                if price_from_js:
+                    price_text = price_from_js.replace(',', '').strip()
+                    price = float(price_text)
+                    logger.info(f"[CHART] Live price fetched via JS fallback: ${price:.2f}")
+                    return price
+            except Exception:
+                pass
+            
+            # Last resort: try to extract price from page title
             logger.warning("[WARN] Price element not found - returning 0.0")
             return 0.0
             
@@ -477,20 +536,58 @@ class BrowserAgent:
             else:
                 logger.info("[CHART] Already on TradingView - scraping current tab for %s", symbol)
 
-            # Try multiple selectors with short timeout (don't hang if page is loaded but widgets aren't)
-            selectors = ['.js-symbol-last', '.tv-symbol-price', '[data-testid="qsp-price"]', 'span[class*="price"]']
+            # ROBUST SELECTORS: Try aria-label, class, and data-attribute based selectors
+            selectors = [
+                '[aria-label*="Last"]',
+                '[aria-label*="last"]',
+                '[aria-label*="Price"]',
+                '[aria-label*="price"]',
+                '.js-symbol-last',
+                '.tv-symbol-price',
+                '.last-price',
+                '.last-price-value',
+                '[class*="lastPrice"]',
+                '[class*="last-price"]',
+                '[class*="current-price"]',
+                '[data-testid="qsp-price"]',
+                '[data-name="last-price"]',
+                'span[class*="price"]',
+                'div[class*="price"]',
+            ]
             price = 0.0
             for sel in selectors:
                 try:
                     elem = await self.page.query_selector(sel)
                     if elem:
                         price_text = await elem.inner_text()
-                        price_text = price_text.replace(',', '').replace('$', '').strip()
+                        price_text = price_text.replace(',', '').replace('$', '').replace('€', '').replace('£', '').strip()
                         if price_text and price_text.replace('.', '').replace('-', '').isdigit():
                             price = float(price_text)
                             break
                 except Exception:
                     continue
+            
+            # JS FALLBACK for TradingView price
+            if price <= 0:
+                try:
+                    price_from_js = await self.page.evaluate("""() => {
+                        const allElements = document.querySelectorAll('span, div');
+                        for (const el of allElements) {
+                            const text = el.textContent.trim();
+                            if (/^\\d{1,3}(,\\d{3})*\\.?\\d+$|^\\d+\\.\\d{2,}$/.test(text)) {
+                                const num = parseFloat(text.replace(/,/g, ''));
+                                if (num > 0 && num < 1000000) {
+                                    return text;
+                                }
+                            }
+                        }
+                        return null;
+                    }""")
+                    if price_from_js:
+                        price_text = price_from_js.replace(',', '').strip()
+                        price = float(price_text)
+                except Exception:
+                    pass
 
             if price <= 0:
                 raise ValueError("Price element not found")
@@ -592,12 +689,78 @@ class BrowserAgent:
                 "error": "All sources failed",
             }
 
+    async def _wait_for_chart_ready(self, timeout_ms: int = 10000):
+        """
+        Verify that the chart candles are actually visible before taking a screenshot.
+        Waits up to timeout_ms for loading spinners to disappear and canvas to appear.
+        """
+        import asyncio
+        start_time = asyncio.get_event_loop().time()
+        timeout_sec = timeout_ms / 1000.0
+        
+        while (asyncio.get_event_loop().time() - start_time) < timeout_sec:
+            try:
+                # Check if any loading indicators are present
+                loading_selectors = [
+                    '[class*="loading"]',
+                    '[class*="spinner"]',
+                    '[class*="progress"]',
+                    '.tv-loading-indicator',
+                    '[data-loading="true"]',
+                ]
+                any_loading = False
+                for sel in loading_selectors:
+                    try:
+                        elem = await self.page.query_selector(sel)
+                        if elem and await elem.is_visible():
+                            any_loading = True
+                            break
+                    except Exception:
+                        continue
+                
+                if any_loading:
+                    logger.debug("[CHART] Waiting for loading indicator to disappear...")
+                    await asyncio.sleep(0.5)
+                    continue
+                
+                # Check if chart canvas or candle elements are visible
+                chart_selectors = [
+                    'canvas',
+                    '[class*="chart"]',
+                    '[class*="candle"]',
+                    '[class*="pane"]',
+                    '[data-name="chart"]',
+                ]
+                chart_visible = False
+                for sel in chart_selectors:
+                    try:
+                        elem = await self.page.query_selector(sel)
+                        if elem and await elem.is_visible():
+                            chart_visible = True
+                            break
+                    except Exception:
+                        continue
+                
+                if chart_visible:
+                    logger.info("[CHART] Chart is ready — candles visible")
+                    return
+                
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.debug(f"[CHART] Chart readiness check error: {e}")
+                await asyncio.sleep(0.5)
+        
+        logger.warning("[CHART] Chart readiness timeout — proceeding with screenshot anyway")
+
     async def take_screenshot(self, save_path: str = None) -> Optional[str]:
-        """Take a screenshot and return as base64."""
+        """Take a screenshot and return as base64. Waits for chart to be fully loaded first."""
         if not self.page:
             return None
 
         try:
+            # PAGE STATE CHECK: Wait for chart candles to be visible before screenshot
+            await self._wait_for_chart_ready()
+            
             screenshot_bytes = await self.page.screenshot(full_page=True)
             base64_screenshot = base64.b64encode(screenshot_bytes).decode('utf-8')
 

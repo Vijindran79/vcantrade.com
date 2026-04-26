@@ -104,10 +104,14 @@ class PositionSizer:
     - If the stop distance exceeds ``MAX_STOP_DISTANCE_PCT`` the trade is
       flagged *Too Risky* and ``evaluate()`` returns ``ok=False``.
     - Respects ``open_risk`` so total exposure never exceeds account capacity.
+    - **Hard cap**: SL risk never exceeds 1.5% of total equity.
+    - **TP calculated**: Default 2:1 reward-to-risk ratio.
     """
 
     MAX_STOP_DISTANCE_PCT: float = 5.0  # Hard cap; above this -> rejected
+    MAX_RISK_PCT_OF_EQUITY: float = 1.5  # Hard cap: SL ≤ 1.5% of total equity
     SL_BUFFER: float = 0.002            # 0.2% beyond S/R level
+    DEFAULT_RR_RATIO: float = 2.0       # Default reward-to-risk for TP
 
     def __init__(self, balance: float, risk_pct: float = 1.0, open_risk: float = 0.0):
         self.balance = max(0.0, balance)
@@ -178,8 +182,26 @@ class PositionSizer:
         # --- Size the position at exactly 1% risk of AVAILABLE balance ---
         available_balance = max(0.0, self.balance - self.open_risk)
         risk_amount = available_balance * (self.risk_pct / 100.0)
+
+        # HARD CAP: Risk never exceeds MAX_RISK_PCT_OF_EQUITY of total equity
+        max_risk_allowed = self.balance * (self.MAX_RISK_PCT_OF_EQUITY / 100.0)
+        if risk_amount > max_risk_allowed:
+            risk_amount = max_risk_allowed
+            logger.warning(
+                "[RISK] Risk amount capped at %.1f%% of equity ($%.2f)",
+                self.MAX_RISK_PCT_OF_EQUITY, risk_amount,
+            )
+
         per_unit_risk = abs(entry_price - stop_loss)
         quantity = risk_amount / per_unit_risk if per_unit_risk > 0 else 0.0
+
+        # --- Calculate Take-Profit (2:1 reward-to-risk default) ---
+        risk_distance = abs(entry_price - stop_loss)
+        tp_distance = risk_distance * self.DEFAULT_RR_RATIO
+        if side_up == "BUY":
+            take_profit = entry_price + tp_distance
+        else:
+            take_profit = entry_price - tp_distance
 
         return {
             "ok": True,
@@ -188,8 +210,12 @@ class PositionSizer:
             "risk_score": "Low",
             "risk_amount": risk_amount,
             "quantity": quantity,
+            "take_profit": take_profit,
+            "tp_distance_pct": abs(take_profit - entry_price) / entry_price * 100.0,
+            "rr_ratio": self.DEFAULT_RR_RATIO,
             "reason": (
                 f"Stop @ ${stop_loss:.4f} ({stop_distance_pct:.2f}% distance) "
+                f"| TP @ ${take_profit:.4f} ({self.DEFAULT_RR_RATIO:.0f}:1 RR) "
                 f"| Risk ${risk_amount:.2f} (avail=${max(0.0, self.balance - self.open_risk):.2f})"
             ),
         }

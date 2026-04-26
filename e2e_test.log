@@ -1,33 +1,128 @@
-2026-04-21 11:48:56,362 [INFO] Prop Firm Rule Engine initialized: TopStep
-2026-04-21 11:48:56,362 [INFO] Rules: Daily Loss=$150.0, Drawdown=$3000.0, Target=$3000.0
-2026-04-21 11:48:56,364 [INFO] 😈 Devil's Advocate agent initialized
-2026-04-21 11:48:56,364 [INFO] 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
-2026-04-21 11:48:56,365 [INFO] 🧠 Analyzing BTC-USD with qwen2.5:latest
-2026-04-21 11:48:56,672 [INFO] 🕐 Market Session Detector initialized with Holiday Awareness
-2026-04-21 11:48:56,672 [INFO] 🧠 Calling local brain: qwen2.5:latest (timeout=90s)
-2026-04-21 11:49:00,799 [INFO] ✅ Local brain responded successfully
-2026-04-21 11:49:00,800 [INFO] 🧠 Calling local brain: qwen2.5:latest (timeout=90s)
-2026-04-21 11:49:04,321 [INFO] ✅ Local brain responded successfully
-2026-04-21 11:49:04,322 [INFO] 🧠 Calling local brain: qwen2.5:latest (timeout=90s)
-2026-04-21 11:49:11,579 [INFO] ✅ Local brain responded successfully
-2026-04-21 11:49:38,510 [INFO] 😈 Devil's Advocate: STRONG_AVOID - 3 reasons found
-2026-04-21 11:49:38,510 [WARNING] 😈 Devil's Advocate PENALTY: -0.01 | Reasons: ['RSI Oversold Condition: The RSI value of 35.0 indicates an oversold condition, but the signal is based on a single indicator without considering other technical factors such as MACD or Stochastic Oscillator.', 'High Entry Price: Entering at $85,000 when the market is already near all-time highs introduces significant risk and could lead to quick profit-taking if sentiment shifts.', 'Lack of Volume Confirmation: The trade signal does not mention any volume confirmation, which can be a critical factor in confirming trend continuation.']
-2026-04-21 11:49:38,511 [INFO] ✅ Analysis complete: BUY BTC-USD
-2026-04-21 11:49:42,342 [INFO] ✅ Settings loaded from trading_settings.json
-2026-04-21 11:49:43,188 [INFO] Command Center initialized - Professional Trading Mode
-2026-04-21 11:49:43,432 [INFO] 😈 Devil's Advocate agent initialized
-2026-04-21 11:49:43,432 [INFO] 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
-2026-04-21 11:49:44,270 [INFO] 😈 Devil's Advocate agent initialized
-2026-04-21 11:49:44,270 [INFO] 🧠 Local Brain initialized: qwen2.5:latest at http://localhost:11434
-2026-04-21 11:49:44,270 [INFO] 🏗️ Code Architect initialized
-2026-04-21 11:49:44,270 [INFO] 🕐 Market Session Detector initialized with Holiday Awareness
-2026-04-21 11:49:44,270 [INFO] ☁️ Cloud Scanner initialized with Market Session Awareness
-2026-04-21 11:49:44,270 [INFO] Circuit breaker: 20 consecutive errors before alert
-2026-04-21 11:49:44,666 [INFO] Signal Dispatcher initialized on port 17199
-2026-04-21 11:49:44,675 [INFO] No calibration file found — using defaults
-2026-04-21 11:49:44,772 [INFO] RPA Hand: PyAutoGUI & PyGetWindow initialized
-2026-04-21 11:49:44,773 [INFO] Trade ledger initialized
-2026-04-21 11:49:44,773 [INFO] [TEACHER MODE] Signal: SignalAction.BUY XAUUSD=X - Test signal
-2026-04-21 11:49:44,774 [CRITICAL] KILL SWITCH ACTIVATED
-2026-04-21 11:49:44,774 [WARNING] KILL SWITCH ACTIVE - Trading halted
-2026-04-21 11:49:44,774 [INFO] Kill switch deactivated
+2026-04-26 02:46:53,217 [INFO] ======================================================================
+2026-04-26 02:46:53,217 [INFO] VCANITRADE AI - END-TO-END SYSTEM TEST
+2026-04-26 02:46:53,218 [INFO] ======================================================================
+2026-04-26 02:46:53,218 [INFO] 
+2026-04-26 02:46:53,218 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:53,218 [INFO] TEST 1: Configuration
+2026-04-26 02:46:53,218 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:53,230 [INFO] [OK] Config loaded
+2026-04-26 02:46:53,230 [INFO] [OK] PROP_FIRM: Apex Trader Funding
+2026-04-26 02:46:53,230 [INFO] [OK] OLLAMA_URL: http://127.0.0.1:11434
+2026-04-26 02:46:53,231 [INFO] [OK] MODEL: qwen2.5:latest
+2026-04-26 02:46:53,231 [INFO] [OK] SCANNER: ENABLED
+2026-04-26 02:46:53,231 [INFO] [OK] Tickers: 3
+2026-04-26 02:46:53,231 [INFO]    -> ['BTC-USD', 'ES=F', 'NQ=F']
+2026-04-26 02:46:53,231 [INFO] 
+2026-04-26 02:46:53,231 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:53,232 [INFO] TEST 2: Ollama AI Connection
+2026-04-26 02:46:53,232 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:54,114 [INFO] [OK] Ollama responds
+2026-04-26 02:46:54,114 [INFO]    -> Reply: Trading Ready Now
+2026-04-26 02:46:54,114 [INFO] 
+2026-04-26 02:46:54,114 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:54,115 [INFO] TEST 3: Market Scanner (Live Data)
+2026-04-26 02:46:54,115 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:56,016 [INFO] [OK] Settings loaded from trading_settings.json
+2026-04-26 02:46:56,368 [INFO] [DEVIL] Devil's Advocate agent initialized
+2026-04-26 02:46:56,368 [INFO] [BRAIN] Local Brain initialized: qwen2.5:latest at http://127.0.0.1:11434
+2026-04-26 02:46:56,759 [INFO] [DEVIL] Devil's Advocate agent initialized
+2026-04-26 02:46:56,759 [INFO] [BRAIN] Local Brain initialized: qwen2.5:latest at http://127.0.0.1:11434
+2026-04-26 02:46:56,759 [INFO] [EMOJI] Code Architect initialized
+2026-04-26 02:46:56,759 [INFO] [CLOCK] Market Session Detector initialized with Holiday Awareness
+2026-04-26 02:46:56,759 [INFO] [CLOUD] UI mode detected — MT5 initialization skipped
+2026-04-26 02:46:56,759 [INFO] [CLOUD] Cloud Scanner initialized with Market Session Awareness
+2026-04-26 02:46:56,759 [INFO] Circuit breaker: 20 consecutive errors before alert
+2026-04-26 02:46:56,759 [INFO] [CLOCK] [WEEKEND SKIP] Skipping 2 closed-market symbols: ES=F, NQ=F
+2026-04-26 02:46:56,759 [INFO] [CLOCK] SUNDAY MODE: Markets closed. Crypto only.
+2026-04-26 02:46:56,759 [INFO] [CLOCK] [WEEKEND MODE] Markets closed. Scanning 1 crypto tickers only.
+2026-04-26 02:46:57,022 [INFO] [CRYPTO] Fetching BTC-USD from Yahoo Finance (1d/1m)
+2026-04-26 02:46:57,364 [INFO] [CRYPTO] Yahoo Finance returned 107 bars for BTC-USD | last=77542.49
+2026-04-26 02:46:57,851 [INFO] [SCANNER] BTC-USD Direction: DOWN (-0.02%) | RSI: 45
+2026-04-26 02:46:57,853 [INFO] [DROP] Liquidity zone detected for BTC-USD: equal_highs @ 77542.4297
+2026-04-26 02:46:57,862 [INFO] [LIQUIDITY] BTC-USD | Price: 77542.49 | Active Demand: 21 | Active Supply: 30 | FVGs: 9+4 | Pools: 1040
+2026-04-26 02:46:57,865 [INFO] [OK] Scanned 3 tickers
+2026-04-26 02:46:57,865 [WARNING] [WARN] No live signals detected
+2026-04-26 02:46:57,865 [WARNING]    -> Market conditions may simply be quiet right now.
+2026-04-26 02:46:57,865 [INFO] 
+2026-04-26 02:46:57,866 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:57,866 [INFO] TEST 4: AI Analysis (Swarm Consensus)
+2026-04-26 02:46:57,866 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:46:57,866 [INFO] [DEVIL] Devil's Advocate agent initialized
+2026-04-26 02:46:57,866 [INFO] [BRAIN] Local Brain initialized: qwen2.5:latest at http://127.0.0.1:11434
+2026-04-26 02:46:58,116 [INFO] [DEVIL] Devil's Advocate agent initialized
+2026-04-26 02:46:58,116 [INFO] [BRAIN] Local Brain initialized: qwen2.5:latest at http://127.0.0.1:11434
+2026-04-26 02:46:58,116 [INFO] [EMOJI] Code Architect initialized
+2026-04-26 02:46:58,116 [INFO] [CLOCK] Market Session Detector initialized with Holiday Awareness
+2026-04-26 02:46:58,116 [INFO] [CLOUD] UI mode detected — MT5 initialization skipped
+2026-04-26 02:46:58,117 [INFO] [CLOUD] Cloud Scanner initialized with Market Session Awareness
+2026-04-26 02:46:58,117 [INFO] Circuit breaker: 20 consecutive errors before alert
+2026-04-26 02:46:58,118 [INFO] [CLOCK] [WEEKEND SKIP] Skipping 2 closed-market symbols: ES=F, NQ=F
+2026-04-26 02:46:58,118 [INFO] [CLOCK] SUNDAY MODE: Markets closed. Crypto only.
+2026-04-26 02:46:58,118 [INFO] [CLOCK] [WEEKEND MODE] Markets closed. Scanning 1 crypto tickers only.
+2026-04-26 02:46:58,119 [INFO] [CRYPTO] Fetching BTC-USD from Yahoo Finance (1d/1m)
+2026-04-26 02:46:58,220 [INFO] [CRYPTO] Yahoo Finance returned 107 bars for BTC-USD | last=77542.49
+2026-04-26 02:46:58,224 [INFO] [SCANNER] BTC-USD Direction: DOWN (-0.02%) | RSI: 45
+2026-04-26 02:46:58,226 [INFO] [DROP] Liquidity zone detected for BTC-USD: equal_highs @ 77542.4297
+2026-04-26 02:46:58,236 [INFO] [LIQUIDITY] BTC-USD | Price: 77542.49 | Active Demand: 21 | Active Supply: 30 | FVGs: 9+4 | Pools: 1040
+2026-04-26 02:46:58,238 [WARNING] [WARN] No live signal available for AI test
+2026-04-26 02:46:58,240 [WARNING]    -> Falling back to a synthetic signal.
+2026-04-26 02:46:58,240 [INFO] [BRAIN] Analyzing BTC-USD with qwen2.5:latest
+2026-04-26 02:46:58,240 [INFO] [CLOCK] Market Session Detector initialized with Holiday Awareness
+2026-04-26 02:46:58,240 [INFO] [CLOCK] SUNDAY MODE: Markets closed. Crypto only.
+2026-04-26 02:46:58,240 [INFO] [BRAIN] Calling local brain: qwen2.5:latest (timeout=180s)
+2026-04-26 02:47:02,468 [INFO] [OK] Local brain responded successfully
+2026-04-26 02:47:02,468 [INFO] [BRAIN] Calling local brain: qwen2.5:latest (timeout=180s)
+2026-04-26 02:47:05,735 [INFO] [OK] Local brain responded successfully
+2026-04-26 02:47:05,735 [INFO] [BRAIN] Calling local brain: qwen2.5:latest (timeout=180s)
+2026-04-26 02:47:13,510 [INFO] [OK] Local brain responded successfully
+2026-04-26 02:47:34,283 [INFO] [DEVIL] Devil's Advocate: CAUTIOUS - 3 reasons found
+2026-04-26 02:47:34,283 [WARNING] [DEVIL] Devil's Advocate PENALTY: -0.01 | Reasons: ['The trade is suggested during a period of lower volume, which can lead to wider spreads and increased slippage, making it riskier.', 'The RSI is at an oversold level (35.0), but the signal strength is only 0.75, indicating that the momentum might not be strong enough to sustain a significant move in the desired direction.', 'Given the current time and day (Sunday, late evening UTC), there may be limited market participants, which could result in less liquidity and higher volatility.']
+2026-04-26 02:47:34,283 [INFO] [OK] Analysis complete: BUY BTC-USD
+2026-04-26 02:47:34,283 [INFO] [OK] AI analysis (synthetic)
+2026-04-26 02:47:34,283 [INFO]    -> Action: BUY, Confidence: MEDIUM
+2026-04-26 02:47:34,283 [INFO] 
+2026-04-26 02:47:34,283 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:47:34,283 [INFO] TEST 5: Prop Firm Rule Engine (The Professor)
+2026-04-26 02:47:34,283 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:47:34,286 [INFO] Prop Firm Rule Engine initialized: TopStep
+2026-04-26 02:47:34,286 [INFO] Rules: Daily Loss=$150.0, Drawdown=$3000.0, Target=$3000.0
+2026-04-26 02:47:34,286 [INFO] [OK] Prop firm allows trade
+2026-04-26 02:47:34,286 [INFO]    -> Violations: []
+2026-04-26 02:47:34,286 [INFO] [OK] Prop firm blocks after daily loss
+2026-04-26 02:47:34,286 [INFO]    -> Violations: ['[FAIL] DAILY LOSS LIMIT: $200.00 / $150.00', '[FAIL] TRADE WOULD EXCEED DAILY LIMIT: -$10.00 would put you at $-210.00']
+2026-04-26 02:47:34,286 [INFO] [OK] Dashboard data works
+2026-04-26 02:47:34,287 [INFO]    -> Balance: $50,000.00
+2026-04-26 02:47:34,287 [INFO] 
+2026-04-26 02:47:34,287 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:47:34,287 [INFO] TEST 6: Position Lifecycle
+2026-04-26 02:47:34,287 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:47:34,287 [INFO] [OK] Position created
+2026-04-26 02:47:34,287 [INFO]    -> BUY BTC-USD @ $85,000.00
+2026-04-26 02:47:34,287 [INFO] [OK] TP set above entry
+2026-04-26 02:47:34,289 [INFO]    -> TP: $86,700.00
+2026-04-26 02:47:34,289 [INFO] [OK] SL set below entry
+2026-04-26 02:47:34,289 [INFO]    -> SL: $84,150.00
+2026-04-26 02:47:34,289 [INFO] [OK] TP would trigger
+2026-04-26 02:47:34,289 [INFO]    -> Current: $87,000.00 >= TP: $86,700.00
+2026-04-26 02:47:34,289 [INFO] [OK] SL would trigger
+2026-04-26 02:47:34,289 [INFO]    -> Current: $84,000.00 <= SL: $84,150.00
+2026-04-26 02:47:34,289 [INFO] 
+2026-04-26 02:47:34,289 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:47:34,289 [INFO] TEST 7: UI Components
+2026-04-26 02:47:34,290 [INFO] [EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI][EMOJI]
+2026-04-26 02:47:34,337 [INFO] [OK] Qt initialized
+2026-04-26 02:47:34,471 [INFO] Command Center initialized - Professional Trading Mode
+2026-04-26 02:47:34,472 [INFO] [OK] Dashboard created
+2026-04-26 02:47:34,472 [INFO] [OK] Balance update works
+2026-04-26 02:47:34,474 [INFO] [OK] Trade log entry works
+2026-04-26 02:47:34,474 [INFO] [OK] Signal dialog imports
+2026-04-26 02:47:34,474 [INFO] 
+2026-04-26 02:47:34,474 [INFO] ======================================================================
+2026-04-26 02:47:34,475 [INFO] FINAL RESULTS
+2026-04-26 02:47:34,475 [INFO] ======================================================================
+2026-04-26 02:47:34,475 [INFO] Total Tests: 22
+2026-04-26 02:47:34,475 [INFO] [OK] Passed: 22
+2026-04-26 02:47:34,475 [INFO] [FAIL] Failed: 0
+2026-04-26 02:47:34,475 [INFO] [WARN] Warnings: 2
+2026-04-26 02:47:34,475 [INFO] 
+2026-04-26 02:47:34,475 [INFO] [CELEBRATE] ALL TESTS PASSED - SYSTEM IS PRODUCTION READY!
