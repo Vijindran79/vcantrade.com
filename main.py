@@ -745,46 +745,39 @@ class MultiAssetHunterThread(QThread):
         self.index = 0
 
     def run(self):
-        from core.market_sessions import is_weekend_closed
+        from core.market_sessions import is_crypto_ticker
         from datetime import timezone
 
-        # Use UTC-aware time checks for market transitions
-        now_utc = datetime.now(timezone.utc)
-        weekday = now_utc.weekday()
-        hour_utc = now_utc.hour
-
-        # Automatic Switchboard Flip:
-        # Saturday = weekend mode (crypto only)
-        # Sunday before 23:00 UTC = weekend mode
-        # Sunday 23:00 UTC+ = normal mode resumes
-        is_weekend = (weekday == 5) or (weekday == 6 and hour_utc < 23)
-
-        # Weekend: pull from the live watchlist (crypto) instead of MULTI_ASSET_TICKERS
-        if is_weekend:
-            watchlist = getattr(self.app, "current_watchlist", [])
-            if watchlist:
-                active_symbols = [s for s in watchlist if not is_weekend_closed(s)]
-                logger.info("[HUNTER] Weekend mode: Hunter using session watchlist: %s", active_symbols)
-            else:
-                active_symbols = []
-            # Reset Monday re-sync flag so it triggers again next week
-            if getattr(self.app, "_monday_resync_done", False):
-                self.app._monday_resync_done = False
-                logger.info("[RESYNC] Monday re-sync flag reset for next week")
-        else:
-            active_symbols = list(self.symbols)
-
-        if not active_symbols:
-            logger.info("[HUNTER] No active symbols to hunt. Hunter paused.")
-            return
-
-        # Monday State Re-Sync (Anti-Ghosting):
-        # On first weekday scan after weekend, clear stale signals and re-sync account.
-        if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
-            self._perform_monday_resync()
-
-        logger.info("[HUNTER] Multi-Asset Hunter started. Symbols: %s", active_symbols)
+        logger.info("[HUNTER] Multi-Asset Hunter thread started")
         while self.running:
+            # RECOMPUTE active symbols EACH cycle based on current UTC time
+            now_utc = datetime.now(timezone.utc)
+            weekday = now_utc.weekday()
+            hour_utc = now_utc.hour
+
+            # Automatic Switchboard Flip:
+            # Saturday = weekend mode (crypto only)
+            # Sunday before 22:00 UTC = weekend mode (CME closed until ~22:15)
+            # Sunday 22:00 UTC+ = normal mode resumes
+            is_weekend = (weekday == 5) or (weekday == 6 and hour_utc < 22)
+
+            if is_weekend:
+                watchlist = getattr(self.app, "current_watchlist", [])
+                # Only crypto on weekends — MNQ/MES/OIL are closed
+                active_symbols = [s for s in watchlist if is_crypto_ticker(s)]
+                if not active_symbols:
+                    active_symbols = ["BTC-USD"]  # Fallback: always scan at least BTC
+                logger.debug("[HUNTER] Weekend mode: only crypto: %s", active_symbols)
+            else:
+                # Weekday: merge watchlist + multi-asset tickers, deduplicated
+                watchlist = getattr(self.app, "current_watchlist", [])
+                all_symbols = list(set(watchlist + list(self.symbols)))
+                active_symbols = all_symbols
+
+            # Monday State Re-Sync (Anti-Ghosting)
+            if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
+                self._perform_monday_resync()
+
             symbol = active_symbols[self.index % len(active_symbols)]
             self._cycle_symbol(symbol)
             self.index = (self.index + 1) % len(active_symbols)
@@ -801,8 +794,8 @@ class MultiAssetHunterThread(QThread):
             from core.market_sessions import is_weekend_closed
             from datetime import timezone
             now_utc = datetime.now(timezone.utc)
-            # Saturday = weekend, Sunday before 23:00 UTC = weekend
-            is_weekend_now = (now_utc.weekday() == 5) or (now_utc.weekday() == 6 and now_utc.hour < 23)
+            # Saturday = weekend, Sunday before 22:00 UTC = weekend (CME closed)
+            is_weekend_now = (now_utc.weekday() == 5) or (now_utc.weekday() == 6 and now_utc.hour < 22)
             if is_weekend_now and is_weekend_closed(symbol):
                 logger.debug("[HUNTER] Skipping weekend-closed symbol: %s", symbol)
                 return

@@ -289,9 +289,9 @@ class MarketSessionDetector:
         Weekend override check with Automatic Switchboard Flip.
         Returns True if:
           - Saturday (any time)
-          - Sunday before 23:00 UTC
+          - Sunday before 22:00 UTC (CME opens at 22:15 UTC)
         Returns False if:
-          - Sunday 23:00 UTC or later (futures resume)
+          - Sunday 22:00 UTC or later (futures resume)
           - Monday-Friday
         """
         now = self.get_current_datetime()
@@ -299,9 +299,9 @@ class MarketSessionDetector:
         if weekday == 5:  # Saturday = always weekend
             return True
         if weekday == 6:  # Sunday
-            # Before 23:00 UTC = weekend mode
-            # At/after 23:00 UTC = normal mode resumes
-            return now.hour < 23
+            # Before 22:00 UTC = weekend mode (CME closed)
+            # At/after 22:00 UTC = normal mode resumes
+            return now.hour < 22
         return False
 
     def is_sunday_transition_complete(self) -> bool:
