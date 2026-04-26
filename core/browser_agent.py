@@ -62,24 +62,10 @@ class BrowserAgent:
     def is_browser_busy(self) -> bool:
         """STURDY BRIDGE: Check if the browser is currently busy (navigating or loading).
         Returns True if the bot should SKIP this cycle and wait for the next one.
-        This prevents crashes when the user is manually interacting with the chart.
-        Thread-safe: uses _navigating flag (no async calls needed)."""
-        # Check navigation lock flag first (fast, thread-safe)
+        Thread-safe: uses only the _navigating boolean flag (no async/page.evaluate calls)."""
         if self._navigating:
             logger.debug("[BRIDGE] Browser is navigating — skipping cycle")
             return True
-        # Quick DOM readiness check — only if page is accessible
-        # NOTE: page.evaluate() can only be called on the browser event loop thread,
-        # so we use a lightweight JS check wrapped in broad exception handling.
-        # If it fails (threading issue), we assume NOT busy and proceed.
-        if self.page:
-            try:
-                ready_state = self.page.evaluate("() => document.readyState")
-                if ready_state != "complete":
-                    logger.debug("[BRIDGE] Page readyState=%s — skipping cycle", ready_state)
-                    return True
-            except Exception:
-                pass  # Threading mismatch or page unavailable — assume not busy
         return False
 
     def _install_safe_dialog_handler(self):

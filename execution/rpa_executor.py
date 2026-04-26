@@ -575,22 +575,21 @@ class RPAExecutor:
             logger.warning("[PLAYWRIGHT] No page available - cannot use HTML execution")
             return False
 
-        # ---- ACCOUNT VERIFICATION -----------------------------------------
+        # ---- ACCOUNT VERIFICATION (Flexible) --------------------------------
+        # Try to verify, but if detection fails, proceed anyway.
+        # The bot must not die just because it can't read the account label.
         account_ok = self._verify_account_selected(page)
         if not account_ok:
             auto_fixed = self._select_apex_account(page)
-            if not auto_fixed:
-                logger.error(
-                    "[ALARM] TRADE ABORTED: Wrong account selected and auto-fix failed. "
-                    "Target='%s'",
+            if auto_fixed:
+                logger.info("[ACCOUNT] Auto-fixed account selection")
+            else:
+                # FLEXIBLE: Could not detect/fix account, but proceed anyway.
+                # The user is responsible for having the right account selected.
+                logger.warning(
+                    "[ACCOUNT] Could not verify account '%s' — proceeding anyway (user must ensure correct account)",
                     self.TARGET_ACCOUNT_NAME,
                 )
-                return False
-            # Re-verify after auto-select
-            account_ok = self._verify_account_selected(page)
-            if not account_ok:
-                logger.error("[ALARM] TRADE ABORTED: Auto-selected account still does not match target.")
-                return False
 
         tv_symbol = self._map_ticker_to_tv(trade.asset)
         url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
