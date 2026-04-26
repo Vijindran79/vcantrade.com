@@ -176,24 +176,14 @@ class RPAExecutor:
 
     def _click_via_html(self, action, page):
         """Click Buy/Sell via Playwright MOUSE ONLY. No keyboard shortcuts.
-        Uses physical mouse clicks on button locators or JS fallback."""
+        Uses physical mouse clicks on button locators or JS fallback.
+        NOTE: Global dialog handler in browser_agent dismisses dialogs passively.
+        No per-click handler needed here to avoid ProtocolError collisions."""
         action = self._normalize_action(action)
         if action not in {"BUY", "SELL"}:
             logger.error("[PLAYWRIGHT] Invalid HTML click action: %s", action)
             return False
         action_lower = action.lower()
-
-        # Auto-accept any confirmation dialogs that appear during this trade
-        def dialog_handler(dialog):
-            try:
-                dialog.accept()
-            except Exception as exc:
-                if self._is_missing_dialog_error(exc):
-                    logger.debug("[PLAYWRIGHT] Dialog disappeared before accept; continuing")
-                else:
-                    logger.debug("[PLAYWRIGHT] Dialog accept failed safely: %s", exc)
-
-        page.on("dialog", dialog_handler)
 
         # FORCE FOCUS: bring page to front and click a neutral area
         try:
@@ -209,6 +199,9 @@ class RPAExecutor:
         human_delay = random.uniform(0.5, 1.8)
         logger.info("[STEALTH] Humanized pre-click delay: %.2fs", human_delay)
         time.sleep(human_delay)
+
+        # STRIKE BUFFER: Let UI settle after any popup dismissals before real click
+        time.sleep(0.5)
 
         try:
             # STRATEGY 1: Playwright locator with physical mouse click
@@ -288,12 +281,6 @@ class RPAExecutor:
         except Exception as e:
             logger.error("[PLAYWRIGHT] HTML click failed: %s", e)
             return False
-        finally:
-            # Clean up dialog handler to avoid memory leaks
-            try:
-                page.remove_listener("dialog", dialog_handler)
-            except Exception:
-                pass
 
     def _verify_position_html(self, ticker, page):
         """Verify position opened by checking TradingView DOM."""

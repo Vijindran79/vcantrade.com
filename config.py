@@ -27,6 +27,8 @@ PROP_IS_FUNDED = os.getenv("PROP_IS_FUNDED", "False").lower() == "true"
 
 # ===== ACCOUNT BALANCE (MUST MATCH YOUR PROP FIRM OR BROKER ACCOUNT) =====
 CURRENT_BALANCE = float(os.getenv("CURRENT_BALANCE", "50000.0"))
+# Fallback equity when live scrape fails (e.g., TradingView dashboard unreadable)
+HARDCODED_EQUITY_FALLBACK = float(os.getenv("HARDCODED_EQUITY_FALLBACK", "77500.0"))
 
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
 # PRODUCTION RULE: DRY_RUN defaults to True. You MUST explicitly set DRY_RUN=False in .env to trade live.
@@ -114,13 +116,6 @@ SCAN_INTERVAL = 10
 WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.5"))
 CLOUD_TICKERS = ["BTC-USD", "ES=F", "NQ=F"]
-
-# Sniper gate tuning: allow a strong 5m BUY to pass when 1m is neutral/WAIT.
-MTF_ALLOW_STRONG_5M_BUY_WITH_NEUTRAL_1M = os.getenv(
-    "MTF_ALLOW_STRONG_5M_BUY_WITH_NEUTRAL_1M",
-    "True",
-).lower() == "true"
-MTF_STRONG_BUY_RSI = float(os.getenv("MTF_STRONG_BUY_RSI", "58.0"))
 
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
@@ -239,6 +234,10 @@ FALLBACK_COORDS = {
 # ===== SLIPPAGE GUARD =====
 MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "2.50"))
 MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
+
+# ===== AGGRESSIVE HUNTER =====
+# If signal confidence >= this threshold, skip 1m/3m MTF alignment and strike on 5m alone.
+AGGRESSIVE_HUNTER_CONFIDENCE_PCT = float(os.getenv("AGGRESSIVE_HUNTER_CONFIDENCE_PCT", "75.0"))
 
 # ===== AUTONOMOUS RISK MANAGEMENT =====
 AUTONOMOUS_BREAK_EVEN_TRIGGER_USD = 15.0

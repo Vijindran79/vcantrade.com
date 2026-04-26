@@ -58,31 +58,30 @@ class BrowserAgent:
         return "no dialog is showing" in text or "handlejavascriptdialog" in text
 
     def _install_safe_dialog_handler(self):
-        """Auto-dismiss JavaScript dialogs without letting ProtocolError crash navigation."""
+        """Auto-dismiss JavaScript dialogs without letting ProtocolError crash navigation.
+        Installed once per page at initialization time — passive listener only."""
         if not self.page or self._dialog_handler_page is self.page:
             return
 
-        async def _safe_accept(dialog):
+        async def _safe_dismiss(dialog):
             try:
-                await dialog.accept()
-                logger.debug("[DIALOG] Auto-accepted JavaScript dialog")
-            except Exception as exc:
-                if self._is_missing_dialog_error(exc):
-                    logger.debug("[DIALOG] Dialog disappeared before accept; continuing")
-                else:
-                    logger.debug("[DIALOG] Dialog accept failed safely: %s", exc)
+                await dialog.dismiss()
+                logger.debug("[DIALOG] Auto-dismissed JavaScript dialog")
+            except Exception:
+                # Broad catch: dialog may have already disappeared — never crash
+                pass
 
         def _handler(dialog):
             try:
-                asyncio.create_task(_safe_accept(dialog))
-            except Exception as exc:
-                logger.debug("[DIALOG] Could not schedule dialog handler: %s", exc)
+                asyncio.create_task(_safe_dismiss(dialog))
+            except Exception:
+                pass
 
         try:
             self.page.on("dialog", _handler)
             self._dialog_handler_page = self.page
-        except Exception as exc:
-            logger.debug("[DIALOG] Could not install dialog handler: %s", exc)
+        except Exception:
+            pass
 
     async def get_current_url(self) -> str:
         """Get the current URL of the active browser tab."""
@@ -789,81 +788,76 @@ class BrowserAgent:
         logger.warning("[CHART] Chart readiness timeout — proceeding with screenshot anyway")
 
     async def _close_blocking_popups(self):
-        """Dismiss TradingView pop-ups that can cover the chart before screenshots."""
+        """Dismiss TradingView pop-ups that can cover the chart before screenshots.
+        CRASH-PROOF: Broad exception wrapping — bot must never die here."""
         if not self.page:
             return
-
-        self._install_safe_dialog_handler()
-
         try:
-            await self.page.keyboard.press("Escape")
-            await asyncio.sleep(0.15)
-        except Exception as exc:
-            if self._is_missing_dialog_error(exc):
-                logger.debug("[POPUP] Escape hit after dialog disappeared; continuing")
-            else:
-                logger.debug("[POPUP] Escape dismiss failed safely: %s", exc)
+            self._install_safe_dialog_handler()
+            try:
+                await self.page.keyboard.press("Escape")
+                await asyncio.sleep(0.15)
+            except Exception:
+                pass
+            try:
+                closed_count = await self.page.evaluate("""() => {
+                    const blockerText = /need help|intraday|upgrade|trial|paper trading|got it/i;
+                    let closed = 0;
 
-        try:
-            closed_count = await self.page.evaluate("""() => {
-                const blockerText = /need help|intraday|upgrade|trial|paper trading|got it/i;
-                let closed = 0;
+                    const clickCloseButton = (root) => {
+                        const selectors = [
+                            'button[aria-label*="Close" i]',
+                            'button[title*="Close" i]',
+                            '[data-name*="close" i]',
+                            '[class*="close" i]',
+                        ];
+                        for (const selector of selectors) {
+                            const button = root.querySelector(selector);
+                            if (button) {
+                                button.click();
+                                closed += 1;
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
 
-                const clickCloseButton = (root) => {
-                    const selectors = [
-                        'button[aria-label*="Close" i]',
-                        'button[title*="Close" i]',
-                        '[data-name*="close" i]',
-                        '[class*="close" i]',
-                    ];
-                    for (const selector of selectors) {
-                        const button = root.querySelector(selector);
-                        if (button) {
-                            button.click();
+                    const candidates = Array.from(document.querySelectorAll(
+                        '[role="dialog"], [class*="modal" i], [class*="popup" i], [class*="toast" i], [class*="notification" i], [class*="tooltip" i]'
+                    ));
+
+                    for (const el of candidates) {
+                        const text = (el.innerText || el.textContent || '').trim();
+                        const rect = el.getBoundingClientRect();
+                        const visible = rect.width > 0 && rect.height > 0;
+                        if (!visible || !blockerText.test(text)) {
+                            continue;
+                        }
+
+                        if (!clickCloseButton(el)) {
+                            el.style.display = 'none';
                             closed += 1;
-                            return true;
                         }
                     }
-                    return false;
-                };
 
-                const candidates = Array.from(document.querySelectorAll(
-                    '[role="dialog"], [class*="modal" i], [class*="popup" i], [class*="toast" i], [class*="notification" i], [class*="tooltip" i]'
-                ));
-
-                for (const el of candidates) {
-                    const text = (el.innerText || el.textContent || '').trim();
-                    const rect = el.getBoundingClientRect();
-                    const visible = rect.width > 0 && rect.height > 0;
-                    if (!visible || !blockerText.test(text)) {
-                        continue;
+                    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                    for (const button of buttons) {
+                        const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
+                        if (/^(got it|dismiss|close|no thanks|maybe later|ok)$/i.test(text)) {
+                            button.click();
+                            closed += 1;
+                        }
                     }
 
-                    if (!clickCloseButton(el)) {
-                        el.style.display = 'none';
-                        closed += 1;
-                    }
-                }
-
-                const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                for (const button of buttons) {
-                    const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim();
-                    if (/^(got it|dismiss|close|no thanks|maybe later|ok)$/i.test(text)) {
-                        button.click();
-                        closed += 1;
-                    }
-                }
-
-                return closed;
-            }""")
-            if closed_count:
-                logger.info("[POPUP] Closed %s blocking TradingView pop-up element(s)", closed_count)
-                await asyncio.sleep(0.25)
-        except Exception as exc:
-            if self._is_missing_dialog_error(exc):
-                logger.debug("[POPUP] Dialog vanished during popup cleanup; continuing")
-            else:
-                logger.debug("[POPUP] JS pop-up cleanup failed safely: %s", exc)
+                    return closed;
+                }""")
+                if closed_count:
+                    logger.info("[POPUP] Closed %s blocking TradingView pop-up element(s)", closed_count)
+                    await asyncio.sleep(0.25)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     async def take_screenshot(self, save_path: str = None) -> Optional[str]:
         """Take a screenshot and return as base64. Waits for chart to be fully loaded first."""

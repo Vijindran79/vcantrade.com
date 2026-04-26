@@ -1025,9 +1025,13 @@ class CloudScanner:
             return None
 
     async def _evaluate_timeframe_alignment(
-        self, ticker: str, action: str, signal_type: str = "", strength: float = 0.0
+        self, ticker: str, action: str, signal_type: str = "", strength: float = 0.0,
+        confidence: float = 0.0,
     ) -> Tuple[bool, Dict[str, str]]:
-        """Evaluate 5m/3m/1m alignment with a more aggressive autonomous-mode sniper gate.
+        """Evaluate 5m/3m/1m alignment with aggressive autonomous-mode sniper gate.
+
+        AGGRESSIVE HUNTER: If confidence >= AGGRESSIVE_HUNTER_CONFIDENCE_PCT (default 75%),
+        skip 1m/3m alignment and strike on 5m chart alone.
         For liquidity-based signals, uses a relaxed check because SMA crossovers naturally
         oppose sweep direction (price drops during a demand sweep)."""
         action = str(action or "").upper()
@@ -1093,6 +1097,15 @@ class CloudScanner:
                 votes[label] = "SELL"
             else:
                 votes[label] = "WAIT"
+
+        # AGGRESSIVE HUNTER: High-confidence signals strike on 5m alone
+        hunter_threshold = getattr(config, "AGGRESSIVE_HUNTER_CONFIDENCE_PCT", 75.0)
+        if confidence >= hunter_threshold and votes.get("5m") == action:
+            logger.info(
+                "[FIRE] AGGRESSIVE HUNTER: %s %s confidence=%.1f%% >= %.1f%% — striking on 5m alone | votes=%s",
+                action, ticker, confidence, hunter_threshold, votes,
+            )
+            return True, votes
 
         runtime_mode = str(
             self.session_detector.get_session_context().get(
@@ -1475,6 +1488,7 @@ class CloudScanner:
                     analysis.action.value,
                     signal_type=signal.signal_type,
                     strength=signal.strength,
+                    confidence=confidence_score * 100.0,  # AGGRESSIVE HUNTER: pass confidence %
                 )
                 if not mtf_ok:
                     logger.info(

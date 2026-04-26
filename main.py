@@ -51,6 +51,13 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
 
+# Trade Alert Sound — Windows built-in, no extra dependencies
+try:
+    import winsound
+    _ALERT_SOUND_AVAILABLE = True
+except ImportError:
+    _ALERT_SOUND_AVAILABLE = False  # Non-Windows platforms
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QObject, Qt
 from PyQt6.QtGui import QShortcut, QKeySequence
@@ -150,6 +157,29 @@ logging.basicConfig(
     force=True  # Force reconfiguration
 )
 logger = logging.getLogger(__name__)
+
+
+def _play_trade_alert(action: str, success: bool):
+    """Play a distinctive alert sound when a trade is executed.
+    BUY = rising tone (optimistic). SELL = falling tone (urgent).
+    Failed trade = low buzz."""
+    if not _ALERT_SOUND_AVAILABLE:
+        return
+    try:
+        if success:
+            if action == "BUY":
+                # Rising two-tone: positive, optimistic
+                winsound.Beep(800, 200)
+                winsound.Beep(1200, 300)
+            else:
+                # Falling two-tone: urgent, caution
+                winsound.Beep(1200, 200)
+                winsound.Beep(800, 300)
+        else:
+            # Low buzz: something went wrong
+            winsound.Beep(400, 500)
+    except Exception:
+        pass  # Sound may fail in sandboxed or remote environments
 logger.info("Logging system initialized")
 
 VISION_ANALYSIS_COOLDOWN_SECONDS = 3.0
@@ -1542,6 +1572,7 @@ class VcaniTradeApp:
             "pnl_pct": 0.0,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
             "order_id": result.order_id,
+            "bot_opened": True,
         }
         self.positions.append(position)
         self.trades_today += 1
@@ -1648,7 +1679,8 @@ class VcaniTradeApp:
         """Wire all backend threads to the CommandCenter UI."""
         # Command Center
         self.cmd.mode_changed.connect(self._on_mode_changed)
-        self.cmd.dry_run_changed.connect(self._on_dry_run_changed)
+        if hasattr(self.cmd, "dry_run_changed"):
+            self.cmd.dry_run_changed.connect(self._on_dry_run_changed)
         self.cmd.kill_switch_triggered.connect(self._on_kill_switch)
         self.cmd.watchlist_updated.connect(self._on_watchlist_updated)
         self.cmd.settings_changed.connect(self._on_settings_changed)
@@ -2633,8 +2665,11 @@ class VcaniTradeApp:
             return raw_action
         return "HOLD"
 
-    def _passes_mtf_sniper_gate(self, ticker: str, action: str, signal_data: Optional[dict] = None) -> tuple[bool, dict]:
-        """5m/3m/1m sniper gate with oversold reversal override for BUY conflicts."""
+    def _passes_mtf_sniper_gate(self, ticker: str, action: str, signal_data: Optional[dict] = None, confidence: float = 0.0) -> tuple[bool, dict]:
+        """5m/3m/1m sniper gate with oversold reversal override for BUY conflicts.
+
+        AGGRESSIVE HUNTER: If confidence >= AGGRESSIVE_HUNTER_CONFIDENCE_PCT (default 75%),
+        skip 1m/3m alignment and strike on 5m chart alone."""
         action = str(action or "").upper()
         if action not in {"BUY", "SELL"}:
             return False, {}
@@ -2729,6 +2764,16 @@ class VcaniTradeApp:
         votes["1m_rsi"] = round(one_min_rsi, 2) if isinstance(one_min_rsi, (int, float)) else None
         votes["5m_rsi"] = round(five_min_rsi, 2) if isinstance(five_min_rsi, (int, float)) else None
         votes["mtf_bias"] = mtf_bias
+
+        # AGGRESSIVE HUNTER: High-confidence signals strike on 5m alone
+        hunter_threshold = getattr(config, "AGGRESSIVE_HUNTER_CONFIDENCE_PCT", 75.0)
+        if confidence >= hunter_threshold and votes.get("5m") == action:
+            votes["override"] = "AGGRESSIVE_HUNTER"
+            logger.warning(
+                "[FIRE] AGGRESSIVE HUNTER: %s %s confidence=%.1f%% >= %.1f%% — striking on 5m alone | votes=%s",
+                action, ticker, confidence, hunter_threshold, votes,
+            )
+            return True, votes
 
         # Strong 5m BUY override: let the higher timeframe lead if 1m is neutral.
         strong_5m_buy = (
@@ -3288,6 +3333,16 @@ class VcaniTradeApp:
 
                 pos["pnl"] = pnl_usd
                 pos["pnl_pct"] = pnl_pct
+
+                # MANUAL TRADE PROTECTION: Skip auto-close for positions the bot didn't open
+                if not pos.get("bot_opened"):
+                    self.cmd.log(
+                        f"[MANUAL] Manual position detected: {pos['asset']} | "
+                        f"P&L: ${pnl_usd:.2f} ({pnl_pct:.2f}%) — NOT managed by bot"
+                    )
+                    updated_positions.append(pos)
+                    continue
+
                 self._manage_position_stop(pos, hist)
 
                 # Check Take Profit (skip if tp_price is 0/unset)
@@ -4539,7 +4594,7 @@ class VcaniTradeApp:
             return
 
         # -- RPA Hand: move mouse and click on TradingView paper trading --
-        mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data)
+        mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data, confidence=confidence_score)
         if not mtf_passed and not force_execute:
             logger.info("EXEC_CLOUD: blocked by MTF sniper gate for %s %s: %s", action, ticker, mtf_votes)
             self._log_gatekeeper_abort(
@@ -4553,6 +4608,12 @@ class VcaniTradeApp:
             self.ai_narrator.add_activity("[TARGET]", f"MTF gate blocked {action} {ticker}")
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
+        elif mtf_votes.get("override") == "AGGRESSIVE_HUNTER":
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">[FIRE] AGGRESSIVE HUNTER</span>: '
+                f'{action} {ticker} confidence={confidence_score:.0f}% — striking on 5m alone!'
+            )
+            self.ai_narrator.add_activity("[FIRE]", f"Aggressive Hunter armed for {action} {ticker}")
         elif mtf_votes.get("override") == "REVERSAL_BUY_1M_RSI_OVERSOLD":
             self.cmd.log(
                 f'<span style="color:#3FB950;font-weight:bold">[REFRESH] REVERSAL OVERRIDE</span>: '
@@ -4712,6 +4773,8 @@ class VcaniTradeApp:
         
         order_status = "rpa_executed" if rpa_success else "rpa_failed"
         logger.info("EXEC_CLOUD: rpa result for %s %s -> %s", action, ticker, order_status)
+        # ALERT SOUND: Play distinctive tone on every trade execution
+        _play_trade_alert(action, rpa_success)
         self.cmd.log(
             f'<span style="color:{"#3FB950" if rpa_success else "#F85149"};font-weight:bold">'
             f'{"[MOUSE] RPA HAND CLICKED" if rpa_success else "[WARN] RPA HAND FAILED"}</span>: '
@@ -4770,6 +4833,7 @@ class VcaniTradeApp:
             "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "bot_opened": True,
         }
 
         self.profit_lock.add_position(
@@ -5215,6 +5279,8 @@ class VcaniTradeApp:
             return
         success = mt5_executor.execute_trade(execution_ticker, action)
         order_status = "mt5_executed" if success else "mt5_failed"
+        # ALERT SOUND: Play distinctive tone on every trade execution
+        _play_trade_alert(action, success)
 
         self.cmd.log(
             f'<span style="color:{"#3FB950" if success else "#F85149"};font-weight:bold">'
@@ -5270,6 +5336,7 @@ class VcaniTradeApp:
             "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "bot_opened": True,
         }
 
         self.profit_lock.add_position(
