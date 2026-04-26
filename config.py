@@ -199,6 +199,7 @@ FRIDAY_CLOSE_CUTOFF_UTC = int(os.getenv("FRIDAY_CLOSE_CUTOFF_UTC", "18"))
 
 # Technical Signal Thresholds
 VOLUME_SPIKE_MULTIPLIER = 3.0
+PRICE_SPIKE_THRESHOLD_PCT = float(os.getenv("PRICE_SPIKE_THRESHOLD_PCT", "1.5"))  # % move in 5 bars = spike
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
 SMA_FAST = 20

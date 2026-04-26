@@ -420,6 +420,13 @@ class CloudScanner:
             rsi_signal.metadata["liquidity_zone"] = liquidity_zone
             signals.append(rsi_signal)
 
+        # PRICE SPIKE: sudden large move in recent bars
+        price_spike = self._detect_price_spike(df, ticker)
+        if price_spike:
+            price_spike.metadata.update(brain_package)
+            price_spike.metadata["liquidity_zone"] = liquidity_zone
+            signals.append(price_spike)
+
         sma_signal = self._detect_sma_cross(df, ticker)
         if sma_signal:
             sma_signal.metadata.update(brain_package)
@@ -1251,6 +1258,57 @@ class CloudScanner:
                     "last_volume": last_vol,
                     "avg_volume": avg_vol,
                     "price": df["Close"].iloc[-1],
+                },
+            )
+
+        return None
+
+    def _detect_price_spike(
+        self, df: pd.DataFrame, ticker: str
+    ) -> Optional[TechnicalSignal]:
+        """Detect a sudden large price move in the last 5 bars.
+        A PRICE_SPIKE is when price moves more than PRICE_SPIKE_THRESHOLD_PCT
+        (default 1.5%) over a short window. This catches the kind of sharp
+        move that volume-based detectors miss when volume is normal but the
+        price action is dramatic."""
+        if len(df) < 5:
+            return None
+
+        recent_closes = df["Close"].dropna().tail(5)
+        if recent_closes.empty or len(recent_closes) < 2:
+            return None
+
+        start_price = float(recent_closes.iloc[0])
+        end_price = float(recent_closes.iloc[-1])
+        if start_price <= 0:
+            return None
+
+        spike_pct = ((end_price - start_price) / start_price) * 100.0
+        threshold = getattr(config, "PRICE_SPIKE_THRESHOLD_PCT", 1.5)
+
+        if abs(spike_pct) >= threshold:
+            # Determine direction
+            action = "BUY" if spike_pct > 0 else "SELL"
+            # Strength proportional to spike magnitude
+            strength = min(1.0, abs(spike_pct) / 10.0)  # 1.5%=0.15, 5%=0.5, 10%=1.0
+            # Boost strength for very large spikes (>= 3%)
+            if abs(spike_pct) >= 3.0:
+                strength = min(1.0, 0.5 + abs(spike_pct) / 20.0)
+
+            logger.info(
+                "[FIRE] PRICE SPIKE: %s moved %+.2f%% over 5 bars (%s direction) | threshold=%.1f%%",
+                ticker, spike_pct, action, threshold,
+            )
+            return TechnicalSignal(
+                ticker=ticker,
+                signal_type="PRICE_SPIKE",
+                strength=strength,
+                metadata={
+                    "spike_pct": spike_pct,
+                    "start_price": start_price,
+                    "end_price": end_price,
+                    "bars": 5,
+                    "action_hint": action,
                 },
             )
 

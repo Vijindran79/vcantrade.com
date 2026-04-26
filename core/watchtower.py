@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 # yfinance ticker symbols (Forex + Stocks + Gold)
 YFINANCE_WATCHLIST = {
+    "MNQ": "MNQ=F",   # Micro E-mini Nasdaq-100 futures
+    "MES": "MES=F",   # Micro E-mini S&P 500 futures
     "XAUUSD": "GC=F",  # Gold futures
     "EURUSD": "EURUSD=X",  # EUR/USD
     "GBPUSD": "GBPUSD=X",  # GBP/USD
