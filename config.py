@@ -130,9 +130,9 @@ SYMBOL_MAP = {
     "NYMEX:MCL1!": "CL=F",
 }
 
-# Symbol mapping: Yahoo / internal ticker -> TradingView chart URL symbol
-# Used by browser_agent and rpa_executor to navigate to the correct TV chart.
-# Without this, NQ=F causes "Symbol doesn't exist" on Apex/Tradovate accounts.
+# Symbol mapping: Yahoo / internal ticker -> WealthCharts chart symbol (M6 contract codes)
+# Used by browser_agent and rpa_executor to navigate to the correct chart.
+# NQ=F/ES=F/CL=F map to June 2026 (M6) futures contract codes for WealthCharts.
 TRADINGVIEW_SYMBOL_MAP = {
     # Yahoo futures -> CME_MINI / NYMEX contract names
     "NQ=F":  "NQM6",
@@ -158,7 +158,7 @@ TRADINGVIEW_SYMBOL_MAP = {
 # Pepperstone UK DEMO account — Spread Betting (GBP) uses _SB suffix.
 # Chart tabs show: Crude_SB, NAS100_SB, US500_SB
 MT5_SYMBOL_MAP = {
-    # TradingView prefixes -> Pepperstone exact terminal name
+    # CME / NYMEX prefixes -> Pepperstone exact terminal name
     "CME_MINI:MNQ1!": "NAS100_SB",
     "CME_MINI:MES1!": "US500_SB",
     "NYMEX:MCL1!": "Crude_SB",
@@ -205,9 +205,12 @@ MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 # "UI"  = Click buttons on screen via Playwright/RPA (default)
 # "MT5" = Send orders to MetaTrader 5 via mt5.order_send()
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "UI")
-TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_TRADOVATE")
+TRADING_SURFACE = os.getenv("TRADING_SURFACE", "WEALTHCHARTS")
 MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.1"))
 BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9223").strip()
+
+# WealthCharts platform URL (replaces TradingView)
+WEALTHCHARTS_URL = os.getenv("WEALTHCHARTS_URL", "https://app.wealthcharts.com").strip().rstrip("/")
 SHOW_STARTUP_SWITCHBOARD = os.getenv("SHOW_STARTUP_SWITCHBOARD", "true").lower() == "true"
 SMART_EYE_ENABLED = os.getenv("SMART_EYE_ENABLED", "true").lower() == "true"
 AUTO_SYMBOL_DETECTION = os.getenv("AUTO_SYMBOL_DETECTION", "true").lower() == "true"
@@ -224,7 +227,7 @@ BROWSER_WINDOW_HINTS = [
     value.strip()
     for value in os.getenv(
         "BROWSER_WINDOW_HINTS",
-        "TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
+        "WealthCharts,TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
     ).split(",")
     if value.strip()
 ]
@@ -271,7 +274,7 @@ HOTKEY_CLOSE = "<ctrl>+x"
 HUMAN_LATENCY = os.getenv("HUMAN_LATENCY", "True").lower() == "true"
 
 # Safe fallback coordinates for RPA button clicks when color detection fails.
-# Update these to match your screen resolution and TradingView layout.
+# Update these to match your screen resolution and WealthCharts layout.
 FALLBACK_COORDS = {
     "buy_button": (int(os.getenv("FALLBACK_BUY_X", "960")), int(os.getenv("FALLBACK_BUY_Y", "540"))),
     "sell_button": (int(os.getenv("FALLBACK_SELL_X", "960")), int(os.getenv("FALLBACK_SELL_Y", "580"))),

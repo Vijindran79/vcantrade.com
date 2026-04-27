@@ -71,19 +71,20 @@ class RPAExecutor:
             self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
             contexts = self._browser.contexts
             if contexts:
-                # Scan all contexts and pages for a TradingView tab
+                # Scan all contexts and pages for a WealthCharts tab (or legacy TradingView)
                 for ctx in contexts:
                     for pg in ctx.pages:
-                        if pg.url and "tradingview" in pg.url.lower():
+                        url_lower = (pg.url or "").lower()
+                        if "wealthcharts" in url_lower or "tradingview" in url_lower:
                             self._page = pg
-                            logger.info("[STEALTH] Connected to user's live TradingView tab: %s", pg.url[:80])
+                            logger.info("[STEALTH] Connected to user's live chart tab: %s", pg.url[:80])
                             return self._page
-                # Connected but no TradingView tab found
+                # Connected but no chart tab found
                 logger.warning(
-                    "[SYSTEM] TradingView tab not found in active Chrome window. Please open it."
+                    "[SYSTEM] WealthCharts tab not found in active Chrome window. Please open https://app.wealthcharts.com"
                 )
                 # Still return the first available page so Playwright operations don't crash,
-                # but log clearly that TradingView is missing.
+                # but log clearly that WealthCharts is missing.
                 self._page = contexts[0].pages[0] if contexts[0].pages else None
                 if self._page:
                     logger.info("[STEALTH] Fallback to first tab: %s", self._page.url[:80])
@@ -104,7 +105,7 @@ class RPAExecutor:
         return None
 
     def _map_ticker_to_tv(self, ticker):
-        """Map internal ticker to TradingView chart symbol.
+        """Map internal ticker to WealthCharts chart symbol.
         WEALTHCHARTS M6: Checks TRADINGVIEW_SYMBOL_MAP BEFORE the colon pass-through
         so CME_MINI:MNQ1! -> NQM6, CME_MINI:MES1! -> ESM6, NYMEX:MCL1! -> MCLM6."""
         if not ticker:

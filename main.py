@@ -1616,8 +1616,8 @@ class VcaniTradeApp:
             self.browser_agent_status = "starting"
             self.browser_agent = BrowserAgent(headless=True)
             await self.browser_agent.start()
-            # Auto-navigate to TradingView MNQ1! chart
-            await self.browser_agent.navigate_to_tradingview()
+            # Auto-navigate to WealthCharts chart
+            await self.browser_agent.navigate_to_wealthcharts()
             self.browser_agent_status = "ready"
         except Exception as e:
             self.browser_agent_status = "error"
@@ -2050,7 +2050,7 @@ class VcaniTradeApp:
         self.cmd.update_copilot_status("Ready")
 
     def _handle_chart_markup_command(self, command: str):
-        """Generate chart markup scripts (S/R, trend breaks, blink lines) and inject to TradingView."""
+        """Generate chart markup scripts (S/R, trend breaks, blink lines) and inject to WealthCharts."""
         import re
 
         self.cmd.log(f"[THREAD] CHART MARKUP requested: {command}")
@@ -2089,7 +2089,7 @@ class VcaniTradeApp:
         self.cmd.add_copilot_response(
             thoughts=f"Generated chart markup overlay for {asset} on {timeframe}",
             verdict="MARKUP_READY",
-            adjustment="[OK] Support/resistance and trend-break overlays prepared. Injecting to TradingView now."
+            adjustment="[OK] Support/resistance and trend-break overlays prepared. Injecting to WealthCharts now."
         )
 
         self._inject_pine_script_to_chart()
@@ -2217,7 +2217,7 @@ class VcaniTradeApp:
         self.cmd.add_copilot_response(
             thoughts=f"Generated Institutional Demand & Retail Supply zones for {asset}",
             verdict=f"SCRIPT_GENERATED",
-            adjustment=f"[OK] Pine Script v6 ready. {len(demand_zones)} demand zones, {len(supply_zones)} supply zones. Click 'Inject to Chart' to auto-add to TradingView."
+            adjustment=f"[OK] Pine Script v6 ready. {len(demand_zones)} demand zones, {len(supply_zones)} supply zones. Click 'Inject to Chart' to auto-add to WealthCharts."
         )
         
         # Store for later injection
@@ -2383,7 +2383,7 @@ class VcaniTradeApp:
             self.cmd.log("[FAIL] Browser agent not running")
             return
         
-        self.cmd.log("[BUILD] Injecting Pine Script to TradingView...")
+        self.cmd.log("[BUILD] Injecting Pine Script to WealthCharts...")
         self.cmd.update_copilot_status("Injecting script...")
         
         # Submit to browser event loop

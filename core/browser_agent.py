@@ -5,7 +5,7 @@ The bot's "eyes and hands" - opens browser, checks prices,
 and executes autonomous agentic work while Qwen analyzes.
 
 Features:
-- Opens TradingView/other sites to verify prices
+- Opens WealthCharts/other sites to verify prices
 - Scrapes real-time market data
 - Takes screenshots for vision analysis
 - Works autonomously in background
@@ -28,7 +28,7 @@ class BrowserAgent:
     """
     Autonomous browser agent that can:
     - Open websites and check prices
-    - Scrape market data from TradingView, Yahoo Finance, etc.
+    - Scrape market data from WealthCharts, Yahoo Finance, etc.
     - Take screenshots for vision analysis
     - Navigate and interact with web pages autonomously
     - Self-heal: Auto-restart on repeated failures (Stage 4)
@@ -116,7 +116,18 @@ class BrowserAgent:
         if not url:
             return None
         
-        # TradingView patterns
+        # WealthCharts patterns
+        if "wealthcharts.com" in url:
+            # e.g., https://app.wealthcharts.com/?symbol=NQM6
+            import re
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            if "symbol" in qs:
+                ticker = qs["symbol"][0]
+                logger.info(f"[EYE] Browser Context: User viewing WealthCharts {ticker}")
+                return ticker
+        # TradingView patterns (legacy)
         if "tradingview.com" in url:
             # e.g., https://www.tradingview.com/symbols/BTCUSD/
             import re
@@ -174,7 +185,7 @@ class BrowserAgent:
 
     async def navigate_to_chart(self, ticker: str) -> bool:
         """
-        Navigate to TradingView chart for specific ticker.
+        Navigate to WealthCharts chart for specific ticker.
         Uses fast load strategy or 'Warm Start' if already on TV.
         RETRY: Will attempt navigation up to 3 times with 3s delay.
 
@@ -234,9 +245,9 @@ class BrowserAgent:
         """Single navigation attempt (Warm Start or Cold Start)."""
         current_url = await self.get_current_url()
         
-        # WARM START LOGIC: If already on a TradingView chart, use keyboard RPA to flip symbol
+        # WARM START LOGIC: If already on a WealthCharts chart, use keyboard RPA to flip symbol
         # This is much faster than a full page reload and prevents 24/7 session timeouts
-        if "tradingview.com/chart" in current_url or "tradingview.com/symbols" in current_url:
+        if "wealthcharts.com" in current_url or "tradingview.com/chart" in current_url or "tradingview.com/symbols" in current_url:
             try:
                 logger.info(f"[BOLT] Warm Start: Flipping symbol to {tv_symbol} via keyboard...")
                 # 1. Focus the page
@@ -255,10 +266,10 @@ class BrowserAgent:
                 logger.warning(f"[WARN] Warm Start failed, falling back to full load: {e}")
 
         # COLD START / FALLBACK: Full page navigation
-        url = f"https://www.tradingview.com/symbols/{tv_symbol}/"
+        url = f"{getattr(config, 'WEALTHCHARTS_URL', 'https://app.wealthcharts.com')}/?symbol={tv_symbol}"
 
         try:
-            logger.info(f"[GLOBE] Navigating to TradingView: {ticker} ({tv_symbol})")
+            logger.info(f"[GLOBE] Navigating to WealthCharts: {ticker} ({tv_symbol})")
             
             # Use 'commit' instead of 'domcontentloaded' - much faster, doesn't wait for WS
             await asyncio.wait_for(
@@ -280,7 +291,7 @@ class BrowserAgent:
 
     async def get_live_price(self) -> float:
         """
-        Read the current live price from the TradingView chart.
+        Read the current live price from the WealthCharts chart.
         Uses multiple selector strategies for reliability including aria-label and JS fallback.
 
         Returns:
@@ -364,7 +375,7 @@ class BrowserAgent:
 
     async def get_order_book(self) -> Tuple[float, float]:
         """
-        Get bid/ask prices. For TradingView (which doesn't show order book),
+        Get bid/ask prices. For WealthCharts (which doesn't show order book),
         we estimate from the current price with typical spread.
         
         Returns:
@@ -388,7 +399,7 @@ class BrowserAgent:
 
     async def click_order_button(self, action: str, quantity: float = 1000, price: float = 0) -> bool:
         """
-        Click the buy/sell button on TradingView or exchange.
+        Click the buy/sell button on WealthCharts or exchange.
         
         NOTE: This is a DRY RUN simulation. Real exchange clicking
         requires specific selectors for each platform.
@@ -441,24 +452,26 @@ class BrowserAgent:
                     logger.error("[FAIL] No contexts found in Chrome CDP connection")
                     raise RuntimeError(f"No contexts in Chrome CDP connection: {config.BROWSER_CDP_URL}")
 
-                # Search for existing TradingView tab
+                # Search for existing WealthCharts tab (or legacy TradingView)
                 for ctx in contexts:
                     for pg in ctx.pages:
-                        if pg.url and "tradingview" in pg.url.lower():
+                        url_lower = (pg.url or "").lower()
+                        if "wealthcharts" in url_lower or "tradingview" in url_lower:
                             self.page = pg
                             self.context = ctx
                             self._install_safe_dialog_handler()
                             self.is_running = True
-                            logger.info("[OK] Browser agent connected to TradingView tab: %s", pg.url[:80])
+                            logger.info("[OK] Browser agent connected to chart tab: %s", pg.url[:80])
                             return
 
-                # No TradingView tab found — create one via CDP context
+                # No chart tab found — create one via CDP context
                 self.context = contexts[0]
-                logger.info("[AUTO] No TradingView tab found. Creating new tab via CDP context...")
+                wc_url = getattr(config, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
+                logger.info("[AUTO] No chart tab found. Creating new tab via CDP context -> %s ...", wc_url)
                 self.page = await self.context.new_page()
                 self._install_safe_dialog_handler()
-                await self.page.goto("https://www.tradingview.com/chart/", wait_until="domcontentloaded", timeout=30000)
-                logger.info("[AUTO] Navigated to TradingView chart: %s", self.page.url[:80])
+                await self.page.goto(wc_url, wait_until="domcontentloaded", timeout=30000)
+                logger.info("[AUTO] Navigated to WealthCharts: %s", self.page.url[:80])
 
                 # Login detection
                 await self._handle_login_wait()
@@ -497,7 +510,7 @@ class BrowserAgent:
         url = self.page.url or ""
         # Check if we're on a login/signin page
         if "signin" in url.lower() or "login" in url.lower():
-            logger.warning("[LOGIN] TradingView login screen detected. Waiting 30s for manual login...")
+            logger.warning("[LOGIN] WealthCharts login screen detected. Waiting 30s for manual login...")
             await asyncio.sleep(30)
             return
         # Check DOM for login form indicators
@@ -507,19 +520,19 @@ class BrowserAgent:
             return !!(email && pass);
         }""")
         if has_login_form:
-            logger.warning("[LOGIN] TradingView login form detected in DOM. Waiting 30s for manual login...")
+            logger.warning("[LOGIN] WealthCharts login form detected in DOM. Waiting 30s for manual login...")
             await asyncio.sleep(30)
 
-    async def navigate_to_tradingview(self):
-        """Navigate to TradingView chart using first configured ticker."""
+    async def navigate_to_wealthcharts(self):
+        """Navigate to WealthCharts using first configured ticker."""
         import config
         tickers = getattr(config, "MULTI_ASSET_TICKERS", ["CME_MINI:MNQ1!"])
         first_ticker = tickers[0] if tickers else "CME_MINI:MNQ1!"
-        logger.info("[NAV] Startup navigating to %s (from MULTI_ASSET_TICKERS)", first_ticker)
+        logger.info("[NAV] Startup navigating WealthCharts to %s (from MULTI_ASSET_TICKERS)", first_ticker)
         return await self.navigate_to_symbol(first_ticker)
 
     async def navigate_to_symbol(self, symbol: str):
-        """Navigate to any TradingView symbol chart.
+        """Navigate to any WealthCharts symbol chart.
         STURDY BRIDGE: Sets navigation lock during transit so other cycles skip."""
         if not self.is_running or not self.page:
             logger.warning("[NAV] Browser agent not running, starting...")
@@ -531,7 +544,8 @@ class BrowserAgent:
             import config as _cfg
             tv_map = getattr(_cfg, "TRADINGVIEW_SYMBOL_MAP", {})
             tv_symbol = tv_map.get(symbol, symbol)
-            tv_url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
+            wc_url_base = getattr(_cfg, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
+            tv_url = f"{wc_url_base}/?symbol={tv_symbol}"
             if tv_symbol != symbol:
                 logger.info("[NAV] Mapped %s -> %s (WealthCharts M6 contract)", symbol, tv_symbol)
             logger.info("[NAV] Navigating to %s chart: %s", tv_symbol, tv_url)
@@ -545,7 +559,7 @@ class BrowserAgent:
             await asyncio.sleep(2)
             return True
         except Exception as e:
-            logger.error("[NAV] Failed to navigate to TradingView %s: %s", symbol, e)
+            logger.error("[NAV] Failed to navigate to WealthCharts %s: %s", symbol, e)
             return False
         finally:
             self._navigating = False  # Unlock: navigation complete
