@@ -135,19 +135,23 @@ SYMBOL_MAP = {
 # Without this, NQ=F causes "Symbol doesn't exist" on Apex/Tradovate accounts.
 TRADINGVIEW_SYMBOL_MAP = {
     # Yahoo futures -> CME_MINI / NYMEX contract names
-    "NQ=F":  "CME_MINI:MNQ1!",
-    "MNQ=F": "CME_MINI:MNQ1!",
-    "ES=F":  "CME_MINI:MES1!",
-    "MES=F": "CME_MINI:MES1!",
-    "CL=F":  "NYMEX:MCL1!",
-    "MCL=F": "NYMEX:MCL1!",
+    "NQ=F":  "NQM6",
+    "MNQ=F": "NQM6",
+    "ES=F":  "ESM6",
+    "MES=F": "ESM6",
+    "CL=F":  "MCLM6",
+    "MCL=F": "MCLM6",
     # Canonical short forms (F stripped by candidate generator)
-    "NQ":  "CME_MINI:MNQ1!",
-    "MNQ": "CME_MINI:MNQ1!",
-    "ES":  "CME_MINI:MES1!",
-    "MES": "CME_MINI:MES1!",
-    "CL":  "NYMEX:MCL1!",
-    "MCL": "NYMEX:MCL1!",
+    "NQ":  "NQM6",
+    "MNQ": "NQM6",
+    "ES":  "ESM6",
+    "MES": "ESM6",
+    "CL":  "MCLM6",
+    "MCL": "MCLM6",
+    # WealthCharts June 2026 (M6) contract codes — exact symbols on dashboard
+    "CME_MINI:MNQ1!": "NQM6",
+    "CME_MINI:MES1!": "ESM6",
+    "NYMEX:MCL1!": "MCLM6",
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)

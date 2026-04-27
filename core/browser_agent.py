@@ -527,10 +527,16 @@ class BrowserAgent:
 
         self._navigating = True  # Lock: other cycles will see busy and skip
         try:
-            tv_url = f"https://www.tradingview.com/chart/?symbol={symbol}"
-            logger.info("[NAV] Navigating to %s chart: %s", symbol, tv_url)
+            # WEALTHCHARTS M6 CONTRACT LOOKUP: translate CME names to June 2026 codes
+            import config as _cfg
+            tv_map = getattr(_cfg, "TRADINGVIEW_SYMBOL_MAP", {})
+            tv_symbol = tv_map.get(symbol, symbol)
+            tv_url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
+            if tv_symbol != symbol:
+                logger.info("[NAV] Mapped %s -> %s (WealthCharts M6 contract)", symbol, tv_symbol)
+            logger.info("[NAV] Navigating to %s chart: %s", tv_symbol, tv_url)
             await self.page.goto(tv_url, wait_until="domcontentloaded", timeout=30000)
-            logger.info("[NAV] Loaded %s chart: %s", symbol, self.page.url[:80])
+            logger.info("[NAV] Loaded %s chart: %s", tv_symbol, self.page.url[:80])
 
             # Login check after navigation
             await self._handle_login_wait()
@@ -883,6 +889,10 @@ class BrowserAgent:
                         const text = (el.innerText || el.textContent || '').trim();
                         const rect = el.getBoundingClientRect();
                         const visible = rect.width > 0 && rect.height > 0;
+                        // PROTECT WATCHLIST BAR: skip thin elements (toolbars, bottom bars)
+                        if (rect.height < 80) {
+                            continue;  // too short to be a blocking popup
+                        }
                         if (!visible || !blockerText.test(text)) {
                             continue;
                         }

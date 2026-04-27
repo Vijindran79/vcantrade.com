@@ -104,11 +104,24 @@ class RPAExecutor:
         return None
 
     def _map_ticker_to_tv(self, ticker):
-        """Map internal ticker to TradingView chart symbol."""
+        """Map internal ticker to TradingView chart symbol.
+        WEALTHCHARTS M6: Checks TRADINGVIEW_SYMBOL_MAP BEFORE the colon pass-through
+        so CME_MINI:MNQ1! -> NQM6, CME_MINI:MES1! -> ESM6, NYMEX:MCL1! -> MCLM6."""
         if not ticker:
             return "BTCUSD"
         upper = str(ticker).strip().upper()
-        # Already a TradingView prefix format
+
+        # WEALTHCHARTS M6: Check TRADINGVIEW_SYMBOL_MAP FIRST
+        # (must precede the colon passthrough so CME names get mapped to M6 codes)
+        tv_map = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {})
+        if upper in tv_map:
+            return tv_map[upper]
+        # Also try with =F suffix explicitly
+        upper_f = upper + "=F" if not upper.endswith("=F") else upper
+        if upper_f in tv_map:
+            return tv_map[upper_f]
+
+        # Already a TradingView prefix format (CME_MINI:, NYMEX:, etc.)
         if ":" in upper:
             return upper
         # Crypto pairs
@@ -123,14 +136,6 @@ class RPAExecutor:
         # Futures pass-through
         if upper.endswith("1!"):
             return upper
-        # ALIEN ABDUCTION FIX: Translate Yahoo futures to CME contract names
-        tv_map = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {})
-        if upper in tv_map:
-            return tv_map[upper]
-        # Also try with =F suffix explicitly
-        upper_f = upper + "=F" if not upper.endswith("=F") else upper
-        if upper_f in tv_map:
-            return tv_map[upper_f]
         # Default pass-through
         return upper
 
