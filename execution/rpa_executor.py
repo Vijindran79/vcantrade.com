@@ -123,6 +123,14 @@ class RPAExecutor:
         # Futures pass-through
         if upper.endswith("1!"):
             return upper
+        # ALIEN ABDUCTION FIX: Translate Yahoo futures to CME contract names
+        tv_map = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {})
+        if upper in tv_map:
+            return tv_map[upper]
+        # Also try with =F suffix explicitly
+        upper_f = upper + "=F" if not upper.endswith("=F") else upper
+        if upper_f in tv_map:
+            return tv_map[upper_f]
         # Default pass-through
         return upper
 

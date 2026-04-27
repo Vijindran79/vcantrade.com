@@ -203,6 +203,13 @@ class BrowserAgent:
             tv_symbol = "XRPUSD"
         elif "ADA" in tv_symbol:
             tv_symbol = "ADAUSD"
+        # ALIEN ABDUCTION FIX: Translate Yahoo futures to CME contract names
+        # NQ=F -> CME_MINI:MNQ1!, ES=F -> CME_MINI:MES1!, CL=F -> NYMEX:MCL1!
+        tv_map = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {})
+        if tv_symbol in tv_map:
+            tv_symbol = tv_map[tv_symbol]
+        elif ticker in tv_map:
+            tv_symbol = tv_map[ticker]
 
         # Give the browser a moment to breathe between symbol switches
         await asyncio.sleep(2)

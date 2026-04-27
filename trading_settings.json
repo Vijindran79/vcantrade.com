@@ -1,9 +1,9 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "BTC-USD",
-    "XRP-USD",
-    "SOL-USD"
+    "CME_MINI:MNQ1!",
+    "CME_MINI:MES1!",
+    "NYMEX:MCL1!"
   ],
   "investment_amount": 1000.0,
   "lot_size": 2.0,

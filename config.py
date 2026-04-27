@@ -130,6 +130,26 @@ SYMBOL_MAP = {
     "NYMEX:MCL1!": "CL=F",
 }
 
+# Symbol mapping: Yahoo / internal ticker -> TradingView chart URL symbol
+# Used by browser_agent and rpa_executor to navigate to the correct TV chart.
+# Without this, NQ=F causes "Symbol doesn't exist" on Apex/Tradovate accounts.
+TRADINGVIEW_SYMBOL_MAP = {
+    # Yahoo futures -> CME_MINI / NYMEX contract names
+    "NQ=F":  "CME_MINI:MNQ1!",
+    "MNQ=F": "CME_MINI:MNQ1!",
+    "ES=F":  "CME_MINI:MES1!",
+    "MES=F": "CME_MINI:MES1!",
+    "CL=F":  "NYMEX:MCL1!",
+    "MCL=F": "NYMEX:MCL1!",
+    # Canonical short forms (F stripped by candidate generator)
+    "NQ":  "CME_MINI:MNQ1!",
+    "MNQ": "CME_MINI:MNQ1!",
+    "ES":  "CME_MINI:MES1!",
+    "MES": "CME_MINI:MES1!",
+    "CL":  "NYMEX:MCL1!",
+    "MCL": "NYMEX:MCL1!",
+}
+
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
 # Pepperstone naming: indices use US500/NAS100, commodities use XTIUSD/XAUUSD, etc.
 MT5_SYMBOL_MAP = {
