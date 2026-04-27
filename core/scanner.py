@@ -859,6 +859,21 @@ class CloudScanner:
             logger.info("[CLOCK] [WEEKEND SKIP] %s market closed - Skipping Cycle", ticker)
             return None
 
+        # FORCE symbol active BEFORE retry loop: keep Pepperstone symbol in MarketWatch
+        # MT5 can silently drop symbols between cycles if not explicitly selected each time.
+        forced_symbol = None
+        if mt5_tf is not None:
+            try:
+                _mt5_force = _lazy_mt5()
+                if _mt5_force is not False:
+                    forced_symbol = self._select_mt5_symbol(market_ticker)
+                    if forced_symbol:
+                        logger.debug("[MT5] Pre-cycle symbol refresh: %s active", forced_symbol)
+                    else:
+                        logger.debug("[MT5] Pre-cycle symbol NOT selectable for %s", market_ticker)
+            except Exception:
+                pass
+
         for attempt in range(max_retries):
             try:
                 if not self._ensure_mt5():
@@ -873,7 +888,7 @@ class CloudScanner:
                     return None
 
                 _mt5 = _lazy_mt5()
-                selected_symbol = self._select_mt5_symbol(market_ticker)
+                selected_symbol = forced_symbol or self._select_mt5_symbol(market_ticker)
                 if not selected_symbol:
                     tried = ", ".join(self._mt5_symbol_candidates(market_ticker))
                     logger.warning(

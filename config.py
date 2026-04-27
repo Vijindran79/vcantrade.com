@@ -151,9 +151,10 @@ TRADINGVIEW_SYMBOL_MAP = {
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
-# Pepperstone naming: indices use US500/NAS100, commodities use XTIUSD/XAUUSD, etc.
+# Pepperstone MT5 naming — EXACT terminal symbol names with common variants.
+# Primary name first, then variant suffixes are tried by _mt5_symbol_candidates.
 MT5_SYMBOL_MAP = {
-    # TradingView prefixes
+    # TradingView prefixes -> Pepperstone primary name
     "CME_MINI:MNQ1!": "NAS100",
     "CME_MINI:MES1!": "US500",
     "NYMEX:MCL1!": "XTIUSD",
@@ -178,6 +179,11 @@ MT5_SYMBOL_MAP = {
     "GC": "XAUUSD",
     "SI": "XAGUSD",
     "YM": "YM1!",
+    # PEPPERSTONE VARIANTS — alternate names tried if primary fails
+    # (appended by _mt5_symbol_candidates after suffix stripping)
+    "NAS100": "NAS100",   # self-reference ensures primary stays
+    "US500":  "US500",
+    "XTIUSD": "XTIUSD",
     # Crypto
     "BTC-USD": "BTCUSD",
     "ETH-USD": "ETHUSD",
