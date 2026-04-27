@@ -115,7 +115,7 @@ CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
 SCAN_INTERVAL = 10
 WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.5"))
-CLOUD_TICKERS = ["BTC-USD", "ES=F", "NQ=F"]
+CLOUD_TICKERS = ["BTC-USD"]  # BTC-USD kept as 24/7 fallback; futures are watchlist-driven
 
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,

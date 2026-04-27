@@ -52,6 +52,8 @@ class BrowserAgent:
         self._navigating: bool = False
         # CDP cache clear tracking: only clear once per day on first self-heal
         self._last_cache_clear_date: Optional[str] = None
+        # NAVIGATION GUARD: track symbols that failed with ERR_ABORTED (skip for 5 min)
+        self._failed_symbols: Dict[str, float] = {}  # symbol -> timestamp of failure
 
         logger.info(f"[GLOBE] Browser Agent initialized (headless={headless})")
 
@@ -588,6 +590,15 @@ class BrowserAgent:
         try:
             # WEALTHCHARTS M6 CONTRACT LOOKUP: translate CME names to June 2026 codes
             import config as _cfg
+
+            # CACHE SKIP: if this symbol failed with ERR_ABORTED within last 5 min, skip
+            import time as _time
+            _now = _time.time()
+            _last_fail = self._failed_symbols.get(symbol, 0)
+            if _last_fail and (_now - _last_fail) < 300:
+                logger.debug("[NAV] Skipping %s — failed %ds ago (cached ERR_ABORTED)", symbol, int(_now - _last_fail))
+                return False
+
             tv_map = getattr(_cfg, "TRADINGVIEW_SYMBOL_MAP", {})
             tv_symbol = tv_map.get(symbol, symbol)
             wc_url_base = getattr(_cfg, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
@@ -596,6 +607,8 @@ class BrowserAgent:
                 logger.info("[NAV] Mapped %s -> %s (WealthCharts M6 contract)", symbol, tv_symbol)
             logger.info("[NAV] Navigating to %s chart: %s", tv_symbol, tv_url)
             await self.page.goto(tv_url, wait_until="domcontentloaded", timeout=30000)
+            # SUCCESS: clear failed_symbols entry for this symbol
+            self._failed_symbols.pop(symbol, None)
             logger.info("[NAV] Loaded %s chart: %s", tv_symbol, self.page.url[:80])
 
             # Login check after navigation
@@ -609,7 +622,14 @@ class BrowserAgent:
 
             return True
         except Exception as e:
-            logger.error("[NAV] Failed to navigate to WealthCharts %s: %s", symbol, e)
+            err_text = str(e)
+            # ERR_ABORTED means the symbol doesn't exist on WealthCharts — NOT a browser crash.
+            # Cache the failure for 5 min and skip; do NOT count toward self-heal threshold.
+            if "ERR_ABORTED" in err_text or "net::ERR_ABORTED" in err_text:
+                self._failed_symbols[symbol] = _time.time()
+                logger.warning("[NAV] Symbol %s not available on WealthCharts — cached skip (5 min)", symbol)
+            else:
+                logger.error("[NAV] Failed to navigate to WealthCharts %s: %s", symbol, e)
             return False
         finally:
             self._navigating = False  # Unlock: navigation complete

@@ -771,7 +771,7 @@ class MultiAssetHunterThread(QThread):
             else:
                 # RESPECT DASHBOARD WATCHLIST: Only scan what the user manually entered.
                 # Never auto-add MNQ/MES/MCL — the user controls the watchlist.
-                active_symbols = list(watchlist) if watchlist else []
+                active_symbols = list(watchlist) if watchlist else []  # strict: no fallback, user must set watchlist
 
             # Monday State Re-Sync (Anti-Ghosting)
             if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
@@ -1230,6 +1230,7 @@ class VcaniTradeApp:
             saved_watchlist = []
         self.current_watchlist = self.settings.normalize_watchlist(saved_watchlist)
         if not self.current_watchlist:
+            # Fallback: use CLOUD_TICKERS only if watchlist is truly empty at startup
             self.current_watchlist = self.settings.normalize_watchlist(config.CLOUD_TICKERS)
         self.force_action_armed = False
         
