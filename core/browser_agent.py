@@ -73,22 +73,25 @@ class BrowserAgent:
         return False
 
     def _install_safe_dialog_handler(self):
-        """Auto-dismiss JavaScript dialogs without letting ProtocolError crash navigation.
+        """Auto-accept JavaScript dialogs without letting ProtocolError crash navigation.
         Installed once per page at initialization time — passive listener only."""
         if not self.page or self._dialog_handler_page is self.page:
             return
 
-        async def _safe_dismiss(dialog):
+        async def _safe_accept(dialog):
             try:
-                await dialog.dismiss()
-                logger.debug("[DIALOG] Auto-dismissed JavaScript dialog")
-            except Exception:
+                await dialog.accept()
+                logger.debug("[DIALOG] Auto-accepted JavaScript dialog")
+            except Exception as e:
                 # Broad catch: dialog may have already disappeared — never crash
-                pass
+                if "no dialog" in str(e).lower():
+                    logger.debug("[DIALOG] Dialog already dismissed")
+                else:
+                    logger.debug("[DIALOG] Accept error (ignored): %s", e)
 
         def _handler(dialog):
             try:
-                asyncio.create_task(_safe_dismiss(dialog))
+                asyncio.create_task(_safe_accept(dialog))
             except Exception:
                 pass
 
@@ -602,14 +605,36 @@ class BrowserAgent:
             tv_map = getattr(_cfg, "TRADINGVIEW_SYMBOL_MAP", {})
             tv_symbol = tv_map.get(symbol, symbol)
             wc_url_base = getattr(_cfg, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
-            tv_url = f"{wc_url_base}/?symbol={tv_symbol}"
-            if tv_symbol != symbol:
-                logger.info("[NAV] Mapped %s -> %s (WealthCharts M6 contract)", symbol, tv_symbol)
-            logger.info("[NAV] Navigating to %s chart: %s", tv_symbol, tv_url)
-            await self.page.goto(tv_url, wait_until="domcontentloaded", timeout=30000)
-            # SUCCESS: clear failed_symbols entry for this symbol
+
+            # MCLM6 CACHE FIX: MCLM6 is valid — the URL parameter was wrong, not the symbol
             self._failed_symbols.pop(symbol, None)
-            logger.info("[NAV] Loaded %s chart: %s", tv_symbol, self.page.url[:80])
+            self._failed_symbols.pop("MCLM6", None)
+            self._failed_symbols.pop("NYMEX:MCL1!", None)
+
+            # WEALTHCHARTS STABILITY: Use keyboard search instead of ?symbol= URL.
+            # WealthCharts rejects URL query params; we must use the in-app search box.
+            current_url = await self.get_current_url()
+            already_on_wc = "wealthcharts.com" in current_url.lower()
+
+            if not already_on_wc:
+                logger.info("[NAV] Loading base WealthCharts page...")
+                await self.page.goto(wc_url_base, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(3)  # Let the chart app initialise
+            else:
+                logger.info("[NAV] Already on WealthCharts — reusing tab")
+
+            # KEYBOARD SEARCH: focus + type symbol + Enter (avoids URL parameter rejection)
+            logger.info("[NAV] Searching WealthCharts for %s (mapped from %s)", tv_symbol, symbol)
+            await self.page.bring_to_front()
+            await asyncio.sleep(0.5)
+            # Clear any existing search text (Ctrl+A then type)
+            await self.page.keyboard.press("Control+a")
+            await asyncio.sleep(0.1)
+            await self.page.keyboard.type(tv_symbol, delay=50)
+            await asyncio.sleep(0.5)
+            await self.page.keyboard.press("Enter")
+            await asyncio.sleep(3)  # Wait for chart to load
+            logger.info("[NAV] Searched %s chart: %s", tv_symbol, self.page.url[:80])
 
             # Login check after navigation
             await self._handle_login_wait()
@@ -623,11 +648,11 @@ class BrowserAgent:
             return True
         except Exception as e:
             err_text = str(e)
-            # ERR_ABORTED means the symbol doesn't exist on WealthCharts — NOT a browser crash.
-            # Cache the failure for 5 min and skip; do NOT count toward self-heal threshold.
+            # ERR_ABORTED means WealthCharts rejected the URL — NOT a browser crash.
+            # With keyboard search this shouldn't happen, but keep guard for safety.
             if "ERR_ABORTED" in err_text or "net::ERR_ABORTED" in err_text:
                 self._failed_symbols[symbol] = _time.time()
-                logger.warning("[NAV] Symbol %s not available on WealthCharts — cached skip (5 min)", symbol)
+                logger.warning("[NAV] Symbol %s rejected by WealthCharts — cached skip (5 min)", symbol)
             else:
                 logger.error("[NAV] Failed to navigate to WealthCharts %s: %s", symbol, e)
             return False
