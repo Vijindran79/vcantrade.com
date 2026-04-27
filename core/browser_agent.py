@@ -399,10 +399,7 @@ class BrowserAgent:
 
     async def click_order_button(self, action: str, quantity: float = 1000, price: float = 0) -> bool:
         """
-        Click the buy/sell button on WealthCharts or exchange.
-        
-        NOTE: This is a DRY RUN simulation. Real exchange clicking
-        requires specific selectors for each platform.
+        Click the buy/sell button on WealthCharts.
         
         Args:
             action: 'BUY' or 'SELL'
@@ -410,25 +407,33 @@ class BrowserAgent:
             price: Target price (0 = market order)
             
         Returns:
-            True if click simulated successfully
+            True if click executed successfully
         """
         try:
-            # For TradingView demo - just log the action
-            # Real implementation would need exchange-specific selectors
-            logger.info(f"[MOUSE] DRY RUN: Would click {action} for {quantity:.4f} units @ ${price:.2f}")
-            logger.info(f"[NOTE] TradingView doesn't support direct order execution in demo mode")
-            logger.info(f"[OK] Simulated {action} order: {quantity:.4f} units")
-            
-            # In production, this would:
-            # 1. Click "Trade" button on TradingView
-            # 2. Fill in quantity field
-            # 3. Select BUY or SELL
-            # 4. Click "Place Order"
-            # For now, we simulate success
-            
+            if not self.page:
+                logger.error("[MOUSE] No WealthCharts page available")
+                return False
+
+            action = action.strip().upper()
+            if action not in {"BUY", "SELL"}:
+                logger.error("[MOUSE] Invalid action: %s", action)
+                return False
+
+            # Ensure Order Entry panel is open
+            await self._ensure_order_entry_visible()
+
+            # Find and click the target button
+            button_text = "Buy" if action == "BUY" else "Sell"
+            locator = self.page.get_by_role("button", name=button_text, exact=False)
+            if await locator.count() == 0:
+                logger.error("[MOUSE] Could not find %s button on WealthCharts", action)
+                return False
+
+            await locator.first.click(delay=50)
+            logger.info(f"[MOUSE] Clicked {action} button on WealthCharts for {quantity:.4f} units @ ${price:.2f}")
             return True
         except Exception as e:
-            logger.error(f"[FAIL] Failed to click order button: {e}")
+            logger.error(f"[FAIL] Failed to click WealthCharts order button: {e}")
             return False
 
     async def start(self):
@@ -515,13 +520,53 @@ class BrowserAgent:
             return
         # Check DOM for login form indicators
         has_login_form = await self.page.evaluate("""() => {
-            const email = document.querySelector('input[type="email"], input[name="username"]');
-            const pass = document.querySelector('input[type="password"]');
+            const email = document.querySelector('input[type="email"], input[name="username"], input[placeholder*="email" i]');
+            const pass = document.querySelector('input[type="password"], input[placeholder*="password" i]');
             return !!(email && pass);
         }""")
         if has_login_form:
             logger.warning("[LOGIN] WealthCharts login form detected in DOM. Waiting 30s for manual login...")
             await asyncio.sleep(30)
+
+    async def _ensure_order_entry_visible(self):
+        """Ensure WealthCharts Order Entry panel is open and unobstructed."""
+        if not self.page:
+            return False
+        try:
+            # Check if Order Entry panel is already visible
+            panel_visible = await self.page.evaluate("""() => {
+                const panel = document.querySelector(
+                    '[class*="order-entry-panel"], [class*="wc-order-panel"], [data-testid="order-entry"], [class*="trading-panel"]'
+                );
+                return !!panel && panel.offsetParent !== null && panel.getBoundingClientRect().height > 80;
+            }""")
+            if panel_visible:
+                logger.info("[ORDER ENTRY] WealthCharts Order Entry panel already visible")
+                return True
+
+            # Try to open Order Entry panel via UI controls
+            opened = await self.page.evaluate("""() => {
+                const triggers = document.querySelectorAll(
+                    'button[title*="Order Entry" i], [aria-label*="Order Entry" i], [class*="order-entry-toggle"]'
+                );
+                for (const trigger of triggers) {
+                    if (trigger.offsetParent !== null) {
+                        trigger.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            if opened:
+                await asyncio.sleep(1)
+                logger.info("[ORDER ENTRY] Opened WealthCharts Order Entry panel")
+                return True
+
+            logger.warning("[ORDER ENTRY] Could not confirm WealthCharts Order Entry panel is visible")
+            return False
+        except Exception as e:
+            logger.warning("[ORDER ENTRY] Error checking Order Entry panel: %s", e)
+            return False
 
     async def navigate_to_wealthcharts(self):
         """Navigate to WealthCharts using first configured ticker."""
@@ -533,7 +578,8 @@ class BrowserAgent:
 
     async def navigate_to_symbol(self, symbol: str):
         """Navigate to any WealthCharts symbol chart.
-        STURDY BRIDGE: Sets navigation lock during transit so other cycles skip."""
+        STURDY BRIDGE: Sets navigation lock during transit so other cycles skip.
+        Ensures Order Entry panel is visible after navigation."""
         if not self.is_running or not self.page:
             logger.warning("[NAV] Browser agent not running, starting...")
             await self.start()
@@ -557,6 +603,10 @@ class BrowserAgent:
 
             # Give chart widgets time to render
             await asyncio.sleep(2)
+
+            # Ensure Order Entry panel is open and unobstructed
+            await self._ensure_order_entry_visible()
+
             return True
         except Exception as e:
             logger.error("[NAV] Failed to navigate to WealthCharts %s: %s", symbol, e)
@@ -799,7 +849,7 @@ class BrowserAgent:
 
     async def _wait_for_chart_ready(self, timeout_ms: int = 10000):
         """
-        Verify that the chart candles are actually visible before taking a screenshot.
+        Verify that the WealthCharts/TradingView chart candles are visible before taking a screenshot.
         Waits up to timeout_ms for loading spinners to disappear and canvas to appear.
         """
         import asyncio
@@ -808,13 +858,14 @@ class BrowserAgent:
         
         while (asyncio.get_event_loop().time() - start_time) < timeout_sec:
             try:
-                # Check if any loading indicators are present
+                # Check if any loading indicators are present (WealthCharts + TradingView)
                 loading_selectors = [
                     '[class*="loading"]',
                     '[class*="spinner"]',
                     '[class*="progress"]',
                     '.tv-loading-indicator',
                     '[data-loading="true"]',
+                    '[class*="wc-loading"]',
                 ]
                 any_loading = False
                 for sel in loading_selectors:
@@ -831,13 +882,14 @@ class BrowserAgent:
                     await asyncio.sleep(0.5)
                     continue
                 
-                # Check if chart canvas or candle elements are visible
+                # Check if chart canvas or candle elements are visible (WealthCharts + TradingView)
                 chart_selectors = [
                     'canvas',
                     '[class*="chart"]',
                     '[class*="candle"]',
                     '[class*="pane"]',
                     '[data-name="chart"]',
+                    '[class*="wc-chart"]',
                 ]
                 chart_visible = False
                 for sel in chart_selectors:
@@ -861,7 +913,7 @@ class BrowserAgent:
         logger.warning("[CHART] Chart readiness timeout — proceeding with screenshot anyway")
 
     async def _close_blocking_popups(self):
-        """Dismiss TradingView pop-ups that can cover the chart before screenshots.
+        """Dismiss WealthCharts/TradingView pop-ups that can cover the chart/Order Entry panel.
         CRASH-PROOF: Broad exception wrapping — bot must never die here."""
         if not self.page:
             return
@@ -874,7 +926,8 @@ class BrowserAgent:
                 pass
             try:
                 closed_count = await self.page.evaluate("""() => {
-                    const blockerText = /need help|intraday|upgrade|trial|paper trading|got it/i;
+                    // Match common WealthCharts + TradingView popup text
+                    const blockerText = /need help|intraday|upgrade|trial|paper trading|got it|welcome|tour|guide|order entry/i;
                     let closed = 0;
 
                     const clickCloseButton = (root) => {
@@ -883,6 +936,7 @@ class BrowserAgent:
                             'button[title*="Close" i]',
                             '[data-name*="close" i]',
                             '[class*="close" i]',
+                            '[class*="dismiss" i]',
                         ];
                         for (const selector of selectors) {
                             const button = root.querySelector(selector);
@@ -929,7 +983,7 @@ class BrowserAgent:
                     return closed;
                 }""")
                 if closed_count:
-                    logger.info("[POPUP] Closed %s blocking TradingView pop-up element(s)", closed_count)
+                    logger.info("[POPUP] Closed %s blocking WealthCharts/TradingView pop-up element(s)", closed_count)
                     await asyncio.sleep(0.25)
             except Exception:
                 pass

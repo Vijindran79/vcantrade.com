@@ -140,34 +140,33 @@ class RPAExecutor:
         # Default pass-through
         return upper
 
-    def _ensure_trading_panel_open(self, page):
-        """Ensure TradingView trading panel is open. Uses JS + keyboard fallback."""
+    def _ensure_order_entry_panel_open(self, page):
+        """Ensure WealthCharts Order Entry panel is visible and unobstructed. Uses JS + keyboard fallback."""
         try:
-            # Try JavaScript first: look for order panel in DOM
+            # Try JavaScript first: look for WealthCharts Order Entry panel in DOM
             panel_open = page.evaluate("""() => {
-                const panel = document.querySelector('[data-name="order-panel"], [class*="orderPanel"], [class*="trading-panel"]');
+                const panel = document.querySelector(
+                    '[class*="order-entry-panel"], [class*="wc-order-panel"], [data-testid="order-entry"], [class*="trading-panel"]'
+                );
                 return !!panel && panel.offsetParent !== null;
             }""")
             if panel_open:
-                logger.info("[PLAYWRIGHT] Trading panel already open")
+                logger.info("[PLAYWRIGHT] WealthCharts Order Entry panel already open")
                 return True
 
-            # Try opening panel via JS click on toolbar icon (no keyboard)
+            # Try opening panel via JS click on WealthCharts Order Entry toggle
             opened = page.evaluate("""() => {
-                const icons = document.querySelectorAll('[data-name="trading-panel-button"], [title*="Trading"], [class*="trading"]');
-                for (const icon of icons) {
-                    if (icon.offsetParent !== null) {
-                        icon.click();
-                        return true;
-                    }
-                }
-                // Try right sidebar tab
-                const tabs = document.querySelectorAll('[data-name="right-toolbar"] button, [class*="toolbar"] button');
-                for (const tab of tabs) {
-                    const txt = (tab.textContent || tab.title || '').toLowerCase();
-                    if (txt.includes('trade') || txt.includes('order')) {
-                        tab.click();
-                        return true;
+                // Look for Order Entry toggle/button in WealthCharts UI
+                const triggers = document.querySelectorAll(
+                    '[title*="Order Entry"], [aria-label*="Order Entry"], button[class*="order-entry-toggle"], [class*="toolbar"] button'
+                );
+                for (const trigger of triggers) {
+                    const txt = (trigger.textContent || trigger.title || trigger.getAttribute('aria-label') || '').toLowerCase();
+                    if (txt.includes('order') || txt.includes('trade')) {
+                        if (trigger.offsetParent !== null) {
+                            trigger.click();
+                            return true;
+                        }
                     }
                 }
                 return false;
@@ -175,17 +174,19 @@ class RPAExecutor:
             if opened:
                 time.sleep(1.5)
                 panel_open = page.evaluate("""() => {
-                    const panel = document.querySelector('[data-name="order-panel"], [class*="orderPanel"], [class*="trading-panel"]');
+                    const panel = document.querySelector(
+                        '[class*="order-entry-panel"], [class*="wc-order-panel"], [data-testid="order-entry"], [class*="trading-panel"]'
+                    );
                     return !!panel && panel.offsetParent !== null;
                 }""")
                 if panel_open:
-                    logger.info("[PLAYWRIGHT] Trading panel opened via JS click")
+                    logger.info("[PLAYWRIGHT] WealthCharts Order Entry panel opened via JS click")
                     return True
 
-            logger.warning("[PLAYWRIGHT] Could not confirm trading panel is open")
+            logger.warning("[PLAYWRIGHT] Could not confirm WealthCharts Order Entry panel is open")
             return False
         except Exception as e:
-            logger.warning("[PLAYWRIGHT] Trading panel check failed: %s", e)
+            logger.warning("[PLAYWRIGHT] WealthCharts Order Entry panel check failed: %s", e)
             return False
 
     def _click_via_html(self, action, page):
@@ -297,39 +298,40 @@ class RPAExecutor:
             return False
 
     def _verify_position_html(self, ticker, page):
-        """Verify position opened by checking TradingView DOM."""
+        """Verify position opened by checking WealthCharts DOM."""
         try:
             time.sleep(3)  # Give DOM time to update
             has_position = page.evaluate("""() => {
-                // Look for position rows in various TV panels
+                // Look for position rows in WealthCharts panels
                 const selectors = [
-                    '[data-name="position-row"]',
-                    '[class*="position"]',
-                    '[class*=" Position"]',
+                    '[class*="position-row"]',
+                    '[class*="open-position"]',
+                    '[data-testid="position"]',
+                    '[class*="trade-position"]',
                     'tr[class*="position"]',
                 ];
                 for (const sel of selectors) {
                     const el = document.querySelector(sel);
                     if (el && el.offsetParent !== null) return true;
                 }
-                // Also check if positions tab has a count badge
-                const badge = document.querySelector('[data-name="positions-badge"], [class*="badge"]');
+                // Check for position count badges
+                const badge = document.querySelector('[class*="position-badge"], [class*="badge"]');
                 if (badge && badge.textContent && badge.textContent.trim() !== '' && badge.textContent.trim() !== '0') {
                     return true;
                 }
                 return false;
             }""")
             if has_position:
-                logger.info("[VERIFY] %s position confirmed in TradingView DOM", ticker)
+                logger.info("[VERIFY] %s position confirmed in WealthCharts DOM", ticker)
                 return True
-            logger.warning("[VERIFY] %s position not found in DOM - weak pass", ticker)
-            return True  # Weak pass: TV may show positions differently per broker
+            logger.warning("[VERIFY] %s position not found in WealthCharts DOM - weak pass", ticker)
+            return True  # Weak pass: WealthCharts may show positions differently per broker
         except Exception as e:
-            logger.warning("[VERIFY] DOM verification error for %s: %s", ticker, e)
+            logger.warning("[VERIFY] WealthCharts DOM verification error for %s: %s", ticker, e)
             return True  # Don't block on verification errors
 
     def scrape_live_balance(self):
-        """Scrape Net Liq and Day P/L from TradingView/Tradovate account dashboard.
+        """Scrape Net Liq and Day P/L from WealthCharts account dashboard.
         Uses strict nearby-label reads only; never guesses from page-wide amounts.
         Returns a dict: {"net_liq": float, "day_pl": float} or None."""
         page = self._get_playwright_page()
@@ -338,9 +340,9 @@ class RPAExecutor:
             return None
 
         try:
-            # Ensure we're on the TradingView tab
-            if "tradingview" not in (page.url or "").lower():
-                logger.warning("[BALANCE] Current tab is not TradingView (%s); cannot scrape balance", page.url[:60])
+            # Ensure we're on the WealthCharts tab
+            if "wealthcharts" not in (page.url or "").lower():
+                logger.warning("[BALANCE] Current tab is not WealthCharts (%s); cannot scrape balance", page.url[:60])
                 return None
 
             def _extract_number(text):
@@ -463,13 +465,13 @@ class RPAExecutor:
         try:
             # Ask the page what account name is currently visible
             current_account = page.evaluate("""() => {
-                // TradingView broker panel often shows account name in specific areas
+                // WealthCharts account selector elements
                 const selectors = [
-                    '[class*="account"]',
-                    '[class*="broker"]',
-                    '[data-name="account"]',
-                    'button[data-role="account-select"]',
-                    '[class*="header"] [class*="title"]',
+                    '[class*="account-selector"]',
+                    '[class*="broker-account"]',
+                    '[data-testid="account-dropdown"]',
+                    'button[class*="account-select"]',
+                    '[class*="header"] [class*="account"]',
                 ];
                 for (const sel of selectors) {
                     const el = document.querySelector(sel);
@@ -510,17 +512,17 @@ class RPAExecutor:
             return False
 
     def _select_apex_account(self, page):
-        """Attempt to auto-select the Apex account from the account dropdown."""
+        """Attempt to auto-select the Apex account from the WealthCharts account dropdown."""
         try:
             logger.info("[ACCOUNT] Attempting to auto-select Apex account...")
 
             # Try to open the account dropdown
             clicked_dropdown = page.evaluate("""() => {
                 const triggers = [
-                    'button[data-role="account-select"]',
-                    '[class*="account-select"]',
-                    '[class*="broker-select"]',
-                    'div[role="button"]',
+                    'button[class*="account-select"]',
+                    '[class*="account-selector"]',
+                    '[data-testid="account-dropdown"]',
+                    'div[role="button"][class*="account"]',
                 ];
                 for (const sel of triggers) {
                     const el = document.querySelector(sel);
@@ -533,7 +535,7 @@ class RPAExecutor:
                 const all = document.querySelectorAll('div, span, button');
                 for (const el of all) {
                     const text = el.textContent.trim();
-                    if (/APEX|Funded|Live|Demo|Sim|Account/i.test(text) && text.length < 60) {
+                    if (/PAAPEX|APEX|Funded|Live|Demo|Sim|Account/i.test(text) && text.length < 60) {
                         el.click();
                         return true;
                     }
@@ -606,7 +608,7 @@ class RPAExecutor:
                 )
 
         tv_symbol = self._map_ticker_to_tv(trade.asset)
-        url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
+        url = f"{config.WEALTHCHARTS_URL}/?symbol={tv_symbol}"
 
         try:
             logger.info("[PLAYWRIGHT] Navigating to %s for %s", tv_symbol, trade.asset)
@@ -620,8 +622,8 @@ class RPAExecutor:
             current_url = page.url or ""
             logger.info("[PLAYWRIGHT] Chart loaded for %s at %s", tv_symbol, current_url)
 
-            # Ensure trading panel is open
-            panel_ok = self._ensure_trading_panel_open(page)
+            # Ensure Order Entry panel is open
+            panel_ok = self._ensure_order_entry_panel_open(page)
             if not panel_ok:
                 logger.warning("[PLAYWRIGHT] Trading panel may not be open - proceeding anyway")
 
@@ -806,7 +808,7 @@ class RPAExecutor:
 
     def _get_browser_window(self, ticker_hint=None):
         """Find the active broker/browser window using config hints and ticker titles."""
-        default_hints = ["TradingView", "Tradovate", "Google Chrome", "Chrome", "Brave", "Microsoft Edge", "Edge"]
+        default_hints = ["WealthCharts", "Google Chrome", "Chrome", "Brave", "Microsoft Edge", "Edge"]
         hints = list(getattr(config, "BROWSER_WINDOW_HINTS", default_hints)) or default_hints
         hint_terms = {str(hint).lower() for hint in hints if str(hint).strip()}
         ticker_terms = self._ticker_window_terms(ticker_hint)
@@ -868,31 +870,31 @@ class RPAExecutor:
     def _detect_platform(self):
         """
         Chameleon Interface: Detect active trading platform.
-        Returns 'tradingview', 'tradovate', 'mt5', or 'unknown'.
+        TradingView is analysis-only (strategy map), WealthCharts is execution (trigger).
+        Returns 'wealthcharts', 'mt5', or 'unknown'.
         """
         try:
-            # 1. Check for MT5 window (brother's setup)
+            # 1. Check for MT5 window (swarm math verification)
             for hint in getattr(config, "MT5_WINDOW_HINTS", ["MetaTrader 5"]):
                 windows = gw.getWindowsWithTitle(hint)
                 if windows and any(getattr(w, "visible", True) for w in windows):
                     logger.info("[CHAMELEON] Detected MT5 window: %s", hint)
                     return "mt5"
-            # 2. Check Playwright page URL for TradingView/Tradovate
+            # 2. Check Playwright page URL for WealthCharts
             if self._page and not self._page.is_closed():
                 url = (self._page.url or "").lower()
+                if "wealthcharts" in url:
+                    return "wealthcharts"
                 if "tradingview" in url:
-                    return "tradingview"
-                if "tradovate" in url:
-                    return "tradovate"
+                    logger.info("[CHAMELEON] Detected TradingView (analysis only)")
+                    return "unknown"  # TV is analysis only, not execution
             # 3. Check active browser window title
-            for hint in getattr(config, "BROWSER_WINDOW_HINTS", ["TradingView", "Chrome"]):
+            for hint in getattr(config, "BROWSER_WINDOW_HINTS", ["WealthCharts", "Chrome"]):
                 windows = gw.getWindowsWithTitle(hint)
                 if windows:
                     title = windows[0].title.lower()
-                    if "tradingview" in title:
-                        return "tradingview"
-                    if "tradovate" in title:
-                        return "tradovate"
+                    if "wealthcharts" in title:
+                        return "wealthcharts"
         except Exception as e:
             logger.debug("[CHAMELEON] Platform detection error: %s", e)
         return "unknown"
@@ -901,7 +903,7 @@ class RPAExecutor:
         """The 'Lion Strike': Precise, Human-like, and Verified."""
         window = self._get_browser_window(ticker)
         if not window:
-            logger.error(f"[FAIL] Could not find TradingView window for {ticker}")
+                logger.error(f"[FAIL] Could not find WealthCharts window for {ticker}")
             return False
 
         try:
@@ -943,16 +945,16 @@ class RPAExecutor:
             return True
 
         except Exception as e:
-            logger.error(f"[WARN] Strike Sequence failed: {e}")
+            logger.error(f"[WARN] Strike Sequence failed on WealthCharts: {e}")
             return False
 
     def force_hand_test_move(self, ticker_hint=None):
-        """Test method: move cursor to center of TradingView Buy button and back to screen center."""
+        """Test method: move cursor to center of WealthCharts Buy button and back to screen center."""
         import pyautogui
         logger.info("[HAND-TEST] Starting force hand test move for %s...", ticker_hint or "active chart")
         window = self._get_browser_window(ticker_hint)
         if not window:
-            logger.error("[HAND-TEST] No TradingView/Chrome window found for %s", ticker_hint or "active chart")
+            logger.error("[HAND-TEST] No WealthCharts/Chrome window found for %s", ticker_hint or "active chart")
             return False
         try:
             window.activate()
@@ -991,11 +993,11 @@ class RPAExecutor:
             return False
 
     def verify_position_opened(self, ticker):
-        """Screenshot-based confirmation that the position appears in TradingView."""
-        time.sleep(4)  # Wait for broker fill (extended for TradingView delay)
+        """Screenshot-based confirmation that the position appears in WealthCharts."""
+        time.sleep(4)  # Wait for broker fill (extended for WealthCharts delay)
         window = self._get_browser_window()
         if not window:
-            logger.warning(f"[VERIFY] Cannot verify {ticker}: TradingView window not found")
+            logger.warning(f"[VERIFY] Cannot verify {ticker}: WealthCharts window not found")
             return False
 
         try:
@@ -1010,7 +1012,7 @@ class RPAExecutor:
                 normalized_text = text.upper().replace("-", "").replace("/", "")
                 normalized_ticker = ticker.upper().replace("-", "").replace("/", "")
                 if normalized_ticker in normalized_text:
-                    logger.info(f"[VERIFY] {ticker} confirmed in positions panel via OCR")
+                    logger.info(f"[VERIFY] {ticker} confirmed in WealthCharts positions panel via OCR")
                     return True
             except ImportError:
                 pass  # OCR not available, fall through
@@ -1023,19 +1025,19 @@ class RPAExecutor:
                         template_path, confidence=0.7, region=(window.left, window.top, window.width, window.height)
                     )
                     if location:
-                        logger.info(f"[VERIFY] {ticker} confirmed via template match")
+                        logger.info(f"[VERIFY] {ticker} confirmed via WealthCharts template match")
                         return True
             except Exception:
                 pass  # Template match failed or pyautogui lacks confidence support
 
-            # Weak fallback: check if window title still contains TradingView (means no crash)
-            if any(name in window.title for name in ["TradingView", "Tradovate"]):
-                logger.warning(f"[VERIFY] {ticker}: weak pass (window active, no OCR/template)")
+            # Weak fallback: check if window title still contains WealthCharts (means no crash)
+            if any(name in window.title for name in ["WealthCharts", "wealthcharts"]):
+                logger.warning(f"[VERIFY] {ticker}: weak pass (WealthCharts window active, no OCR/template)")
                 return True
 
             return False
         except Exception as exc:
-            logger.warning(f"[VERIFY] Exception during verification for {ticker}: {exc}")
+            logger.warning(f"[VERIFY] Exception during WealthCharts verification for {ticker}: {exc}")
             return False
 
     def assert_permissions_or_die(self):
@@ -1043,20 +1045,20 @@ class RPAExecutor:
         # Simplified: assume permissions are ok
         logger.info("Permissions check passed")
 
-    def bring_tradingview_to_front(self, ticker_hint=None):
-        """Focus the TradingView browser window. Returns True if successful."""
+    def bring_wealthcharts_to_front(self, ticker_hint=None):
+        """Focus the WealthCharts browser window. Returns True if successful."""
         window = self._get_browser_window(ticker_hint)
         if not window:
-            logger.warning("[FOCUS] Could not find TradingView window for %s", ticker_hint or "unknown")
+            logger.warning("[FOCUS] Could not find WealthCharts window for %s", ticker_hint or "unknown")
             return False
         try:
             window.activate()
             if self.human_latency_enabled:
                 time.sleep(random.uniform(0.3, 0.6))
-            logger.info("[FOCUS] TradingView window brought to front for %s", ticker_hint or "unknown")
+            logger.info("[FOCUS] WealthCharts window brought to front for %s", ticker_hint or "unknown")
             return True
         except Exception as e:
-            logger.warning("[FOCUS] Failed to activate TradingView window: %s", e)
+            logger.warning("[FOCUS] Failed to activate WealthCharts window: %s", e)
             return False
 
     def describe_entry_target(self, action, ticker_hint=None):
@@ -1122,16 +1124,16 @@ class RPAExecutor:
             platform, action, asset
         )
 
-        # MT5 path: coordinate/image-based clicking (brother's setup)
+        # MT5 path: coordinate/image-based clicking (swarm math verification)
         if platform == "mt5":
             logger.info("[EXEC] MT5 detected — using coordinate-based clicking for %s %s", action, asset)
             return self._execute_trade_mt5(trade)
 
-        # TradingView / Tradovate path: DOM-based Playwright clicking
-        if platform in ("tradingview", "tradovate"):
+        # WealthCharts path: DOM-based Playwright clicking (execution trigger)
+        if platform == "wealthcharts":
             if self._playwright_available:
                 try:
-                    logger.info("[EXEC] Attempting HTML injection for %s %s", action, asset)
+                    logger.info("[EXEC] Attempting WealthCharts HTML injection for %s %s", action, asset)
                     html_result = self._execute_trade_html(trade)
                     if html_result:
                         return True

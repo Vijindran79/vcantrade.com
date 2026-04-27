@@ -152,6 +152,10 @@ TRADINGVIEW_SYMBOL_MAP = {
     "CME_MINI:MNQ1!": "NQM6",
     "CME_MINI:MES1!": "ESM6",
     "NYMEX:MCL1!": "MCLM6",
+    # Bare TradingView contract codes (user-specified analysis tickers)
+    "MNQ1!": "NQM6",
+    "MES1!": "ESM6",
+    "MCL1!": "MCLM6",
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
