@@ -50,6 +50,8 @@ class BrowserAgent:
         self._dialog_handler_page: Optional[Page] = None
         # STURDY BRIDGE: Navigation lock flag
         self._navigating: bool = False
+        # CDP cache clear tracking: only clear once per day on first self-heal
+        self._last_cache_clear_date: Optional[str] = None
 
         logger.info(f"[GLOBE] Browser Agent initialized (headless={headless})")
 
@@ -1082,6 +1084,22 @@ class BrowserAgent:
             f"[WRENCH] Self-Healing Restart #{self.restart_count} initiated... "
             f"(Last error: {self.last_error})"
         )
+
+        # Clear CDP cache once per day to keep Sturdy Bridge fast
+        from datetime import date
+        today_str = str(date.today())
+        if self._last_cache_clear_date != today_str:
+            logger.info("[CACHE] First self-heal of the day — clearing Chrome/CDP cache")
+            try:
+                if self.page:
+                    # Clear browser cache via CDP
+                    cdp = await self.page.context.new_cdp_session(self.page)
+                    await cdp.send("Network.clearBrowserCache")
+                    await cdp.send("Network.clearBrowserCookies")
+                    logger.info("[CACHE] Chrome cache + cookies cleared")
+            except Exception as e:
+                logger.debug("[CACHE] Cache clear skipped (non-critical): %s", e)
+            self._last_cache_clear_date = today_str
 
         try:
             # Stop current browser instance

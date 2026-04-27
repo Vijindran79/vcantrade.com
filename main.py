@@ -3933,7 +3933,7 @@ class VcaniTradeApp:
         """
         from core.market_sessions import is_crypto_ticker
         ticker = signal_data.get("ticker", "UNKNOWN")
-        if not self.can_trade and not is_crypto_ticker(ticker):
+        if not self.can_trade and not is_crypto_ticker(ticker) and not is_futures_ticker(ticker):
             self.cmd.log(
                 '<span style="color:#D29922;font-weight:bold">[APEX BLOCK]</span> '
                 'Cloud signal rejected — trading halted by Apex gate'
@@ -4888,7 +4888,7 @@ class VcaniTradeApp:
         """
         ticker = signal_data.get("ticker", "UNKNOWN")
         from core.market_sessions import is_crypto_ticker
-        if not self.can_trade and not force_execute and not is_crypto_ticker(ticker):
+        if not self.can_trade and not force_execute and not is_crypto_ticker(ticker) and not is_futures_ticker(ticker):
             self._log_ui(
                 '<span style="color:#D29922;font-weight:bold">[APEX BLOCK]</span> '
                 'Unified executor blocked — trading halted by Apex gate'
@@ -5166,9 +5166,9 @@ class VcaniTradeApp:
         Routes to MT5 or UI (RPA) based on config.EXECUTION_MODE.
         Returns True if execution succeeded.
         """
-        from core.market_sessions import is_crypto_ticker
-        is_crypto = is_crypto_ticker(symbol)
-        if not self.can_trade and not is_crypto:
+        from core.market_sessions import is_crypto_ticker, is_futures_ticker
+        is_always_on = is_crypto_ticker(symbol) or is_futures_ticker(symbol)
+        if not self.can_trade and not is_always_on:
             self.cmd.log(
                 f'<span style="color:#D29922;font-weight:bold">[BLOCKED]</span> '
                 f'Trade execution blocked: Apex gate or safety stop active'
@@ -5531,58 +5531,54 @@ class VcaniTradeApp:
         """
         try:
             from zoneinfo import ZoneInfo
-            from core.market_sessions import is_crypto_ticker
+            from core.market_sessions import is_crypto_ticker, is_futures_ticker
             now_et = datetime.now(ZoneInfo("America/New_York"))
             hour = now_et.hour
             minute = now_et.minute
             time_val = hour * 100 + minute  # e.g. 1630 for 4:30 PM
 
-            # CRYPTO NEVER BLOCKED: If watchlist or positions are all crypto, skip Apex gate
+            # CRYPTO + FUTURES NEVER BLOCKED: Both trade nearly 24/7
             watchlist = getattr(self, "current_watchlist", [])
             positions = getattr(self, "positions", [])
-            # Check if ANY crypto is in the watchlist or positions — don't block just because stocks exist
-            has_crypto = (
-                any(is_crypto_ticker(t) for t in watchlist)
-                or any(is_crypto_ticker(p.get("asset", "")) for p in positions)
+            has_always_on = (
+                any(is_crypto_ticker(t) or is_futures_ticker(t) for t in watchlist)
+                or any(is_crypto_ticker(p.get("asset", "")) or is_futures_ticker(p.get("asset", "")) for p in positions)
             )
-            all_crypto = (
-                (bool(watchlist) and all(is_crypto_ticker(t) for t in watchlist))
-                or (bool(positions) and all(is_crypto_ticker(p.get("asset", "")) for p in positions))
+            all_always_on = (
+                (bool(watchlist) and all(is_crypto_ticker(t) or is_futures_ticker(t) for t in watchlist))
+                or (bool(positions) and all(is_crypto_ticker(p.get("asset", "")) or is_futures_ticker(p.get("asset", "")) for p in positions))
             )
-            # If everything is crypto, skip Apex gate entirely
-            if all_crypto:
+            # If watchlist/positions are purely crypto or futures, skip Apex gate entirely
+            if all_always_on:
                 if not self.can_trade:
                     self.can_trade = True
-                    logger.info("[APEX] Crypto-only mode detected — Apex gate lifted, trading ALLOWED")
+                    logger.info("[APEX] Crypto/futures-only mode — Apex gate lifted, trading ALLOWED 24/7")
                 return
-            # If mixed (crypto + stocks), only block the stock portion — crypto still allowed
-            if has_crypto and not self.can_trade:
-                logger.info("[APEX] Mixed watchlist — crypto positions bypass Apex block, stocks blocked")
-                # Don't return; let the stock block apply, but crypto execution paths
-                # use is_crypto_ticker() to bypass can_trade individually
+            # If mixed, individual execution paths use is_crypto_ticker/is_futures_ticker to bypass
+            if has_always_on and not self.can_trade:
+                logger.info("[APEX] Mixed watchlist — crypto/futures bypass Apex block, equities blocked")
 
             # After 4:30 PM ET — block new trades
             if time_val >= 1630 and self.can_trade:
                 self.can_trade = False
-                logger.warning("[APEX] Market closing time reached (16:30 ET). New trades BLOCKED.")
+                logger.warning("[APEX] Market closing time reached (16:30 ET). Equity trades BLOCKED.")
                 self.cmd.log(
                     '<span style="color:#D29922;font-weight:bold">[APEX GATE]</span> '
-                    '16:30 ET reached — New trades BLOCKED until next session'
+                    '16:30 ET reached — Equity trades BLOCKED until next session'
                 )
-                self.ai_narrator.add_activity("[APEX]", "16:30 ET — No new trades")
+                self.ai_narrator.add_activity("[APEX]", "16:30 ET — No equity trades")
 
-            # After 4:45 PM ET — force close all NON-CRYPTO positions
+            # After 4:45 PM ET — force close equity-only positions (crypto+futures preserved)
             if time_val >= 1645 and self.positions:
-                # Split positions: crypto stays open, everything else gets flattened
-                crypto_positions = [p for p in self.positions if is_crypto_ticker(p.get("asset", ""))]
-                non_crypto_positions = [p for p in self.positions if not is_crypto_ticker(p.get("asset", ""))]
+                safe_positions = [p for p in self.positions if is_crypto_ticker(p.get("asset", "")) or is_futures_ticker(p.get("asset", ""))]
+                equity_positions = [p for p in self.positions if not (is_crypto_ticker(p.get("asset", "")) or is_futures_ticker(p.get("asset", "")))]
 
-                if non_crypto_positions:
+                if non_safe_positions:
                     logger.warning(
                         "[APEX] Forced position flattening at 16:45 ET. Non-crypto positions: %s. "
                         "Crypto positions PRESERVED: %s",
-                        [p["asset"] for p in non_crypto_positions],
-                        [p["asset"] for p in crypto_positions],
+                        [p["asset"] for p in non_safe_positions],
+                        [p["asset"] for p in safe_positions],
                     )
                     self.cmd.log(
                         '<span style="color:#F85149;font-weight:bold">[APEX GATE]</span> '
@@ -5593,7 +5589,7 @@ class VcaniTradeApp:
                     # Close non-crypto via executor if available
                     if self.executor:
                         try:
-                            for p in non_crypto_positions:
+                            for p in non_safe_positions:
                                 self.executor.close_position(p.get("asset", ""), reason="Apex 16:45 ET forced close")
                         except Exception as e:
                             logger.error("[APEX] Executor close_position failed: %s", e)
@@ -5616,7 +5612,7 @@ class VcaniTradeApp:
                             logger.error("[APEX] MT5 position close failed: %s", e)
 
                     # Update positions: keep crypto, remove non-crypto
-                    self.positions = crypto_positions
+                    self.positions = safe_positions
                     self.cmd.update_positions(self.positions)
                     self._refresh_live_ledger()
                     self.ai_narrator.notify_error("Non-crypto positions flattened — Apex closing time (crypto preserved)")
