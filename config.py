@@ -7,7 +7,7 @@ Safety-first trading configuration with strict defaults
 MAX_DAILY_TRADES = 30          # Hard cap to prevent overtrading
 RE_ENTRY_LOCKOUT_MINUTES = 5   # Cooldown after a trade closes
 TRAILING_STOP_CANDLE_MIN = 3   # Use 3-min candles for smoother stops
-RSI_VETO_THRESHOLD = 80        # Abort if RSI > 80 (Buy) or < 20 (Sell)
+RSI_VETO_THRESHOLD = 85        # Abort if RSI > 85 (Buy) or < 20 (Sell) — relaxed for Frenzy Strike
 WINDOW_SETTLE_TIME = 1.5       # Seconds to wait for window focus
 MOUSE_HUMAN_DELAY_MIN = 0.8    # Min reaction time
 MOUSE_HUMAN_DELAY_MAX = 1.6    # Max reaction time
@@ -121,7 +121,7 @@ CLOUD_TICKERS = ["BTC-USD", "ES=F", "NQ=F"]
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
 MULTI_ASSET_TICKERS = ["CME_MINI:MNQ1!", "CME_MINI:MES1!", "NYMEX:MCL1!"]
-MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "30"))
+MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
 SYMBOL_MAP = {
@@ -200,7 +200,7 @@ FRIDAY_CLOSE_CUTOFF_UTC = int(os.getenv("FRIDAY_CLOSE_CUTOFF_UTC", "18"))
 # Technical Signal Thresholds
 VOLUME_SPIKE_MULTIPLIER = 3.0
 PRICE_SPIKE_THRESHOLD_PCT = float(os.getenv("PRICE_SPIKE_THRESHOLD_PCT", "1.5"))  # % move in 5 bars = spike
-RSI_OVERBOUGHT = 70
+RSI_OVERBOUGHT = 85
 RSI_OVERSOLD = 30
 SMA_FAST = 20
 SMA_SLOW = 50
@@ -238,7 +238,7 @@ MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 
 # ===== AGGRESSIVE HUNTER =====
 # If signal confidence >= this threshold, skip 1m/3m MTF alignment and strike on 5m alone.
-AGGRESSIVE_HUNTER_CONFIDENCE_PCT = float(os.getenv("AGGRESSIVE_HUNTER_CONFIDENCE_PCT", "75.0"))
+AGGRESSIVE_HUNTER_CONFIDENCE_PCT = float(os.getenv("AGGRESSIVE_HUNTER_CONFIDENCE_PCT", "65.0"))
 
 # ===== AUTONOMOUS RISK MANAGEMENT =====
 AUTONOMOUS_BREAK_EVEN_TRIGGER_USD = 15.0
