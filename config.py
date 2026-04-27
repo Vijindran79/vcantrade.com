@@ -120,7 +120,7 @@ CLOUD_TICKERS = ["BTC-USD", "ES=F", "NQ=F"]
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
-MULTI_ASSET_TICKERS = ["CME_MINI:MNQ1!", "CME_MINI:MES1!", "NYMEX:MCL1!"]
+MULTI_ASSET_TICKERS = ["NYMEX:MCL1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
@@ -158,6 +158,7 @@ MT5_SYMBOL_MAP = {
     "CME_MINI:MNQ1!": "NAS100",
     "CME_MINI:MES1!": "US500",
     "NYMEX:MCL1!": "XTIUSD",
+    "MCL1!": "XTIUSD",  # bare contract form
     # Yahoo-style aliases -> Pepperstone
     "MNQ=F": "NAS100",
     "MES=F": "US500",

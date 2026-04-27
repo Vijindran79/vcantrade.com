@@ -1,8 +1,6 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "CME_MINI:MNQ1!",
-    "CME_MINI:MES1!",
     "NYMEX:MCL1!"
   ],
   "investment_amount": 1000.0,
