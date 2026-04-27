@@ -144,10 +144,97 @@ class CloudScanner:
                 )
             else:
                 logger.warning("[MT5] Connected but no account info retrieved")
+            self._warm_up_mt5_symbols()
             return True
         except Exception as e:
             logger.error("[MT5] Initialization error: %s", e)
             return False
+
+    def _add_symbol_candidate(self, candidates: List[str], symbol: str) -> None:
+        """Append a broker symbol candidate once, preserving order."""
+        value = str(symbol or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+
+    def _mt5_symbol_candidates(self, ticker: str) -> List[str]:
+        """Return broker-symbol candidates for an MT5 MarketWatch lookup."""
+        candidates: List[str] = []
+        raw = str(ticker or "").strip()
+
+        if raw:
+            self._add_symbol_candidate(candidates, raw)
+
+        mapped = ""
+        mt5_map = getattr(config, "MT5_SYMBOL_MAP", {}) or {}
+        if raw:
+            mapped = mt5_map.get(raw) or mt5_map.get(raw.upper()) or ""
+            self._add_symbol_candidate(candidates, mapped)
+
+        canonical = self._canonical_market_ticker(raw) if raw else ""
+        self._add_symbol_candidate(candidates, canonical)
+        if canonical:
+            self._add_symbol_candidate(candidates, mt5_map.get(canonical, ""))
+            self._add_symbol_candidate(candidates, mt5_map.get(canonical.upper(), ""))
+
+        translation = translate_chart_symbol(raw) or translate_chart_symbol(canonical)
+        if translation:
+            self._add_symbol_candidate(candidates, translation.mt5_symbol)
+            self._add_symbol_candidate(candidates, translation.yahoo_symbol)
+
+        for symbol in list(candidates):
+            upper = symbol.upper()
+            if upper.endswith("=F"):
+                self._add_symbol_candidate(candidates, symbol[:-2])
+            if "=" in symbol:
+                self._add_symbol_candidate(candidates, symbol.split("=", 1)[0])
+            if ":" in symbol:
+                self._add_symbol_candidate(candidates, symbol.split(":", 1)[-1])
+            if upper.endswith("1!"):
+                self._add_symbol_candidate(candidates, symbol[:-2])
+            if upper.endswith("!"):
+                self._add_symbol_candidate(candidates, symbol[:-1])
+
+        return candidates
+
+    def _select_mt5_symbol(self, ticker: str) -> Optional[str]:
+        """Select the first available MT5 symbol into MarketWatch."""
+        _mt5 = _lazy_mt5()
+        if _mt5 is False:
+            return None
+
+        for candidate in self._mt5_symbol_candidates(ticker):
+            try:
+                if _mt5.symbol_select(candidate, True):
+                    logger.debug("[MT5] MarketWatch symbol selected: %s", candidate)
+                    return candidate
+                logger.debug("[MT5] symbol_select(%s) returned False", candidate)
+            except Exception as exc:
+                logger.debug("[MT5] symbol_select(%s) failed: %s", candidate, exc)
+        return None
+
+    def _warm_up_mt5_symbols(self) -> None:
+        """Pre-select configured scanner symbols so MT5 MarketWatch is ready."""
+        watchlist: List[str] = []
+        for attr in ("CLOUD_TICKERS", "WATCHLIST", "MULTI_ASSET_TICKERS"):
+            values = getattr(config, attr, None)
+            if isinstance(values, (list, tuple, set)):
+                watchlist.extend(str(value).strip() for value in values if str(value).strip())
+        watchlist.extend(str(ticker).strip() for ticker in self.tickers if str(ticker).strip())
+
+        seen = set()
+        for ticker in watchlist:
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            selected = self._select_mt5_symbol(ticker)
+            if selected:
+                logger.info("[MT5] MarketWatch warm-up: %s -> %s", ticker, selected)
+            else:
+                logger.warning(
+                    "[MT5] MarketWatch warm-up failed for %s (tried: %s)",
+                    ticker,
+                    ", ".join(self._mt5_symbol_candidates(ticker)),
+                )
 
     def _mt5_timeframe(self, interval: str) -> Optional[int]:
         """Map string interval to MT5 timeframe constant. Returns None if MT5 unavailable."""
@@ -786,18 +873,37 @@ class CloudScanner:
                     return None
 
                 _mt5 = _lazy_mt5()
-                # Select symbol in MarketWatch
-                if not _mt5.symbol_select(market_ticker, True):
-                    # Symbol missing from MarketWatch — do not retry, it won't appear in 4s
-                    logger.warning("[WARN] Symbol %s not in MarketWatch - Skipping Cycle", market_ticker)
+                selected_symbol = self._select_mt5_symbol(market_ticker)
+                if not selected_symbol:
+                    tried = ", ".join(self._mt5_symbol_candidates(market_ticker))
+                    logger.warning(
+                        "[WARN] Symbol %s not selectable in MarketWatch (tried: %s) - Skipping Cycle",
+                        market_ticker,
+                        tried,
+                    )
                     fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                     if fallback is not None:
                         return fallback
                     logger.error("[WARN] Symbol %s unavailable in MT5 - Skipping Cycle", ticker)
                     return None
 
+                symbol_info = _mt5.symbol_info(selected_symbol)
+                if symbol_info is None:
+                    logger.warning(
+                        "[WARN] Symbol %s selected but has no MT5 info - Skipping Cycle",
+                        selected_symbol,
+                    )
+                    fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+                    if fallback is not None:
+                        return fallback
+                    logger.error("[WARN] Symbol %s unavailable in MT5 - Skipping Cycle", ticker)
+                    return None
+
+                if selected_symbol != market_ticker:
+                    logger.info("[MT5] Using broker symbol %s for %s", selected_symbol, market_ticker)
+
                 def _fetch():
-                    rates = _mt5.copy_rates_from_pos(market_ticker, mt5_tf, 0, count)
+                    rates = _mt5.copy_rates_from_pos(selected_symbol, mt5_tf, 0, count)
                     return rates
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
