@@ -5573,11 +5573,11 @@ class VcaniTradeApp:
                 safe_positions = [p for p in self.positions if is_crypto_ticker(p.get("asset", "")) or is_futures_ticker(p.get("asset", ""))]
                 equity_positions = [p for p in self.positions if not (is_crypto_ticker(p.get("asset", "")) or is_futures_ticker(p.get("asset", "")))]
 
-                if non_safe_positions:
+                if equity_positions:
                     logger.warning(
                         "[APEX] Forced position flattening at 16:45 ET. Non-crypto positions: %s. "
                         "Crypto positions PRESERVED: %s",
-                        [p["asset"] for p in non_safe_positions],
+                        [p["asset"] for p in equity_positions],
                         [p["asset"] for p in safe_positions],
                     )
                     self.cmd.log(
@@ -5589,7 +5589,7 @@ class VcaniTradeApp:
                     # Close non-crypto via executor if available
                     if self.executor:
                         try:
-                            for p in non_safe_positions:
+                            for p in equity_positions:
                                 self.executor.close_position(p.get("asset", ""), reason="Apex 16:45 ET forced close")
                         except Exception as e:
                             logger.error("[APEX] Executor close_position failed: %s", e)
@@ -5603,19 +5603,19 @@ class VcaniTradeApp:
                         try:
                             mt5_positions = mt5_executor.get_positions()
                             for p in mt5_positions:
-                                if is_crypto_ticker(p.get("symbol", "")):
-                                    continue  # Skip crypto positions
+                                if is_crypto_ticker(p.get("symbol", "")) or is_futures_ticker(p.get("symbol", "")):
+                                    continue  # Skip crypto+futures positions
                                 close_action = "SELL" if p["type"] == "BUY" else "BUY"
                                 mt5_executor.execute_trade(p["symbol"], close_action, volume=p["volume"])
                                 logger.info("[APEX] MT5 closed %s %s", p["type"], p["symbol"])
                         except Exception as e:
                             logger.error("[APEX] MT5 position close failed: %s", e)
 
-                    # Update positions: keep crypto, remove non-crypto
+                    # Update positions: keep crypto+futures, remove equities
                     self.positions = safe_positions
                     self.cmd.update_positions(self.positions)
                     self._refresh_live_ledger()
-                    self.ai_narrator.notify_error("Non-crypto positions flattened — Apex closing time (crypto preserved)")
+                    self.ai_narrator.notify_error("Equity positions flattened — Apex closing time (crypto+futures preserved)")
                 else:
                     # All positions are crypto — do nothing
                     logger.info("[APEX] 16:45 ET — All positions are crypto, no flattening needed")

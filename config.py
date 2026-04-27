@@ -131,24 +131,39 @@ SYMBOL_MAP = {
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
+# Pepperstone naming: indices use US500/NAS100, commodities use XTIUSD/XAUUSD, etc.
 MT5_SYMBOL_MAP = {
     # TradingView prefixes
-    "CME_MINI:MNQ1!": "MNQ1!",
-    "CME_MINI:MES1!": "MES1!",
-    "NYMEX:MCL1!": "MCL1!",
-    # Yahoo-style aliases
-    "MNQ=F": "MNQ1!",
-    "MES=F": "MES1!",
-    "CL=F": "CL1!",
-    "NQ=F": "NQ1!",
-    "ES=F": "ES1!",
-    "GC=F": "GC1!",
+    "CME_MINI:MNQ1!": "NAS100",
+    "CME_MINI:MES1!": "US500",
+    "NYMEX:MCL1!": "XTIUSD",
+    # Yahoo-style aliases -> Pepperstone
+    "MNQ=F": "NAS100",
+    "MES=F": "US500",
+    "CL=F": "XTIUSD",
+    "NQ=F": "NAS100",
+    "ES=F": "US500",
+    "GC=F": "XAUUSD",
     "YM=F": "YM1!",
     "RTY=F": "M2K1!",
-    "SI=F": "SI1!",
+    "SI=F": "XAGUSD",
     "HG=F": "HG1!",
+    # Canonical short forms (F stripped) -> Pepperstone
+    "ES": "US500",
+    "NQ": "NAS100",
+    "CL": "XTIUSD",
+    "MES": "US500",
+    "MNQ": "NAS100",
+    "MCL": "XTIUSD",
+    "GC": "XAUUSD",
+    "SI": "XAGUSD",
+    "YM": "YM1!",
+    # Crypto
     "BTC-USD": "BTCUSD",
     "ETH-USD": "ETHUSD",
+    "BTCUSD": "BTCUSD",
+    "ETHUSD": "ETHUSD",
+    # Stocks
     "TSLA": "TSLA",
     "NVDA": "NVDA",
     "AAPL": "AAPL",
