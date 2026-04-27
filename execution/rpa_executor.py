@@ -903,7 +903,7 @@ class RPAExecutor:
         """The 'Lion Strike': Precise, Human-like, and Verified."""
         window = self._get_browser_window(ticker)
         if not window:
-                logger.error(f"[FAIL] Could not find WealthCharts window for {ticker}")
+            logger.error("[FAIL] Could not find WealthCharts window for %s", ticker)
             return False
 
         try:
