@@ -511,8 +511,12 @@ class BrowserAgent:
             await asyncio.sleep(30)
 
     async def navigate_to_tradingview(self):
-        """Navigate to TradingView MNQ1! chart. Called after start()."""
-        return await self.navigate_to_symbol("CME_MINI:MNQ1!")
+        """Navigate to TradingView chart using first configured ticker."""
+        import config
+        tickers = getattr(config, "MULTI_ASSET_TICKERS", ["CME_MINI:MNQ1!"])
+        first_ticker = tickers[0] if tickers else "CME_MINI:MNQ1!"
+        logger.info("[NAV] Startup navigating to %s (from MULTI_ASSET_TICKERS)", first_ticker)
+        return await self.navigate_to_symbol(first_ticker)
 
     async def navigate_to_symbol(self, symbol: str):
         """Navigate to any TradingView symbol chart.

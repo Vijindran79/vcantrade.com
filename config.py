@@ -151,41 +151,40 @@ TRADINGVIEW_SYMBOL_MAP = {
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
-# Pepperstone MT5 naming — EXACT terminal symbol names with common variants.
-# Primary name first, then variant suffixes are tried by _mt5_symbol_candidates.
+# Pepperstone UK DEMO account — Spread Betting (GBP) uses _SB suffix.
+# Chart tabs show: Crude_SB, NAS100_SB, US500_SB
 MT5_SYMBOL_MAP = {
-    # TradingView prefixes -> Pepperstone primary name
-    "CME_MINI:MNQ1!": "NAS100",
-    "CME_MINI:MES1!": "US500",
-    "NYMEX:MCL1!": "XTIUSD",
-    "MCL1!": "XTIUSD",  # bare contract form
+    # TradingView prefixes -> Pepperstone exact terminal name
+    "CME_MINI:MNQ1!": "NAS100_SB",
+    "CME_MINI:MES1!": "US500_SB",
+    "NYMEX:MCL1!": "Crude_SB",
+    "MCL1!": "Crude_SB",  # bare contract form
     # Yahoo-style aliases -> Pepperstone
-    "MNQ=F": "NAS100",
-    "MES=F": "US500",
-    "CL=F": "XTIUSD",
-    "NQ=F": "NAS100",
-    "ES=F": "US500",
+    "MNQ=F": "NAS100_SB",
+    "MES=F": "US500_SB",
+    "CL=F": "Crude_SB",
+    "NQ=F": "NAS100_SB",
+    "ES=F": "US500_SB",
     "GC=F": "XAUUSD",
+    "SI=F": "XAGUSD",
     "YM=F": "YM1!",
     "RTY=F": "M2K1!",
-    "SI=F": "XAGUSD",
     "HG=F": "HG1!",
     # Canonical short forms (F stripped) -> Pepperstone
-    "ES": "US500",
-    "NQ": "NAS100",
-    "CL": "XTIUSD",
-    "MES": "US500",
-    "MNQ": "NAS100",
-    "MCL": "XTIUSD",
+    "ES": "US500_SB",
+    "NQ": "NAS100_SB",
+    "CL": "Crude_SB",
+    "MES": "US500_SB",
+    "MNQ": "NAS100_SB",
+    "MCL": "Crude_SB",
     "GC": "XAUUSD",
     "SI": "XAGUSD",
     "YM": "YM1!",
-    # PEPPERSTONE VARIANTS — alternate names tried if primary fails
-    # (appended by _mt5_symbol_candidates after suffix stripping)
-    "NAS100": "NAS100",   # self-reference ensures primary stays
-    "US500":  "US500",
-    "XTIUSD": "XTIUSD",
-    # Crypto
+    # PEPPERSTONE EXACT TERMINAL NAMES (self-references for suffix-stripped candidates)
+    "Crude_SB": "Crude_SB",
+    "NAS100_SB": "NAS100_SB",
+    "US500_SB": "US500_SB",
+    # Crypto (may not be available on SB account)
     "BTC-USD": "BTCUSD",
     "ETH-USD": "ETHUSD",
     "BTCUSD": "BTCUSD",
