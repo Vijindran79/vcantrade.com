@@ -1006,6 +1006,10 @@ class BrowserAgent:
                         if (rect.height < 80) {
                             continue;  // too short to be a blocking popup
                         }
+                        // PROTECT TRADING BAR: never hide elements containing Buy/Sell Mkt buttons
+                        if (text.includes('Buy Mkt') || text.includes('Sell Mkt')) {
+                            continue;
+                        }
                         if (!visible || !blockerText.test(text)) {
                             continue;
                         }

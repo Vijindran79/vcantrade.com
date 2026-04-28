@@ -3343,35 +3343,35 @@ class VcaniTradeApp:
         for pos in self.positions:
             try:
                 # Get current price with timeout protection
-                try:
-                    market_ticker = self._canonical_market_ticker(pos["asset"])
+                current_price = None
+                asset = pos.get("asset", "")
+
+                # PRICE SOURCE PIVOT: M6 contract codes use MT5, not Yahoo Finance
+                if asset and asset.upper().endswith("M6"):
+                    current_price = self._fetch_mt5_price_for_m6(asset)
+                    if current_price and current_price > 0:
+                        logger.debug("[POSITIONS] MT5 price for %s: %.4f", asset, current_price)
+
+                # Fallback to Yahoo Finance for non-M6 tickers
+                if current_price is None:
+                    market_ticker = self._canonical_market_ticker(asset)
                     ticker = yf.Ticker(market_ticker)
-                    
-                    # Run yfinance in thread with timeout
+
                     def fetch_price():
                         return ticker.history(period="1d", interval="1m")
-                    
+
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         future = executor.submit(fetch_price)
-                        hist = future.result(timeout=10)  # 10 second timeout
-                    
+                        hist = future.result(timeout=10)
+
                     if hist.empty:
-                        self.cmd.log(f"[WARN] No price data for {pos['asset']} - trying browser agent")
-                        # Fallback to browser agent if yfinance fails
+                        self.cmd.log(f"[WARN] No price data for {asset} - trying browser agent")
                         self._verify_price_with_browser(pos)
                         updated_positions.append(pos)
                         continue
-                    
+
                     current_price = hist["Close"].iloc[-1]
-                except concurrent.futures.TimeoutError:
-                    self.cmd.log(f"[WARN] Timeout fetching {pos['asset']} price - network lag")
-                    updated_positions.append(pos)
-                    continue
-                except Exception as e:
-                    self.cmd.log(f"[WARN] Failed to fetch {pos['asset']} price: {e}")
-                    updated_positions.append(pos)
-                    continue
-                
+
                 pos["current"] = current_price
 
                 # Calculate P&L
@@ -3385,43 +3385,46 @@ class VcaniTradeApp:
                 pos["pnl"] = pnl_usd
                 pos["pnl_pct"] = pnl_pct
 
-                # MANUAL TRADE PROTECTION: Skip auto-close for positions the bot didn't open
+                # MANUAL TRADE PROTECTION
                 if not pos.get("bot_opened"):
                     self.cmd.log(
-                        f"[MANUAL] Manual position detected: {pos['asset']} | "
+                        f"[MANUAL] Manual position detected: {asset} | "
                         f"P&L: ${pnl_usd:.2f} ({pnl_pct:.2f}%) — NOT managed by bot"
                     )
                     updated_positions.append(pos)
                     continue
 
-                self._manage_position_stop(pos, hist)
+                self._manage_position_stop(pos, None)
 
-                # Check Take Profit (skip if tp_price is 0/unset)
+                # Check Take Profit
                 if pos.get("tp_price", 0) > 0:
                     if pos["side"] == "BUY" and current_price >= pos["tp_price"]:
-                        self.cmd.log(f"[TARGET] TAKE PROFIT HIT: {pos['asset']} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
+                        self.cmd.log(f"[TARGET] TAKE PROFIT HIT: {asset} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
                         self._close_position(pos, "Take Profit")
                         continue
                     elif pos["side"] == "SELL" and current_price <= pos["tp_price"]:
-                        self.cmd.log(f"[TARGET] TAKE PROFIT HIT: {pos['asset']} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
+                        self.cmd.log(f"[TARGET] TAKE PROFIT HIT: {asset} @ ${current_price:.2f} | P&L: +${pnl_usd:.2f}")
                         self._close_position(pos, "Take Profit")
                         continue
 
-                # Check Stop Loss (skip if sl_price is 0/unset)
+                # Check Stop Loss
                 if pos.get("sl_price", 0) > 0:
                     if pos["side"] == "BUY" and current_price <= pos["sl_price"]:
-                        self.cmd.log(f"[STOP] STOP LOSS HIT: {pos['asset']} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
+                        self.cmd.log(f"[STOP] STOP LOSS HIT: {asset} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
                         self._close_position(pos, "Stop Loss")
                         continue
                     elif pos["side"] == "SELL" and current_price >= pos["sl_price"]:
-                        self.cmd.log(f"[STOP] STOP LOSS HIT: {pos['asset']} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
+                        self.cmd.log(f"[STOP] STOP LOSS HIT: {asset} @ ${current_price:.2f} | P&L: ${pnl_usd:.2f}")
                         self._close_position(pos, "Stop Loss")
                         continue
 
                 updated_positions.append(pos)
 
+            except concurrent.futures.TimeoutError:
+                self.cmd.log(f"[WARN] Timeout fetching {pos.get('asset')} price - network lag")
+                updated_positions.append(pos)
             except Exception as e:
-                self.cmd.log(f"[WARN] Error updating {pos['asset']}: {e}")
+                self.cmd.log(f"[WARN] Error updating {pos.get('asset', 'unknown')}: {e}")
                 updated_positions.append(pos)
 
         self.positions = updated_positions

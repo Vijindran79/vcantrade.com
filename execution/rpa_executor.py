@@ -653,6 +653,29 @@ class RPAExecutor:
             if not panel_ok:
                 logger.warning("[PLAYWRIGHT] Trading panel may not be open - proceeding anyway")
 
+            # TRADING BAR FORCE-ENABLE: if Buy Mkt / Sell Mkt not visible, click Trade button
+            try:
+                buy_visible = page.get_by_text("Buy Mkt").first.is_visible()
+                sell_visible = page.get_by_text("Sell Mkt").first.is_visible()
+                if not buy_visible and not sell_visible:
+                    logger.info("[PLAYWRIGHT] Buy/Sell Mkt not visible — forcing Trade button click")
+                    trade_btn = page.get_by_role("button", name="Trade").first
+                    if trade_btn and trade_btn.is_visible():
+                        trade_btn.click()
+                        time.sleep(2)
+                        logger.info("[PLAYWRIGHT] Trade button clicked — Order Panel should be open")
+                    else:
+                        # Fallback: try generic selectors
+                        for sel in ['button[class*="trade" i]', '[data-testid*="trade" i]', '[aria-label*="Trade" i]']:
+                            fallback = page.locator(sel).first
+                            if fallback and fallback.is_visible():
+                                fallback.click()
+                                time.sleep(2)
+                                logger.info("[PLAYWRIGHT] Trade button clicked via fallback selector: %s", sel)
+                                break
+            except Exception as trade_err:
+                logger.debug("[PLAYWRIGHT] Trading Bar force-enable step failed (non-critical): %s", trade_err)
+
             # RE-VERIFY ACCOUNT right before click (account could have switched during navigation)
             account_still_ok = self._verify_account_selected(page)
             if not account_still_ok:
