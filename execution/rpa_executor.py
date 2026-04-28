@@ -183,6 +183,32 @@ class RPAExecutor:
                     logger.info("[PLAYWRIGHT] WealthCharts Order Entry panel opened via JS click")
                     return True
 
+            # PANEL FORCE: Try clicking the sidebar Trade icon directly
+            logger.info("[PLAYWRIGHT] Attempting sidebar Trade icon click...")
+            try:
+                trade_icon = page.locator(
+                    '[class*="sidebar"] [aria-label*="Trade" i], '
+                    '[class*="sidebar"] [title*="Trade" i], '
+                    '[class*="sidebar"] button:has-text("Trade"), '
+                    '[class*="left-panel"] [aria-label*="Trade" i], '
+                    '[data-testid*="trade" i], '
+                    'button[class*="trade" i]'
+                ).first
+                if trade_icon and trade_icon.is_visible():
+                    trade_icon.click()
+                    time.sleep(2)
+                    panel_open = page.evaluate("""() => {
+                        const panel = document.querySelector(
+                            '[class*=\"order-entry-panel\"], [class*=\"wc-order-panel\"], [data-testid=\"order-entry\"], [class*=\"trading-panel\"]'
+                        );
+                        return !!panel && panel.offsetParent !== null;
+                    }""")
+                    if panel_open:
+                        logger.info("[PLAYWRIGHT] WealthCharts Order Entry panel opened via sidebar Trade icon")
+                        return True
+            except Exception as sidebar_err:
+                logger.debug("[PLAYWRIGHT] Sidebar Trade icon click failed: %s", sidebar_err)
+
             logger.warning("[PLAYWRIGHT] Could not confirm WealthCharts Order Entry panel is open")
             return False
         except Exception as e:

@@ -1424,6 +1424,47 @@ class VcaniTradeApp:
     def _canonical_market_ticker(self, ticker: str) -> str:
         return self.settings.normalize_ticker(ticker)
 
+    def _fetch_mt5_price_for_m6(self, m6_ticker: str) -> float | None:
+        """Fetch live midpoint price from MT5 for WealthCharts M6 contract codes.
+        M6 codes (NQM6, ESM6, MCLM6) are NOT on Yahoo Finance — MT5 is the source of truth."""
+        try:
+            import MetaTrader5 as mt5
+            import config as _cfg
+
+            tv_map = getattr(_cfg, "TRADINGVIEW_SYMBOL_MAP", {})
+            # Reverse-map M6 -> original alias (e.g. NQM6 -> ES=F or CME_MINI:MNQ1!)
+            original = None
+            for k, v in tv_map.items():
+                if v == m6_ticker.upper():
+                    original = k
+                    break
+            if not original:
+                logger.warning("[MT5 PRICE] No reverse mapping for %s", m6_ticker)
+                return None
+
+            mt5_map = getattr(_cfg, "MT5_SYMBOL_MAP", {})
+            mt5_symbol = mt5_map.get(original, original)
+
+            if not mt5.initialize():
+                logger.warning("[MT5 PRICE] MT5 not initialized")
+                return None
+
+            if not mt5.symbol_select(mt5_symbol, True):
+                logger.warning("[MT5 PRICE] Symbol %s not selectable in MarketWatch", mt5_symbol)
+                return None
+
+            tick = mt5.symbol_info_tick(mt5_symbol)
+            if tick is None:
+                logger.warning("[MT5 PRICE] No tick data for %s", mt5_symbol)
+                return None
+
+            midpoint = (tick.bid + tick.ask) / 2.0
+            logger.info("[MT5 PRICE] %s -> %s | bid=%.4f ask=%.4f mid=%.4f", m6_ticker, mt5_symbol, tick.bid, tick.ask, midpoint)
+            return midpoint
+        except Exception as e:
+            logger.warning("[MT5 PRICE] Error fetching MT5 price for %s: %s", m6_ticker, e)
+            return None
+
     def _run_pretrade_market_audit(self, ticker: str, entry_price: float, force_execute: bool = False) -> bool:
         if force_execute:
             return True
@@ -1437,25 +1478,36 @@ class VcaniTradeApp:
 
         try:
             import concurrent.futures
-            import yfinance as yf
 
-            market_ticker = self._canonical_market_ticker(ticker)
+            current_market_price = None
 
-            def fetch_price():
-                symbol = yf.Ticker(market_ticker)
-                history = symbol.history(period="1d", interval="1m")
-                if history.empty or "Close" not in history or history["Close"].dropna().empty:
-                    return None
-                return float(history["Close"].dropna().iloc[-1])
+            # PRICE SOURCE PIVOT: M6 contract codes (NQM6, ESM6, MCLM6) are WealthCharts-specific
+            # and NOT recognized by Yahoo Finance. Use MT5 as source of truth for these.
+            if ticker and ticker.upper().endswith("M6"):
+                current_market_price = self._fetch_mt5_price_for_m6(ticker)
+                if current_market_price and current_market_price > 0:
+                    logger.info("[GATEKEEPER] MT5 price for %s: %.4f", ticker, current_market_price)
 
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(fetch_price)
-                current_market_price = future.result(timeout=5.0)
+            # Fallback to Yahoo Finance for everything else
+            if current_market_price is None:
+                import yfinance as yf
+                market_ticker = self._canonical_market_ticker(ticker)
+
+                def fetch_price():
+                    symbol = yf.Ticker(market_ticker)
+                    history = symbol.history(period="1d", interval="1m")
+                    if history.empty or "Close" not in history or history["Close"].dropna().empty:
+                        return None
+                    return float(history["Close"].dropna().iloc[-1])
+
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(fetch_price)
+                    current_market_price = future.result(timeout=5.0)
 
             if current_market_price is None or current_market_price <= 0:
                 self._log_gatekeeper_abort(
                     "Price Validation",
-                    f"{ticker} | unable to fetch live market price via {market_ticker}",
+                    f"{ticker} | unable to fetch live market price via {market_ticker if 'market_ticker' in dir() else 'MT5'}",
                 )
                 return False
 
