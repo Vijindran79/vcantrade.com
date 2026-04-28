@@ -533,6 +533,43 @@ class BrowserAgent:
             logger.warning("[LOGIN] WealthCharts login form detected in DOM. Waiting 30s for manual login...")
             await asyncio.sleep(30)
 
+    async def _apply_dom_only_mode(self):
+        """DOM-ONLY MODE: Hide WealthCharts clutter (news, scanner, chat, social).
+        Keeps ONLY the chart and Order Entry panel visible."""
+        if not self.page:
+            return
+        try:
+            await self.page.evaluate("""() => {
+                const clutterSelectors = [
+                    '[class*="news-panel" i]',
+                    '[class*="news-feed" i]',
+                    '[class*="scanner" i]',
+                    '[class*="chat" i]',
+                    '[class*="social" i]',
+                    '[class*="twitter" i]',
+                    '[class*="idea-stream" i]',
+                    '[class*="timeline" i]',
+                    '[data-testid*="news" i]',
+                    '[data-testid*="chat" i]',
+                    '[data-testid*="scanner" i]',
+                    '[aria-label*="news" i]',
+                    '[aria-label*="chat" i]',
+                ];
+                let hidden = 0;
+                for (const sel of clutterSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        if (el.offsetParent !== null) {
+                            el.style.display = 'none';
+                            hidden += 1;
+                        }
+                    });
+                }
+                return hidden;
+            }""")
+            logger.info("[DOM-ONLY] WealthCharts clutter hidden — chart + Order Entry only")
+        except Exception:
+            pass
+
     async def _ensure_order_entry_visible(self):
         """Ensure WealthCharts Order Entry panel is open and unobstructed."""
         if not self.page:
@@ -641,6 +678,9 @@ class BrowserAgent:
 
             # Give chart widgets time to render
             await asyncio.sleep(2)
+
+            # DOM-ONLY MODE: strip clutter so only chart + Order Entry remain
+            await self._apply_dom_only_mode()
 
             # Ensure Order Entry panel is open and unobstructed
             await self._ensure_order_entry_visible()

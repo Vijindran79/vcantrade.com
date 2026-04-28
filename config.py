@@ -156,6 +156,12 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MNQ1!": "NQM6",
     "MES1!": "ESM6",
     "MCL1!": "MCLM6",
+    # Gold (COMEX Micro Gold)
+    "COMEX:MGC1!": "MGC",
+    "GC=F": "MGC",
+    "GC": "MGC",
+    "MGC": "MGC",
+    "XAUUSD": "MGC",
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
@@ -188,6 +194,12 @@ MT5_SYMBOL_MAP = {
     "GC": "XAUUSD",
     "SI": "XAGUSD",
     "YM": "YM1!",
+    # Gold / Silver
+    "GC=F": "Gold_SB",
+    "GC": "Gold_SB",
+    "MGC": "Gold_SB",
+    "XAUUSD": "Gold_SB",
+    "Gold_SB": "Gold_SB",
     # PEPPERSTONE EXACT TERMINAL NAMES (self-references for suffix-stripped candidates)
     "Crude_SB": "Crude_SB",
     "NAS100_SB": "NAS100_SB",

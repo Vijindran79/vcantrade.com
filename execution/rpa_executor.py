@@ -215,6 +215,44 @@ class RPAExecutor:
             logger.warning("[PLAYWRIGHT] WealthCharts Order Entry panel check failed: %s", e)
             return False
 
+    def _verify_chart_landmark(self, page, expected_symbol: str) -> bool:
+        """VISUAL LANDMARK: Ensure the chart header/title shows the expected symbol.
+        Prevents 'Wrong Asset' trades if the bot is on the wrong chart."""
+        try:
+            # Strategy 1: Check page title
+            title = page.title() or ""
+            if expected_symbol in title:
+                logger.info("[LANDMARK] Chart title confirms symbol: %s", expected_symbol)
+                return True
+
+            # Strategy 2: Check DOM for symbol label (common in WealthCharts header)
+            js_check = f"""() => {{
+                const selectors = [
+                    '[class*="symbol-name"]',
+                    '[class*="chart-header"]',
+                    '[class*="instrument-name"]',
+                    '[data-testid*="symbol"]',
+                    'h1', 'h2', '.title'
+                ];
+                for (const sel of selectors) {{
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText && el.innerText.includes('{expected_symbol}')) {{
+                        return true;
+                    }}
+                }}
+                return document.body.innerText.includes('{expected_symbol}');
+            }}"""
+            found = page.evaluate(js_check)
+            if found:
+                logger.info("[LANDMARK] DOM confirms symbol: %s", expected_symbol)
+                return True
+
+            logger.warning("[LANDMARK] Symbol %s NOT found on current chart — aborting click", expected_symbol)
+            return False
+        except Exception as e:
+            logger.warning("[LANDMARK] Verification error for %s: %s — proceeding with caution", expected_symbol, e)
+            return True  # Fail-open: if check itself fails, don't block the trade
+
     def _click_via_html(self, action, page):
         """Click Buy/Sell via Playwright MOUSE ONLY. No keyboard shortcuts.
         Uses physical mouse clicks on button locators or JS fallback.
@@ -683,6 +721,13 @@ class RPAExecutor:
                     "[ALARM] TRADE ABORTED: Account verification failed right before click. "
                     "APEX account no longer visible on dashboard."
                 )
+                return False
+
+            # VISUAL LANDMARK: confirm the chart shows the expected symbol
+            tv_symbol = self._map_ticker_to_tv(trade.asset)
+            landmark_ok = self._verify_chart_landmark(page, tv_symbol)
+            if not landmark_ok:
+                logger.error("[ALARM] TRADE ABORTED: Chart landmark mismatch for %s (expected %s)", trade.asset, tv_symbol)
                 return False
 
             # Execute the click
