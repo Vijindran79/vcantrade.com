@@ -1,6 +1,5 @@
 import time
 import random
-import threading
 import pyautogui
 import pygetwindow as gw
 import numpy as np
@@ -15,7 +14,7 @@ class RPAExecutor:
     TARGET_ACCOUNT_NAME = "PAAPEX3143270000002"
 
     def __init__(self, on_blind_error=None):
-        self._lock = threading.Lock()
+        self.is_executing = False
         self.last_action_time = 0
         self.confidence_threshold = 0.8
         self.on_blind_error = on_blind_error
@@ -221,6 +220,20 @@ class RPAExecutor:
         """VISUAL LANDMARK: Ensure the chart header/title shows the expected symbol.
         Prevents 'Wrong Asset' trades if the bot is on the wrong chart."""
         try:
+            # Strategy 0: Check URL symbol parameter — hard guard against false positives
+            current_url = (page.url or "").lower()
+            if "?symbol=" in current_url:
+                url_symbol = current_url.split("?symbol=")[1].split("&")[0].upper()
+                if url_symbol and url_symbol != expected_symbol.upper():
+                    logger.warning(
+                        "[LANDMARK] URL symbol mismatch: URL=%s, expected=%s — force navigating",
+                        url_symbol, expected_symbol,
+                    )
+                    return False
+                if url_symbol == expected_symbol.upper():
+                    logger.info("[LANDMARK] URL symbol confirms: %s", expected_symbol)
+                    return True
+
             # Strategy 1: Check page title
             title = page.title() or ""
             if expected_symbol in title:
@@ -1230,48 +1243,33 @@ class RPAExecutor:
         Execute a trade via Chameleon Interface.
         Auto-detects platform (TradingView/Tradovate vs MT5) and uses the
         appropriate clicking strategy (DOM-based vs coordinate/image-based).
-        THREAD-SAFE: Playwright page access is protected by self._lock.
+        GREENLET-SAFE: Uses self.is_executing flag (threading.Lock breaks Greenlet).
         """
-        platform = self._detect_platform()
-        action = self._normalize_action(trade.action)
-        asset = trade.asset
+        self.is_executing = True
+        try:
+            platform = self._detect_platform()
+            action = self._normalize_action(trade.action)
+            asset = trade.asset
 
-        logger.info(
-            "[CHAMELEON] Platform detected: %s | Action: %s | Asset: %s",
-            platform, action, asset
-        )
+            logger.info(
+                "[CHAMELEON] Platform detected: %s | Action: %s | Asset: %s",
+                platform, action, asset
+            )
 
-        # MT5 path: coordinate/image-based clicking (swarm math verification)
-        if platform == "mt5":
-            logger.info("[EXEC] MT5 detected — using coordinate-based clicking for %s %s", action, asset)
-            return self._execute_trade_mt5(trade)
+            # MT5 path: coordinate/image-based clicking (swarm math verification)
+            if platform == "mt5":
+                logger.info("[EXEC] MT5 detected — using coordinate-based clicking for %s %s", action, asset)
+                return self._execute_trade_mt5(trade)
 
-        # WealthCharts path: DOM-based Playwright clicking (execution trigger)
-        if platform == "wealthcharts":
-            if self._playwright_available:
-                try:
-                    logger.info("[EXEC] Attempting WealthCharts HTML injection for %s %s", action, asset)
-                    with self._lock:
-                        html_result = self._execute_trade_html(trade)
-                    if html_result:
-                        return True
-                    logger.warning("[EXEC] HTML injection failed - will try PyAutoGUI fallback")
-                except Exception as e:
-                    logger.warning("[EXEC] HTML injection exception: %s - falling back to PyAutoGUI", e)
-            # PyAutoGUI fallback for TV/Tradovate
-            logger.info("[EXEC] Falling back to PyAutoGUI for %s %s", action, asset)
+            # WealthCharts path: PYAUTOGUI FORCE (HTML injection disabled due to Greenlet collisions)
+            if platform == "wealthcharts":
+                logger.info("[EXEC] WealthCharts — using PyAutoGUI mouse for %s %s", action, asset)
+                return self._execute_trade_pyautogui(trade)
+
+            # Default: PyAutoGUI
             return self._execute_trade_pyautogui(trade)
-
-        # Unknown platform: try Playwright first, then PyAutoGUI
-        if self._playwright_available:
-            try:
-                with self._lock:
-                    html_result = self._execute_trade_html(trade)
-                if html_result:
-                    return True
-            except Exception:
-                pass
-        return self._execute_trade_pyautogui(trade)
+        finally:
+            self.is_executing = False
 
     # REMOVED: All duplicate _find_button_by_image definitions
     # REMOVED: All old fuzzy matching tier loops

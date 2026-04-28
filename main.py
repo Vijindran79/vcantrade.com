@@ -1679,6 +1679,10 @@ class VcaniTradeApp:
 
     def _cloud_heartbeat(self):
         """Log a heartbeat every 10s so the operator knows the bot is alive on Vast.ai."""
+        # HEARTBEAT SUPPRESSION: if RPA is executing, don't touch the browser
+        if self.executor and getattr(self.executor.rpa_executor, "is_executing", False):
+            logger.info("[HEARTBEAT] Lion is executing trade — heartbeat suppressed")
+            return
         try:
             url = ""
             if self.browser_agent and self.browser_agent.is_running and self.browser_agent.page:
@@ -3647,6 +3651,10 @@ class VcaniTradeApp:
         Heartbeat Monitor - Logs system health every 60 seconds.
         Now includes Market Session context.
         """
+        # HEARTBEAT SUPPRESSION: if RPA is executing, don't run checks that touch browser state
+        if self.executor and getattr(self.executor.rpa_executor, "is_executing", False):
+            logger.info("[HEARTBEAT] Execution in progress — 60s health check suppressed")
+            return
         self._emit_gatekeeper_summary_if_due()
 
         # Get system stats
