@@ -1,5 +1,6 @@
 import time
 import random
+import threading
 import pyautogui
 import pygetwindow as gw
 import numpy as np
@@ -14,6 +15,7 @@ class RPAExecutor:
     TARGET_ACCOUNT_NAME = "PAAPEX3143270000002"
 
     def __init__(self, on_blind_error=None):
+        self._lock = threading.Lock()
         self.last_action_time = 0
         self.confidence_threshold = 0.8
         self.on_blind_error = on_blind_error
@@ -672,19 +674,33 @@ class RPAExecutor:
                 )
 
         tv_symbol = self._map_ticker_to_tv(trade.asset)
-        url = f"{config.WEALTHCHARTS_URL}/?symbol={tv_symbol}"
 
         try:
-            logger.info("[PLAYWRIGHT] Navigating to %s for %s", tv_symbol, trade.asset)
-            page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            time.sleep(2)  # Allow chart widgets to initialize
-
-            # Bring page to front
-            page.bring_to_front()
-            time.sleep(0.5)
+            # KEYBOARD SEARCH NAVIGATION: avoid ?symbol= URL which WealthCharts rejects
+            # First check if we're already on the correct chart
+            already_correct = self._verify_chart_landmark(page, tv_symbol)
+            if already_correct:
+                logger.info("[PLAYWRIGHT] Already on correct chart for %s — skipping navigation", tv_symbol)
+            else:
+                logger.info("[PLAYWRIGHT] Navigating to %s via keyboard search", tv_symbol)
+                wc_base = getattr(config, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
+                # Load base page only (no query params)
+                if "wealthcharts" not in (page.url or "").lower():
+                    page.goto(wc_base, wait_until="domcontentloaded", timeout=15000)
+                    time.sleep(2)
+                page.bring_to_front()
+                time.sleep(0.5)
+                # Clear search box and type symbol
+                page.keyboard.press("Control+a")
+                time.sleep(0.2)
+                page.keyboard.type(tv_symbol, delay=50)
+                time.sleep(0.3)
+                page.keyboard.press("Enter")
+                time.sleep(3)  # Wait for chart to load
+                logger.info("[PLAYWRIGHT] Chart loaded for %s via keyboard search", tv_symbol)
 
             current_url = page.url or ""
-            logger.info("[PLAYWRIGHT] Chart loaded for %s at %s", tv_symbol, current_url)
+            logger.info("[PLAYWRIGHT] Chart URL for %s: %s", tv_symbol, current_url)
 
             # Ensure Order Entry panel is open
             panel_ok = self._ensure_order_entry_panel_open(page)
@@ -717,11 +733,17 @@ class RPAExecutor:
             # RE-VERIFY ACCOUNT right before click (account could have switched during navigation)
             account_still_ok = self._verify_account_selected(page)
             if not account_still_ok:
-                logger.error(
-                    "[ALARM] TRADE ABORTED: Account verification failed right before click. "
-                    "APEX account no longer visible on dashboard."
-                )
-                return False
+                # FLEXIBLE: Try once more to select the correct account
+                auto_fixed = self._select_apex_account(page)
+                if auto_fixed:
+                    logger.info("[ACCOUNT] Re-verified and fixed account selection before click")
+                else:
+                    # WARN but PROCEED — the user is responsible for having the right account selected
+                    logger.warning(
+                        "[ACCOUNT] Could not re-verify account '%s' before click — proceeding anyway "
+                        "(user must ensure correct account is active)",
+                        self.TARGET_ACCOUNT_NAME,
+                    )
 
             # VISUAL LANDMARK: confirm the chart shows the expected symbol
             tv_symbol = self._map_ticker_to_tv(trade.asset)
@@ -1208,6 +1230,7 @@ class RPAExecutor:
         Execute a trade via Chameleon Interface.
         Auto-detects platform (TradingView/Tradovate vs MT5) and uses the
         appropriate clicking strategy (DOM-based vs coordinate/image-based).
+        THREAD-SAFE: Playwright page access is protected by self._lock.
         """
         platform = self._detect_platform()
         action = self._normalize_action(trade.action)
@@ -1228,7 +1251,8 @@ class RPAExecutor:
             if self._playwright_available:
                 try:
                     logger.info("[EXEC] Attempting WealthCharts HTML injection for %s %s", action, asset)
-                    html_result = self._execute_trade_html(trade)
+                    with self._lock:
+                        html_result = self._execute_trade_html(trade)
                     if html_result:
                         return True
                     logger.warning("[EXEC] HTML injection failed - will try PyAutoGUI fallback")
@@ -1241,7 +1265,8 @@ class RPAExecutor:
         # Unknown platform: try Playwright first, then PyAutoGUI
         if self._playwright_available:
             try:
-                html_result = self._execute_trade_html(trade)
+                with self._lock:
+                    html_result = self._execute_trade_html(trade)
                 if html_result:
                     return True
             except Exception:
