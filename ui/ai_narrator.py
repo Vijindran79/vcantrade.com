@@ -321,6 +321,32 @@ class AINarratorOverlay(GlassmorphicPanel):
         )
         main_layout.addWidget(self.live_pnl_label)
 
+        # BIG GREEN TRADE NOTIFICATION BOX
+        self.trade_alert_box = QLabel("")
+        self.trade_alert_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.trade_alert_box.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #238636, stop:1 #1a6329);"
+            "color: #FFFFFF; font-size: 14px; font-weight: bold; padding: 12px;"
+            "border-radius: 8px; border: 2px solid #3FB950;"
+        )
+        self.trade_alert_box.setVisible(False)
+        main_layout.addWidget(self.trade_alert_box)
+
+        # POSITION MONITOR: per-position Live P&L from MT5
+        self.position_monitor_frame = QFrame()
+        self.position_monitor_frame.setStyleSheet(
+            "QFrame { background: rgba(12,18,30,210); border: 1px solid rgba(63,185,80,0.35); border-radius: 6px; }"
+        )
+        self.position_monitor_layout = QVBoxLayout()
+        self.position_monitor_layout.setContentsMargins(10, 8, 10, 8)
+        self.position_monitor_layout.setSpacing(4)
+        pm_title = QLabel("POSITION MONITOR (MT5)")
+        pm_title.setStyleSheet("color: #3FB950; font-size: 11px; font-weight: bold; background: transparent;")
+        self.position_monitor_layout.addWidget(pm_title)
+        self.position_monitor_labels = {}  # ticker -> QLabel
+        self.position_monitor_frame.setLayout(self.position_monitor_layout)
+        main_layout.addWidget(self.position_monitor_frame)
+
         hud_frame = QFrame()
         hud_frame.setStyleSheet(
             "QFrame { background: rgba(12,18,30,210); border: 1px solid rgba(88,166,255,0.22); border-radius: 8px; }"
@@ -1173,6 +1199,55 @@ class AINarratorOverlay(GlassmorphicPanel):
             f"EXECUTED: {action} {ticker} @ ${entry_price:.2f}",
             datetime.now().strftime("%H:%M:%S")
         )
+        # BIG GREEN BOX: show trade notification for 10 seconds
+        is_sell = action.upper() == "SELL"
+        box_bg = "#F85149" if is_sell else "#238636"
+        box_border = "#F85149" if is_sell else "#3FB950"
+        self.trade_alert_box.setStyleSheet(
+            f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {box_bg}, stop:1 #1a6329);"
+            f"color: #FFFFFF; font-size: 15px; font-weight: bold; padding: 14px;"
+            f"border-radius: 8px; border: 2px solid {box_border};"
+        )
+        direction = "SHORT" if is_sell else "LONG"
+        self.trade_alert_box.setText(f"TRADING {ticker} ({direction})\nENTRY: {entry_price:.2f}")
+        self.trade_alert_box.setVisible(True)
+        QTimer.singleShot(10000, lambda: self.trade_alert_box.setVisible(False))
+
+    def update_position_monitor(self, positions: list):
+        """Update the Position Monitor with live MT5 P&L data.
+        positions: list of dicts with keys: asset, side, entry, current, pnl, pnl_pct"""
+        current_assets = {p.get("asset", "") for p in positions}
+        for asset in list(self.position_monitor_labels.keys()):
+            if asset not in current_assets:
+                label = self.position_monitor_labels.pop(asset)
+                self.position_monitor_layout.removeWidget(label)
+                label.deleteLater()
+        if not positions:
+            self.position_monitor_frame.setVisible(False)
+            return
+        self.position_monitor_frame.setVisible(True)
+        for pos in positions:
+            asset = pos.get("asset", "UNKNOWN")
+            side = pos.get("side", "BUY")
+            entry = float(pos.get("entry", 0))
+            current = float(pos.get("current", 0))
+            pnl = float(pos.get("pnl", 0))
+            pnl_pct = float(pos.get("pnl_pct", 0))
+            pnl_color = "#3FB950" if pnl >= 0 else "#F85149"
+            pnl_sign = "+" if pnl >= 0 else ""
+            text = f"{asset} {side} | Entry: {entry:.2f} | Now: {current:.2f} | P&L: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)"
+            if asset in self.position_monitor_labels:
+                self.position_monitor_labels[asset].setText(text)
+                self.position_monitor_labels[asset].setStyleSheet(
+                    f"color: {pnl_color}; font-size: 11px; font-weight: bold; background: transparent;"
+                )
+            else:
+                label = QLabel(text)
+                label.setStyleSheet(
+                    f"color: {pnl_color}; font-size: 11px; font-weight: bold; background: transparent;"
+                )
+                self.position_monitor_layout.addWidget(label)
+                self.position_monitor_labels[asset] = label
     
     def notify_position_update(self, position_count: int, daily_pnl: float):
         """Notify about position monitoring update."""

@@ -3420,9 +3420,16 @@ class VcaniTradeApp:
 
                 updated_positions.append(pos)
 
+                # Update Position Monitor in narrator overlay with live MT5 data
+                try:
+                    self.ai_narrator.update_position_monitor(updated_positions)
+                except Exception:
+                    pass
+
             except concurrent.futures.TimeoutError:
                 self.cmd.log(f"[WARN] Timeout fetching {pos.get('asset')} price - network lag")
                 updated_positions.append(pos)
+
             except Exception as e:
                 self.cmd.log(f"[WARN] Error updating {pos.get('asset', 'unknown')}: {e}")
                 updated_positions.append(pos)

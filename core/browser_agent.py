@@ -487,6 +487,7 @@ class BrowserAgent:
                 await self._handle_login_wait()
 
                 self.is_running = True
+                asyncio.create_task(self._dom_cleanup_loop())
                 return  # SUCCESS — exit retry loop
 
             except Exception as e:
@@ -569,6 +570,18 @@ class BrowserAgent:
             logger.info("[DOM-ONLY] WealthCharts clutter hidden — chart + Order Entry only")
         except Exception:
             pass
+
+    async def _dom_cleanup_loop(self):
+        """AUTO-CLEANUP: Re-apply DOM-Only mode every 60 seconds to catch reappearing News/Chat."""
+        while self.is_running:
+            try:
+                await asyncio.sleep(60)
+                if self.page and self.is_running:
+                    await self._apply_dom_only_mode()
+                    await self._close_blocking_popups()
+                    logger.debug("[CLEANUP] Auto-cleaned WealthCharts clutter (60s interval)")
+            except Exception:
+                pass
 
     async def _ensure_order_entry_visible(self):
         """Ensure WealthCharts Order Entry panel is open and unobstructed."""
