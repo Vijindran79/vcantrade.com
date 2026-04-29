@@ -98,7 +98,7 @@ from core.journal import TradeJournalDB
 from core.risk_manager import RiskManager, PositionSizer
 from core.symbol_mapper import root_matches
 from core.vibe_adapter import VibeTradingAdapter
-from execution.rpa_executor import RPAExecutor
+from execution.rpa_executor import RPAExecutor, WealthChartsSpecialist
 from core.trade_executor import TradeExecutor
 from core.market_sessions import MarketSessionDetector
 from ui.dashboard import CommandCenter
@@ -257,6 +257,22 @@ def _release_single_instance_lock() -> None:
 
 
 from services.signal_dispatcher import SignalDispatcher
+def is_whitelisted_futures(ticker: str) -> bool:
+    """Check if ticker is in the Futures whitelist (MCLM6, NQM6, ESM6, MGC)."""
+    if not ticker:
+        return False
+    ticker_up = ticker.upper().strip()
+    return ticker_up in [f.upper() for f in config.FUTURES_WHITELIST]
+
+
+def is_blocked_stock(ticker: str) -> bool:
+    """Check if ticker is a blocked stock (TSLA, AAPL, SPX, etc.)."""
+    if not ticker:
+        return False
+    ticker_up = ticker.upper().strip()
+    return ticker_up in [s.upper() for s in config.BLOCKED_STOCKS]
+
+
 import pyautogui
 
 
@@ -688,7 +704,7 @@ class CloudBridgeThread(QThread):
     def _build_status(self):
         app = self.app
         return {
-            "account_id": "PAAPEX3143270000002",
+            "account_id": "APEX-314327-18",
             "current_balance": getattr(app, "balance", 0.0),
             "equity": getattr(app, "equity", 0.0),
             "daily_pnl": getattr(app, "daily_pnl", 0.0),
@@ -1206,6 +1222,10 @@ class VcaniTradeApp:
         # RPA Hand - clicks TradingView paper trading UI directly (no API keys needed)
         # on_blind_error fires when TradingView is minimized or covered by another app
         self.rpa_hand = RPAExecutor(on_blind_error=self._on_rpa_blind)
+        # WealthChartsSpecialist — dedicated ID-based execution agent
+        self.wc_specialist = WealthChartsSpecialist()
+        self.wc_specialist.connect()
+        self.wc_specialist.start_always_ready()
         # MT5 Executor - routes trades to MetaTrader 5 when EXECUTION_MODE == "MT5"
         self.mt5_executor = None
         if self._is_mt5_mode():
@@ -1481,9 +1501,9 @@ class VcaniTradeApp:
 
             current_market_price = None
 
-            # PRICE SOURCE PIVOT: M6 contract codes (NQM6, ESM6, MCLM6) are WealthCharts-specific
+            # PRICE SOURCE PIVOT: M6 contract codes (NQM6, ESM6, MCLM6) and XAUUSD/Gold are WealthCharts-specific
             # and NOT recognized by Yahoo Finance. Use MT5 as source of truth for these.
-            if ticker and ticker.upper().endswith("M6"):
+            if ticker and (ticker.upper().endswith("M6") or ticker.upper() in {"XAUUSD", "GC", "GC=F", "MGC", "COMEX:MGC1!"}):
                 current_market_price = self._fetch_mt5_price_for_m6(ticker)
                 if current_market_price and current_market_price > 0:
                     logger.info("[GATEKEEPER] MT5 price for %s: %.4f", ticker, current_market_price)
@@ -2729,6 +2749,11 @@ class VcaniTradeApp:
         if action not in {"BUY", "SELL"}:
             return False, {}
 
+        # TOTAL YAHOO BAN: M6 futures and Gold/XAUUSD are NOT on Yahoo Finance
+        if ticker and (ticker.upper().endswith("M6") or ticker.upper() in {"XAUUSD", "GC", "GC=F", "MGC", "COMEX:MGC1!"}):
+            logger.info("[MTF GATE] Bypassing Yahoo Finance for %s — using MT5 price gate", ticker)
+            return True, {"bypass": "mt5_only_ticker"}
+
         try:
             import yfinance as yf
             import pandas_ta as ta
@@ -3350,8 +3375,8 @@ class VcaniTradeApp:
                 current_price = None
                 asset = pos.get("asset", "")
 
-                # PRICE SOURCE PIVOT: M6 contract codes use MT5, not Yahoo Finance
-                if asset and asset.upper().endswith("M6"):
+                # PRICE SOURCE PIVOT: M6 contract codes use MT5, not Yahoo Finance. Gold/XAUUSD too.
+                if asset and (asset.upper().endswith("M6") or asset.upper() in {"XAUUSD", "GC", "GC=F", "MGC", "COMEX:MGC1!"}):
                     current_price = self._fetch_mt5_price_for_m6(asset)
                     if current_price and current_price > 0:
                         logger.debug("[POSITIONS] MT5 price for %s: %.4f", asset, current_price)
@@ -4275,22 +4300,25 @@ class VcaniTradeApp:
             self.cmd.set_bridge_status("online")
 
     def _check_bridge_heartbeat(self):
-        """Flip the bridge indicator red when the external heartbeat goes stale."""
+        """Flip the bridge indicator red when the external heartbeat goes stale.
+        KILL SWITCH OVERRIDE: Disabled per user request.
+        External Brain heartbeat failures will NOT trigger kill switch.
+        Scanner keeps trades alive even if AI Brain is slow."""
         if self.bridge_last_seen_ts <= 0:
             if self.bridge_status != "disconnected":
                 self.bridge_status = "disconnected"
                 self.cmd.set_bridge_status("disconnected")
             return
-
+        
         elapsed = time.time() - self.bridge_last_seen_ts
         if elapsed > self.bridge_timeout_seconds:
             if self.bridge_status != "lost":
                 self.bridge_status = "lost"
                 self.cmd.set_bridge_status("lost")
             if not self.bridge_warning_emitted:
-                logger.warning("[SYSTEM] Warning: External Brain heartbeat lost.")
+                logger.warning("[SYSTEM] Warning: External Brain heartbeat lost (Kill Switch DISABLED)")
                 self.cmd.log(
-                    '<span style="color:#F85149;font-weight:bold">[SYSTEM] Warning: External Brain heartbeat lost.</span>'
+                    '<span style="color:#F85149;font-weight:bold">[SYSTEM] Warning: External Brain heartbeat lost — Kill Switch DISABLED, trades remain active.</span>'
                 )
                 self.bridge_warning_emitted = True
         elif self.bridge_status == "lost":
@@ -4662,7 +4690,20 @@ class VcaniTradeApp:
             )
             return
 
-        # -- RPA Hand: move mouse and click on TradingView paper trading --
+        # -- RPA Hand: move mouse and click on WealthCharts Apex account --
+
+        # FUTURES-ONLY WHITELIST: Block TSLA, AAPL, SPX, etc.
+        if not is_whitelisted_futures(ticker):
+            logger.warning("[WHITELIST] BLOCKED: %s is not in futures whitelist %s", ticker, config.FUTURES_WHITELIST)
+            self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WHITELIST] BLOCKED</span>: {ticker} is not a whitelisted futures contract')
+            self._on_ticker_status_update(ticker, "trade_rejected")
+            return
+        if is_blocked_stock(ticker):
+            logger.warning("[WHITELIST] BLOCKED STOCK: %s - only futures allowed on Apex account", ticker)
+            self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WHITELIST] BLOCKED STOCK</span>: {ticker} - trade not allowed')
+            self._on_ticker_status_update(ticker, "trade_rejected")
+            return
+
         mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data, confidence=confidence_score)
         if not mtf_passed and not force_execute:
             logger.info("EXEC_CLOUD: blocked by MTF sniper gate for %s %s: %s", action, ticker, mtf_votes)
@@ -4802,7 +4843,14 @@ class VcaniTradeApp:
         # PREDATOR-CLASS: Silent Error Alerting with try/except wrapper
         rpa_success = False
         try:
-            rpa_success = self.rpa_hand.execute_trade(rpa_trade)
+            # SPECIALIST PRIORITY: Use WealthChartsSpecialist for futures symbols
+            specialist = getattr(self, 'wc_specialist', None)
+            if specialist and specialist.is_connected() and ticker.upper() in WealthChartsSpecialist.ALLOWED_SYMBOLS:
+                logger.info("[SPECIALIST] Routing %s %s through WealthChartsSpecialist", action, ticker)
+                self.cmd.log(f'<span style="color:#58A6FF">[SPECIALIST] ID-based execution for {action} {ticker}</span>')
+                rpa_success = specialist.execute(ticker, action)
+            else:
+                rpa_success = self.rpa_hand.execute_trade(rpa_trade)
         except Exception as exec_err:
             # SILENT ERROR ALERT: Voice + Pop-up notification
             error_msg = f"RPA Execution FAILED for {action} {ticker}: {exec_err}"

@@ -1,5 +1,7 @@
 import time
 import random
+import re
+import threading
 import pyautogui
 import pygetwindow as gw
 import numpy as np
@@ -11,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class RPAExecutor:
     # LOCKED: Only this Apex account is allowed to trade
-    TARGET_ACCOUNT_NAME = "PAAPEX3143270000002"
+    TARGET_ACCOUNT_NAME = "APEX-314327-18"
 
     def __init__(self, on_blind_error=None):
         self.is_executing = False
@@ -321,6 +323,19 @@ class RPAExecutor:
                                 "[STEALTH] %s MOUSE click at (%.1f, %.1f) inside %.0fx%.0f box",
                                 action, click_x, click_y, box["width"], box["height"]
                             )
+                            # ACCOUNT CHAIN-LOCK: Re-verify 50ms before final click
+                            time.sleep(0.05)
+                            try:
+                                account_label = page.locator("[class*='account' i], [data-testid*='account' i]").first.text_content()
+                            except Exception:
+                                account_label = ""
+                            # BLOCK if account doesn't match OR switched to Paper/Demo
+                            if self.TARGET_ACCOUNT_NAME not in account_label:
+                                logger.error("[CHAIN-LOCK] Account label '%s' != target '%s' — BLOCKING CLICK", account_label, self.TARGET_ACCOUNT_NAME)
+                                return False
+                            if any(bad in account_label.lower() for bad in ['paper', 'demo', 'sim', 'test']):
+                                logger.error("[CHAIN-LOCK] Account switched to '%s' (Paper/Demo) — BLOCKING CLICK", account_label)
+                                return False
                             page.mouse.click(click_x, click_y)
                             return True
                 except Exception:
@@ -558,11 +573,11 @@ class RPAExecutor:
                         return el.textContent.trim();
                     }
                 }
-                // LOCKED: search specifically for PAAPEX3143270000002
+                // LOCKED: search specifically for APEX-314327-18
                 const all = document.querySelectorAll('div, span, button');
                 for (const el of all) {
                     const text = el.textContent.trim();
-                    if (text.includes('PAAPEX3143270000002')) {
+                    if (text.includes('APEX-314327-18') || text.includes('314327-18')) {
                         return text;
                     }
                 }
@@ -570,7 +585,7 @@ class RPAExecutor:
             }""")
 
             if not current_account:
-                logger.warning("[ACCOUNT] Could not detect locked account PAAPEX3143270000002 on dashboard")
+                logger.warning("[ACCOUNT] Could not detect locked account APEX-314327-18 on dashboard")
                 return False
 
             # Strict exact check for locked account
@@ -614,7 +629,7 @@ class RPAExecutor:
                 const all = document.querySelectorAll('div, span, button');
                 for (const el of all) {
                     const text = el.textContent.trim();
-                    if (/PAAPEX|APEX|Funded|Live|Demo|Sim|Account/i.test(text) && text.length < 60) {
+                    if (/314327-18|APEX-314327|APEX|Funded|Live|Demo|Sim|Account/i.test(text) && text.length < 60) {
                         el.click();
                         return true;
                     }
@@ -628,22 +643,29 @@ class RPAExecutor:
 
             time.sleep(1.5)  # Wait for dropdown to open
 
-            # LOCKED: Only select PAAPEX3143270000002
+            # LOCKED: Only select APEX-314327-18
             target = self.TARGET_ACCOUNT_NAME
             selected = page.evaluate(f"""() => {{
                 const options = document.querySelectorAll('div, span, li, [role="option"]');
                 // EXACT MATCH FIRST
                 for (const opt of options) {{
                     const text = (opt.textContent || '').trim();
-                    if (text.includes('{target}')) {{
+                    if (text.includes('{target}') || text.includes('314327-18')) {{
                         opt.click();
                         return text;
                     }}
                 }}
-                // Fallback: any option containing PAAPEX
+                // Fallback: any option containing 314327-18
                 for (const opt of options) {{
                     const text = (opt.textContent || '').trim();
-                    if (/PAAPEX/i.test(text) && text.length < 80) {{
+                    if (text.includes('314327-18')) {{
+                        opt.click();
+                        return text;
+                }}
+                // Fallback: any option containing 314327-18
+                for (const opt of options) {{
+                    const text = (opt.textContent || '').trim();
+                    if (text.includes('314327-18') || text.includes('APEX-314327')) {{
                         opt.click();
                         return text;
                     }}
@@ -699,8 +721,11 @@ class RPAExecutor:
                 wc_base = getattr(config, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
                 # Load base page only (no query params)
                 if "wealthcharts" not in (page.url or "").lower():
-                    page.goto(wc_base, wait_until="domcontentloaded", timeout=15000)
-                    time.sleep(2)
+                    try:
+                        page.goto(wc_base, wait_until="domcontentloaded", timeout=15000)
+                        time.sleep(2)
+                    except Exception as nav_err:
+                        logger.warning("[PLAYWRIGHT] page.goto failed: %s — staying on current page", nav_err)
                 page.bring_to_front()
                 time.sleep(0.5)
                 # Clear search box and type symbol
@@ -1028,6 +1053,37 @@ class RPAExecutor:
             logger.debug("[CHAMELEON] Platform detection error: %s", e)
         return "unknown"
 
+    def _micro_verify_account(self):
+        """CHAIN-LOCK: Re-verify account label 50ms before final click.
+        Returns True if account is still locked target, False if Paper/Demo."""
+        try:
+            page = self._get_playwright_page()
+            if not page:
+                return True  # fail-open if no page
+            target = self.TARGET_ACCOUNT_NAME
+            current = page.evaluate("""() => {
+                const all = document.querySelectorAll('div, span, button');
+                for (const el of all) {
+                    const text = el.textContent.trim();
+                    if (/314327-18|APEX-314327|314327/i.test(text) && text.length < 80) {
+                        return text;
+                    }
+                }
+                return '';
+            }""")
+            if current and target in current:
+                logger.info("[CHAIN-LOCK] Account verified: %s", current)
+                return True
+            if current and re.search(r'paper|demo|sim|test', current, re.IGNORECASE):
+                logger.error("[CHAIN-LOCK] ABORT: Account switched to '%s' — click blocked!", current)
+                return False
+            # If we can't read the label, warn but allow (user responsibility)
+            logger.warning("[CHAIN-LOCK] Could not read account label — proceeding with caution")
+            return True
+        except Exception as e:
+            logger.warning("[CHAIN-LOCK] Micro-verify error: %s — proceeding", e)
+            return True
+
     def _lightning_strike_sequence(self, target_key, ticker):
         """The 'Lion Strike': Precise, Human-like, and Verified."""
         window = self._get_browser_window(ticker)
@@ -1066,6 +1122,14 @@ class RPAExecutor:
             time.sleep(0.5)
             if self.human_latency_enabled:
                 time.sleep(random.uniform(0.1, 0.3))
+
+            # CHAIN-LOCK: Micro-verify account 50ms BEFORE final click
+            time.sleep(0.05)
+            account_ok = self._micro_verify_account()
+            if not account_ok:
+                logger.error("[ALARM] TRADE ABORTED: Account chain-lock failed for %s", ticker)
+                return False
+
             pyautogui.click()
 
             logger.info(
@@ -1274,3 +1338,455 @@ class RPAExecutor:
     # REMOVED: All duplicate _find_button_by_image definitions
     # REMOVED: All old fuzzy matching tier loops
     # REMOVED: All legacy strike sequences
+
+
+# =============================================================================
+# WealthChartsSpecialist — Machine-Interface Agent
+# =============================================================================
+# Treats WealthCharts as a machine interface, not a website.
+# Uses hard-coded component IDs for deterministic targeting.
+# =============================================================================
+
+class WealthChartsSpecialist:
+    """
+    Dedicated WealthCharts execution agent.
+    Replaces general RPA with ID-based targeting and self-healing protocol.
+
+    Knowledge Base (The "Map"):
+        Asset Search:      [data-testid="symbol-search-input"]
+        Account Label:     div.account-id-display
+        Buy Market Button: button[data-type="buy-mkt"]
+        Sell Market Button: button[data-type="sell-mkt"]
+        Position Count:    span.open-positions-count
+
+    Always Ready Protocol:
+        - Combat Ready check every 10 seconds
+        - Force-opens trading panel if closed
+        - Forces correct account selection
+        - Deletes any popup immediately
+
+    EPIPE Recovery:
+        - Self-healing loop reconnects Playwright listener
+        - Never restarts the main bot
+    """
+
+    TARGET_ACCOUNT = "APEX-314327-18"
+    ACCOUNT_FRAGMENTS = ("314327-18", "APEX-314327")
+    ALLOWED_SYMBOLS = {"NQM6", "ESM6", "MCLM6", "MGC", "XAUUSD"}
+
+    # ---- Knowledge Base (The "Map") ----
+    SEL_SYMBOL_SEARCH = '[data-testid="symbol-search-input"]'
+    SEL_ACCOUNT_LABEL = 'div.account-id-display'
+    SEL_BUY_MKT      = 'button[data-type="buy-mkt"]'
+    SEL_SELL_MKT      = 'button[data-type="sell-mkt"]'
+    SEL_POSITION_COUNT = 'span.open-positions-count'
+    SEL_PANEL_TRIGGER  = 'i.fa-dollar-sign'
+    SEL_POPUP_CLOSE    = '[class*="popup"] [class*="close"], [class*="modal"] [class*="close"], [role="dialog"] [class*="close"], [class*="modal"] button'
+
+    def __init__(self):
+        self._page = None
+        self._cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9223").strip()
+        self._connected = False
+        self._ready_timer = None
+        self._running = False
+        self._lock = threading.Lock()
+        # Anti-detection: humanization config
+        self._human = True  # Enable/disable humanization
+        logger.info("[SPECIALIST] WealthChartsSpecialist initialized — account=%s", self.TARGET_ACCOUNT)
+
+    # -----------------------------------------------------------------
+    # Anti-Detection: Humanization Layer
+    # -----------------------------------------------------------------
+    def _jitter(self, base: float, variance: float = 0.3) -> float:
+        """Return base delay ±variance% to simulate human reaction time."""
+        if not self._human:
+            return base
+        return max(0.01, base * random.uniform(1.0 - variance, 1.0 + variance))
+
+    def _human_sleep(self, base: float):
+        """Sleep with human-like jitter."""
+        time.sleep(self._jitter(base))
+
+    def _human_type(self, page, text: str, delay_ms: int = 55):
+        """Type text character-by-character with human speed (40-80ms per char)."""
+        if not self._human:
+            page.locator(self.SEL_SYMBOL_SEARCH).first.fill(text)
+            return
+        for ch in text:
+            page.keyboard.press(ch if ch.isalnum() else ch)
+            time.sleep(random.uniform(delay_ms / 1000 * 0.7, delay_ms / 1000 * 1.3))
+
+    def _human_hover_click(self, page, locator):
+        """Hover over button, then click with randomized offset — mimics human eye-hand coordination."""
+        box = locator.bounding_box()
+        if not box:
+            locator.click()
+            return
+        # Random offset inside button (not dead center)
+        offset_x = random.uniform(box["width"] * 0.2, box["width"] * 0.8)
+        offset_y = random.uniform(box["height"] * 0.2, box["height"] * 0.8)
+        target_x = box["x"] + offset_x
+        target_y = box["y"] + offset_y
+        # Hover first (human pre-click behavior)
+        page.mouse.move(target_x, target_y, steps=random.randint(5, 15))
+        time.sleep(random.uniform(0.15, 0.45))  # Hover pause
+        page.mouse.click(target_x, target_y)
+
+    def _inject_stealth(self, page):
+        """Override browser fingerprint to hide Playwright/automation markers."""
+        try:
+            page.evaluate("""() => {
+                // Hide navigator.webdriver
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                // Hide automation flags
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+                // Fake plugins array (Playwright returns empty)
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                // Fake languages
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+                // Override permissions query for notifications
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+                );
+            }""")
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------
+    # Connection — Self-Healing Loop
+    # -----------------------------------------------------------------
+    def connect(self) -> bool:
+        """Connect to existing Chrome via CDP. Returns True on success."""
+        with self._lock:
+            try:
+                from playwright.sync_api import sync_playwright
+
+                if self._page and not self._page.is_closed():
+                    self._connected = True
+                    return True
+
+                pw = sync_playwright().start()
+                browser = pw.chromium.connect_over_cdp(self._cdp_url)
+                contexts = browser.contexts
+
+                if not contexts:
+                    logger.error("[SPECIALIST] No browser contexts found on %s", self._cdp_url)
+                    pw.stop()
+                    return False
+
+                for ctx in contexts:
+                    for pg in ctx.pages:
+                        url_lower = (pg.url or "").lower()
+                        if "wealthcharts" in url_lower:
+                            # Check if logged out (login page detected)
+                            if "login" in url_lower or "signin" in url_lower or "auth" in url_lower:
+                                logger.error("[SPECIALIST] WealthCharts LOGIN PAGE detected — please log in manually and retry")
+                                self._page = pg
+                                self._connected = False
+                                return False
+                            self._page = pg
+                            self._connected = True
+                            self._inject_stealth(pg)
+                            logger.info("[SPECIALIST] Connected to WealthCharts: %s", pg.url[:80])
+                            return True
+
+                # No existing WealthCharts tab — create one
+                logger.info("[SPECIALIST] No WealthCharts tab found — creating one")
+                self._page = contexts[0].new_page()
+                self._page.goto("https://app.wealthcharts.com", wait_until="domcontentloaded", timeout=30000)
+                self._connected = True
+                self._inject_stealth(self._page)
+                logger.info("[SPECIALIST] Created WealthCharts tab: %s", self._page.url[:80])
+                return True
+
+            except Exception as conn_err:
+                logger.error("[SPECIALIST] Connect failed: %s", conn_err)
+                self._connected = False
+                return False
+
+    def _reconnect(self) -> bool:
+        """EPIPE Self-Healing: reconnect without restarting the bot."""
+        logger.warning("[SPECIALIST] EPIPE DETECTED — self-healing in 5 seconds...")
+        time.sleep(5)
+        self._page = None
+        self._connected = False
+        success = self.connect()
+        if success:
+            logger.info("[SPECIALIST] Self-heal successful — reconnected to WealthCharts")
+        else:
+            logger.error("[SPECIALIST] Self-heal FAILED — will retry on next cycle")
+        return success
+
+    def _get_page(self):
+        """Get a live page reference, reconnecting if needed."""
+        try:
+            if self._page and not self._page.is_closed() and self._connected:
+                return self._page
+        except Exception:
+            pass
+        # EPIPE recovery
+        if self._reconnect():
+            return self._page
+        return None
+
+    # -----------------------------------------------------------------
+    # Always Ready Protocol
+    # -----------------------------------------------------------------
+    def start_always_ready(self):
+        """Start the 10-second Combat Ready watchdog."""
+        if self._running:
+            return
+        self._running = True
+        self._combat_ready_tick()
+        logger.info("[SPECIALIST] Always Ready watchdog started (10s interval)")
+
+    def stop_always_ready(self):
+        """Stop the watchdog."""
+        self._running = False
+        if self._ready_timer:
+            self._ready_timer.cancel()
+            self._ready_timer = None
+        logger.info("[SPECIALIST] Always Ready watchdog stopped")
+
+    def _combat_ready_tick(self):
+        """Single Combat Ready check — runs every 10 seconds."""
+        if not self._running:
+            return
+        try:
+            page = self._get_page()
+            if not page:
+                return
+
+            # 1. Delete any popup
+            self._kill_popups(page)
+
+            # 2. Force open trading panel if closed
+            self._ensure_panel(page)
+
+            # 3. Force correct account
+            self._ensure_account(page)
+
+        except Exception as tick_err:
+            logger.debug("[SPECIALIST] Combat Ready tick error (non-fatal): %s", tick_err)
+        finally:
+            if self._running:
+                # Jitter the watchdog interval (8-12s) so it's not a detectable pattern
+                interval = random.uniform(8.0, 12.0)
+                self._ready_timer = threading.Timer(interval, self._combat_ready_tick)
+                self._ready_timer.daemon = True
+                self._ready_timer.start()
+
+    def _kill_popups(self, page):
+        """Delete any popup or modal from the DOM."""
+        try:
+            removed = page.evaluate("""() => {
+                const selectors = [
+                    '[class*="popup"] [class*="close"]',
+                    '[class*="modal"] [class*="close"]',
+                    '[role="dialog"] [class*="close"]',
+                    '[class*="modal"] button',
+                    '[class*="overlay"] [class*="close"]',
+                    '[class*="popup"] button',
+                    '[class*="notification"] [class*="close"]',
+                ];
+                let count = 0;
+                for (const sel of selectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        el.click();
+                        el.remove();
+                        count++;
+                    });
+                }
+                return count;
+            }""")
+            if removed > 0:
+                logger.info("[SPECIALIST] Killed %d popup elements", removed)
+        except Exception:
+            pass
+
+    def _ensure_panel(self, page):
+        """Force open the trading panel using the dollar-sign icon."""
+        try:
+            buy_visible = page.locator(self.SEL_BUY_MKT).count() > 0
+            sell_visible = page.locator(self.SEL_SELL_MKT).count() > 0
+            if buy_visible and sell_visible:
+                return  # Panel already open
+            panel_trigger = page.locator(self.SEL_PANEL_TRIGGER).first
+            if panel_trigger.count() > 0:
+                panel_trigger.click()
+                time.sleep(1)
+                logger.info("[SPECIALIST] Forced trading panel open via fa-dollar-sign")
+        except Exception as panel_err:
+            logger.debug("[SPECIALIST] Panel ensure error (non-fatal): %s", panel_err)
+
+    def _ensure_account(self, page):
+        """Force select the correct Apex account."""
+        try:
+            label = page.locator(self.SEL_ACCOUNT_LABEL).first.text_content(timeout=2000)
+            if label and any(frag in label for frag in self.ACCOUNT_FRAGMENTS):
+                return  # Correct account
+            # Wrong account — force click the account dropdown
+            page.evaluate("""() => {
+                const el = document.querySelector('div.account-id-display');
+                if (el) el.click();
+            }""")
+            time.sleep(1)
+            # Select the target account from dropdown
+            page.evaluate("""() => {
+                const options = document.querySelectorAll('[role="option"], div[class*="account"], li');
+                for (const opt of options) {
+                    const text = (opt.textContent || '').trim();
+                    if (text.includes('314327-18') || text.includes('APEX-314327')) {
+                        opt.click();
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            time.sleep(0.5)
+            logger.info("[SPECIALIST] Forced account selection to %s", self.TARGET_ACCOUNT)
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------
+    # Execution Logic
+    # -----------------------------------------------------------------
+    def execute(self, asset: str, action: str) -> bool:
+        """
+        Execute a trade on WealthCharts using ID-based targeting.
+
+        Step A: page.fill() on symbol search (no typing simulation)
+        Step B: Verify page.url contains symbol
+        Step C: click() on hard-coded buy/sell button ID
+
+        Returns True on success.
+        """
+        action_upper = self._normalize(action)
+        if action_upper not in ("BUY", "SELL"):
+            logger.error("[SPECIALIST] Invalid action: %s", action)
+            return False
+
+        if asset.upper() not in self.ALLOWED_SYMBOLS:
+            logger.error("[SPECIALIST] Symbol %s not in whitelist %s", asset, self.ALLOWED_SYMBOLS)
+            return False
+
+        page = self._get_page()
+        if not page:
+            logger.error("[SPECIALIST] No page available for execution")
+            return False
+
+        try:
+            # Re-inject stealth on every execution (page may have reloaded)
+            self._inject_stealth(page)
+
+            # Pre-flight: kill popups, ensure panel, ensure account
+            self._kill_popups(page)
+            self._human_sleep(0.4)  # Human: glance at screen after popup removal
+            self._ensure_panel(page)
+            self._human_sleep(0.3)
+            self._ensure_account(page)
+            self._human_sleep(0.5)  # Human: verify account after switch
+
+            # Step A: Fill symbol search directly (typing simulation for anti-detection)
+            logger.info("[SPECIALIST] Step A — filling symbol search with %s", asset)
+            search_input = page.locator(self.SEL_SYMBOL_SEARCH).first
+            # Human: click search box
+            self._human_hover_click(page, search_input)
+            self._human_sleep(0.3)
+            # Human: type symbol at human speed (40-80ms per char)
+            self._human_type(page, asset, delay_ms=55)
+            self._human_sleep(random.uniform(0.2, 0.5))  # Human: pause before Enter
+            page.keyboard.press("Enter")
+            self._human_sleep(2.5)  # Wait for chart to load (human: watch chart load)
+
+            # Step B: Verify URL contains symbol
+            current_url = page.url or ""
+            if asset.upper() not in current_url.upper():
+                logger.warning("[SPECIALIST] Step B — URL mismatch: %s not in %s", asset, current_url[:80])
+                # Proceed anyway — WealthCharts may use internal routing
+            else:
+                logger.info("[SPECIALIST] Step B — URL verified: %s", current_url[:80])
+
+            # Step C: Execute click on hard-coded button
+            selector = self.SEL_BUY_MKT if action_upper == "BUY" else self.SEL_SELL_MKT
+            btn = page.locator(selector).first
+            btn_count = btn.count()
+            if btn_count == 0:
+                logger.error("[SPECIALIST] Step C — button not found: %s", selector)
+                return False
+
+            # Human: pause to "read" the order panel before clicking
+            self._human_sleep(random.uniform(0.6, 1.4))
+
+            # Final account check 50ms before click (CHAIN-LOCK)
+            time.sleep(0.05)
+            try:
+                account_label = page.locator(self.SEL_ACCOUNT_LABEL).first.text_content(timeout=1000)
+            except Exception:
+                account_label = ""
+            if not account_label or not any(frag in account_label for frag in self.ACCOUNT_FRAGMENTS):
+                logger.error("[SPECIALIST] CHAIN-LOCK: Account label '%s' != target — BLOCKING CLICK", account_label)
+                return False
+
+            # BLOCK: Paper/Demo account guard
+            if account_label and any(bad in account_label.lower() for bad in ('paper', 'demo', 'sim', 'test')):
+                logger.error("[SPECIALIST] CHAIN-LOCK: Paper/Demo account detected — BLOCKING CLICK")
+                return False
+
+            # Human: hover over button, then click with randomized offset
+            self._human_hover_click(page, btn)
+            logger.info("[SPECIALIST] Step C — %s %s CLICKED", action_upper, asset)
+
+            # Human: wait for fill confirmation (humans don't instantly look away)
+            self._human_sleep(1.5)
+            try:
+                pos_count = page.locator(self.SEL_POSITION_COUNT).first.text_content(timeout=2000)
+            except Exception:
+                pos_count = None
+            if pos_count and pos_count.strip() != '0':
+                logger.info("[SPECIALIST] VERIFIED: Position count = %s after %s %s", pos_count.strip(), action_upper, asset)
+                return True
+
+            logger.warning("[SPECIALIST] Position count verification inconclusive for %s %s", action_upper, asset)
+            return True  # Click succeeded, verification ambiguous
+
+        except Exception as exec_err:
+            err_str = str(exec_err).lower()
+            # EPIPE recovery on ANY connection-level error
+            if any(x in err_str for x in (
+                'epipe', 'socket', 'connection', 'protocol error',
+                'playwright error', 'target closed', 'browser closed',
+                'broken pipe', 'pipe', 'disconnected', 'remote end',
+                'target page', 'context closed', 'page closed'
+            )):
+                logger.warning("[SPECIALIST] EPIPE during execution — triggering self-heal")
+                self._reconnect()
+                return False
+            logger.error("[SPECIALIST] Execution failed: %s", exec_err)
+            return False
+
+    # -----------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------
+    @staticmethod
+    def _normalize(action) -> str:
+        """Normalize action to BUY/SELL."""
+        if hasattr(action, 'value'):
+            action = action.value
+        return str(action).strip().upper().rsplit('.', 1)[-1]
+
+    def is_connected(self) -> bool:
+        """Check if the specialist has a live connection."""
+        try:
+            return self._connected and self._page is not None and not self._page.is_closed()
+        except Exception:
+            return False

@@ -45,6 +45,12 @@ KILL_SWITCH = False
 TRADING_START_HOUR_UTC = int(os.getenv("TRADING_START_HOUR_UTC", "12"))
 TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 
+# ===== FUTURES ONLY WHITELIST =====
+# Only these assets are allowed to trigger RPA trades on Apex account
+FUTURES_WHITELIST = ["MCLM6", "NQM6", "ESM6", "MGC"]
+# Block stocks like TSLA, AAPL, SPX from triggering trades
+BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
+
 # ===== TRADING MODE =====
 TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
 

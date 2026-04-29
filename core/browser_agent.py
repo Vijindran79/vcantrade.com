@@ -63,6 +63,35 @@ class BrowserAgent:
         text = str(exc).lower()
         return "no dialog is showing" in text or "handlejavascriptdialog" in text
 
+    # EPIPE RECOVERY: Pipe Watchdog
+    async def _safe_navigate(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 30000) -> bool:
+        """Navigate with EPIPE/Socket error recovery. If connection fails, wait 5s and retry."""
+        if not self.page:
+            logger.error("[PIPE] No page available for navigation")
+            return False
+        try:
+            await self.page.goto(url, wait_until=wait_until, timeout=timeout)
+            return True
+        except Exception as nav_err:
+            err_str = str(nav_err).lower()
+            # EPIPE or Socket error detected
+            if any(x in err_str for x in ["epipe", "socket", "connection", "playwright", "protocol error", "404", "not found"]):
+                logger.warning("[PIPE WATCHDOG] Error detected: %s — waiting 5s and refreshing connection", nav_err)
+                await asyncio.sleep(5)
+                try:
+                    # Stay on current WealthCharts page - don't navigate away
+                    if "wealthcharts" in self.page.url.lower():
+                        logger.info("[PIPE WATCHDOG] Staying on WealthCharts page: %s", self.page.url[:80])
+                        return False
+                    # Try to reload current page
+                    await self.page.reload(wait_until="domcontentloaded", timeout=15000)
+                    logger.info("[PIPE WATCHDOG] Connection refreshed successfully")
+                    return False
+                except Exception as refresh_err:
+                    logger.error("[PIPE WATCHDOG] Failed to refresh connection: %s", refresh_err)
+                    return False
+            raise  # Re-raise if not a handled error
+
     def is_browser_busy(self) -> bool:
         """STURDY BRIDGE: Check if the browser is currently busy (navigating or loading).
         Returns True if the bot should SKIP this cycle and wait for the next one.
@@ -273,20 +302,14 @@ class BrowserAgent:
         # COLD START / FALLBACK: Full page navigation
         url = f"{getattr(config, 'WEALTHCHARTS_URL', 'https://app.wealthcharts.com')}/?symbol={tv_symbol}"
 
+        logger.info(f"[GLOBE] Navigating to WealthCharts: {ticker} ({tv_symbol})")
+        
+        # Use 'commit' instead of 'domcontentloaded' - much faster, doesn't wait for WS
         try:
-            logger.info(f"[GLOBE] Navigating to WealthCharts: {ticker} ({tv_symbol})")
-            
-            # Use 'commit' instead of 'domcontentloaded' - much faster, doesn't wait for WS
             await asyncio.wait_for(
-                self.page.goto(url, wait_until="commit", timeout=8000),
+                self._safe_navigate(url, wait_until="commit", timeout=8000),
                 timeout=10.0
             )
-            
-            # Give page a moment to stabilize
-            await asyncio.sleep(1)
-            
-            logger.info(f"[OK] Chart loaded for {ticker}")
-            return True
         except asyncio.TimeoutError:
             logger.warning(f"[WARN] Navigation timeout for {ticker}, proceeding anyway")
             return True  # Return True - page may still be usable
@@ -294,7 +317,11 @@ class BrowserAgent:
             logger.error(f"[FAIL] Failed to navigate to chart for {ticker}: {e}")
             return False
 
-    async def get_live_price(self) -> float:
+        # Give page a moment to stabilize
+        await asyncio.sleep(1)
+        
+        logger.info(f"[OK] Chart loaded for {ticker}")
+        return True
         """
         Read the current live price from the WealthCharts chart.
         Uses multiple selector strategies for reliability including aria-label and JS fallback.
@@ -480,7 +507,9 @@ class BrowserAgent:
                 logger.info("[AUTO] No chart tab found. Creating new tab via CDP context -> %s ...", wc_url)
                 self.page = await self.context.new_page()
                 self._install_safe_dialog_handler()
-                await self.page.goto(wc_url, wait_until="domcontentloaded", timeout=30000)
+                success = await self._safe_navigate(wc_url, wait_until="domcontentloaded", timeout=30000)
+                if not success:
+                    raise Exception(f"Failed to navigate to {wc_url}")
                 logger.info("[AUTO] Navigated to WealthCharts: %s", self.page.url[:80])
 
                 # Login detection
@@ -668,7 +697,10 @@ class BrowserAgent:
 
             if not already_on_wc:
                 logger.info("[NAV] Loading base WealthCharts page...")
-                await self.page.goto(wc_url_base, wait_until="domcontentloaded", timeout=30000)
+                success = await self._safe_navigate(wc_url_base, wait_until="domcontentloaded", timeout=30000)
+                if not success:
+                    logger.warning("[NAV] Failed to load %s, staying on current page", wc_url_base)
+                    return False
                 await asyncio.sleep(3)  # Let the chart app initialise
             else:
                 logger.info("[NAV] Already on WealthCharts — reusing tab")
@@ -761,16 +793,17 @@ class BrowserAgent:
                 self.context = None
                 self.browser = None
 
-    async def navigate_to(self, url: str, wait_until: str = "domcontentloaded"):
+    async def navigate_to(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 30000):
         """Navigate to a URL."""
         if not self.is_running:
             await self.start()
-        
+
         try:
             logger.info(f"[GLOBE] Navigating to: {url}")
-            await self.page.goto(url, wait_until=wait_until, timeout=30000)
-            logger.info(f"[OK] Page loaded: {url}")
-            return True
+            success = await self._safe_navigate(url, wait_until=wait_until, timeout=timeout)
+            if success:
+                logger.info(f"[OK] Page loaded: {url}")
+            return success
         except Exception as e:
             logger.error(f"[FAIL] Failed to navigate to {url}: {e}")
             return False
@@ -861,9 +894,16 @@ class BrowserAgent:
             return {"symbol": symbol, "error": str(e), "source": "TradingView"}
 
     async def get_yahoo_finance_price(self, symbol: str) -> Dict[str, Any]:
-        """Get current price from Yahoo Finance. Opens a new tab so user's TradingView tab stays intact."""
+        """Get current price from Yahoo Finance. Opens a new tab so user's TradingView tab stays intact.
+        TOTAL YAHOO BAN: M6 futures and Gold/XAUUSD are NOT on Yahoo Finance — return error immediately."""
         if not self.is_running:
             await self.start()
+
+        # Hard bypass: never open Yahoo Finance for futures or Gold
+        # HARD BYPASS: Never open Yahoo Finance for M6 futures or XAUUSD
+        if symbol and (symbol.upper().endswith("M6") or symbol.upper() == "XAUUSD"):
+            logger.info("[YAHOO BAN] Returning error dict for %s — Yahoo Finance banned for futures/Gold", symbol)
+            return {"symbol": symbol, "error": "Yahoo Finance banned for futures/Gold", "source": "YAHOO_BAN", "price": None}
 
         try:
             # Open Yahoo Finance in a new tab to avoid disturbing user's TradingView
@@ -895,8 +935,13 @@ class BrowserAgent:
             }
 
         except Exception as e:
-            logger.error("[FAIL] Failed to get Yahoo Finance price for %s: %s", symbol, e)
-            return {"symbol": symbol, "error": str(e), "source": "Yahoo Finance"}
+            if "404" in str(e) or "not found" in str(e).lower():
+                logger.warning("[CHART] Yahoo Finance 404 for %s — ignoring, staying on current page", symbol)
+            else:
+                logger.error("[FAIL] Failed to get Yahoo Finance price for %s: %s", symbol, e)
+            if 'new_page' in locals() and new_page:
+                await new_page.close()
+            return {"symbol": symbol, "error": "Yahoo Finance failed", "source": "Yahoo Finance", "price": None}
 
     async def check_multiple_sources(self, symbol: str) -> Dict[str, Any]:
         """
@@ -916,12 +961,16 @@ class BrowserAgent:
         except Exception as e:
             logger.warning(f"TradingView failed: {e}")
         
-        # Try Yahoo Finance
+        # Try Yahoo Finance (TOTAL YAHOO BAN: skip for M6 futures and Gold)
         try:
-            yf_data = await self.get_yahoo_finance_price(symbol)
-            if "price" in yf_data:
-                results["yahoo"] = yf_data
-                logger.info(f"[OK] Yahoo Finance: ${yf_data['price']:.2f}")
+            # Hard bypass check - never call Yahoo for these symbols
+            if not (symbol.upper().endswith("M6") or symbol.upper() == "XAUUSD"):
+                yf_data = await self.get_yahoo_finance_price(symbol)
+                if "price" in yf_data:
+                    results["yahoo"] = yf_data
+                    logger.info(f"[OK] Yahoo Finance: ${yf_data['price']:.2f}")
+            else:
+                logger.info("[YAHOO BAN] Skipping Yahoo Finance for %s (M6/XAUUSD)", symbol)
         except Exception as e:
             logger.warning(f"Yahoo Finance failed: {e}")
         

@@ -343,7 +343,9 @@ class WatchtowerScanner(QThread):
             self._emit_alert(alert)
 
     def _emit_alert(self, alert: WatchlistAlert):
-        """Emit alert with cooldown protection"""
+        """Emit alert with cooldown protection.
+        VOLUME SPIKE FILTER: SPX alerts are informational only - never trigger trades.
+        """
         # Check cooldown
         last_alert = self.alert_cooldowns.get(alert.asset)
         if last_alert:
@@ -358,7 +360,12 @@ class WatchtowerScanner(QThread):
             f"{alert.asset} [DASH] {alert.reason}"
         )
 
-        # Build MarketDataPoint for Swarm handoff
+        # VOLUME SPIKE FILTER: SPX is informational only - NEVER trigger trades
+        if alert.asset.upper() in ["SPX", "^GSPC", "S&P 500"]:
+            logger.info("[WATCHTOWER] SPX alert is informational only - not triggering trade")
+            return
+
+        # Build MarketDataPoint for Swarm handoff (non-SPX only)
         market_data = MarketDataPoint(
             asset=alert.asset,
             price=alert.current_price,
