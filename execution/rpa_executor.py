@@ -1384,11 +1384,18 @@ class WealthChartsSpecialist:
     # These are the fallback coordinates when DOM access is blocked by WealthCharts.
     # Update these by running: python map_coordinates.py
     COORDINATE_LAMINATE = {
-        "buy_btn":  [1847, 612],
-        "sell_btn": [1847, 668],
-        "search_bar": [245, 82],
+        "buy_btn":  [1340, 596],
+        "sell_btn": [1340, 640],
+        "search_bar": [150, 110],
         "account_dropdown": [1200, 45],
     }
+
+    # Windows 'Maximized' border offset — Chrome is not at (0,0) when maximized
+    SCREEN_OFFSET_X = 7
+    SCREEN_OFFSET_Y = 7
+
+    # Search bar fallback when coordinates are negative or missing
+    SEARCH_BAR_FALLBACK = [150, 110]
 
     def __init__(self):
         self._page = None
@@ -1570,30 +1577,103 @@ class WealthChartsSpecialist:
     # -----------------------------------------------------------------
     # Coordinate Laminate — Blind Click Fallback
     # -----------------------------------------------------------------
-    def _blind_click(self, target_key: str, label: str = ""):
-        """Click at hardcoded screen coordinates via PyAutoGUI.
-        Used when DOM access to Order Entry panel is blocked.
-        target_key: 'buy_btn', 'sell_btn', 'search_bar', 'account_dropdown'"""
+    def _resolve_coords(self, target_key: str) -> tuple[int, int] | None:
+        """Resolve laminate coordinates with offset, negative-fallback, and bounds check."""
         coords = self.COORDINATE_LAMINATE.get(target_key)
         if not coords or len(coords) != 2:
             logger.error("[LAMINATE] No coordinates for '%s'", target_key)
-            return False
+            return None
+
         x, y = coords
+
+        # Search bar fallback: if X is negative or zero, use fixed position
+        if target_key == "search_bar" and x <= 0:
+            x, y = self.SEARCH_BAR_FALLBACK
+            logger.warning("[LAMINATE] search_bar X was negative — using fallback (%d, %d)", x, y)
+
+        # Apply Windows maximized border offset
+        x += self.SCREEN_OFFSET_X
+        y += self.SCREEN_OFFSET_Y
+
+        # Bounds check: ensure coordinates are on screen
+        if x < 0 or y < 0:
+            logger.error("[LAMINATE] Coordinates (%d, %d) are off-screen for '%s'", x, y, target_key)
+            return None
+
+        return (x, y)
+
+    def _pixel_color(self, x: int, y: int) -> tuple[int, int, int] | None:
+        """Read the RGB color of a pixel on screen. Returns (R, G, B) or None."""
+        try:
+            pixel = pyautogui.pixel(x, y)
+            return pixel
+        except Exception:
+            return None
+
+    def _verify_click_color(self, x: int, y: int, action: str) -> bool:
+        """Click & Verify: click at (x,y), wait 100ms, check pixel color.
+        Buy button should be green-ish, Sell button should be red-ish.
+        Returns True if color matches expected action."""
+        pyautogui.click(x, y)
+        time.sleep(0.1)
+
+        color = self._pixel_color(x, y)
+        if not color:
+            logger.warning("[LAMINATE] Could not read pixel color at (%d, %d)", x, y)
+            return True  # Assume success if we can't read
+
+        r, g, b = color
+        logger.info("[LAMINATE] Pixel at (%d, %d): RGB(%d, %d, %d)", x, y, r, g, b)
+
+        if action == "BUY":
+            # Green button: G channel dominant
+            if g > r and g > b and g > 80:
+                logger.info("[LAMINATE] GREEN confirmed — Buy click landed on button")
+                return True
+            logger.warning("[LAMINATE] Color (%d,%d,%d) is NOT green — click may have missed", r, g, b)
+            return False
+        elif action == "SELL":
+            # Red button: R channel dominant
+            if r > g and r > b and r > 80:
+                logger.info("[LAMINATE] RED confirmed — Sell click landed on button")
+                return True
+            logger.warning("[LAMINATE] Color (%d,%d,%d) is NOT red — click may have missed", r, g, b)
+            return False
+
+        return True  # Unknown action — assume success
+
+    def _blind_click(self, target_key: str, label: str = "", action: str = "BUY"):
+        """Click at hardcoded screen coordinates via PyAutoGUI.
+        Applies Windows offset. Verifies pixel color after click.
+        target_key: 'buy_btn', 'sell_btn', 'search_bar', 'account_dropdown'"""
+        resolved = self._resolve_coords(target_key)
+        if not resolved:
+            return False
+        x, y = resolved
         logger.info("[LAMINATE] BLIND CLICK %s at screen (%d, %d)%s", target_key, x, y, f" — {label}" if label else "")
+
         # Move mouse with human-like speed
         duration = random.uniform(0.3, 0.7)
         pyautogui.moveTo(x, y, duration=duration)
         time.sleep(random.uniform(0.1, 0.3))
-        pyautogui.click(x, y)
-        return True
+
+        # Click & Verify: check pixel color matches expected action
+        if target_key in ("buy_btn", "sell_btn"):
+            return self._verify_click_color(x, y, action)
+        else:
+            pyautogui.click(x, y)
+            return True
 
     def _blind_type(self, text: str):
-        """Type text at the search bar coordinate via PyAutoGUI."""
-        coords = self.COORDINATE_LAMINATE.get("search_bar")
-        if not coords:
+        """Type text at the search bar coordinate via PyAutoGUI.
+        Applies Windows offset and negative-coordinate fallback."""
+        resolved = self._resolve_coords("search_bar")
+        if not resolved:
             logger.error("[LAMINATE] No search_bar coordinates")
             return False
-        x, y = coords
+        x, y = resolved
+        logger.info("[LAMINATE] BLIND TYPE '%s' at search bar (%d, %d)", text, x, y)
+
         # Click search bar first
         pyautogui.moveTo(x, y, duration=random.uniform(0.3, 0.5))
         time.sleep(0.1)
@@ -1908,15 +1988,15 @@ class WealthChartsSpecialist:
                     else:
                         # Bounding box failed — fallback to laminate
                         logger.warning("[EXEC] DOM click failed — falling back to LAMINATE")
-                        self._blind_click(target_key, f"{action_upper} {asset}")
+                        self._blind_click(target_key, f"{action_upper} {asset}", action=action_upper)
                 else:
                     # DOM blocked — blind click via laminate
                     self._human_sleep(random.uniform(0.6, 1.0))
-                    self._blind_click(target_key, f"{action_upper} {asset}")
+                    self._blind_click(target_key, f"{action_upper} {asset}", action=action_upper)
             else:
                 # Full blind mode
                 self._human_sleep(random.uniform(0.6, 1.0))
-                self._blind_click(target_key, f"{action_upper} {asset}")
+                self._blind_click(target_key, f"{action_upper} {asset}", action=action_upper)
 
             logger.info("[EXEC] Step C — %s %s CLICKED", action_upper, asset)
 
