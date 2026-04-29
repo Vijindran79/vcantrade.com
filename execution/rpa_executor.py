@@ -1462,6 +1462,101 @@ class WealthChartsSpecialist:
         except Exception:
             pass
 
+    def _apply_sniper_view(self, page):
+        """DOM Cleanse: Strip WealthCharts to a minimal Sniper View.
+        Removes popups, sidebars, excess indicators. Pins trade panel.
+        Keeps only price action and Buy/Sell buttons visible."""
+        try:
+            page.evaluate("""() => {
+                // 1. Kill all popups/modals/overlays
+                const killSelectors = [
+                    '[role="dialog"]', '[class*="modal"]', '[class*="popup"]',
+                    '[class*="overlay"]', '[class*="toast"]', '[class*="notification"]',
+                    '[class*="banner"]', '[class*="promo"]', '[class*="marketing"]',
+                    '[class*="upgrade"]', '[class*="trial"]', '[class*="welcome"]',
+                    '[class*="whats-new"]', '[class*="changelog"]', '[class*="survey"]',
+                    '[class*="feedback"]', '[class*="onboarding"]', '[class*="tour"]',
+                    '[class*="guide"]', '[class*="help-panel"]',
+                ];
+                for (const sel of killSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        const text = (el.textContent || '').toLowerCase();
+                        if (text.includes('buy mkt') || text.includes('sell mkt')) return;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 50 && rect.height > 50) {
+                            el.style.setProperty('display', 'none', 'important');
+                        }
+                    });
+                }
+
+                // 2. Hide sidebars (news, chat, social, education)
+                document.querySelectorAll('[class*="sidebar"], [class*="side-bar"], [class*="feed"], [class*="chat"], aside').forEach(el => {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 350 && rect.height > 100) {
+                        el.style.setProperty('display', 'none', 'important');
+                    }
+                });
+
+                // 3. Inject persistent blocking CSS
+                let style = document.getElementById('sniper-css');
+                if (!style) {
+                    style = document.createElement('style');
+                    style.id = 'sniper-css';
+                    document.head.appendChild(style);
+                }
+                style.textContent = `
+                    [role="dialog"]:not([data-keep]),
+                    [class*="modal"]:not([data-keep]),
+                    [class*="popup"]:not([data-keep]),
+                    [class*="overlay"]:not([data-keep]),
+                    [class*="toast"]:not([data-keep]),
+                    [class*="notification"]:not([data-keep]),
+                    [class*="banner"]:not([data-keep]),
+                    [class*="promo"]:not([data-keep]),
+                    [class*="marketing"]:not([data-keep]),
+                    [class*="welcome"]:not([data-keep]),
+                    [class*="upgrade"]:not([data-keep]),
+                    [class*="trial"]:not([data-keep]),
+                    [class*="onboarding"]:not([data-keep]),
+                    [class*="tour"]:not([data-keep]),
+                    [class*="guide"]:not([data-keep]),
+                    [class*="survey"]:not([data-keep]),
+                    [class*="feedback"]:not([data-keep]),
+                    [class*="whats-new"]:not([data-keep]),
+                    [class*="changelog"]:not([data-keep]) {
+                        display: none !important;
+                        visibility: hidden !important;
+                        pointer-events: none !important;
+                        z-index: -9999 !important;
+                    }
+                    button[data-type="buy-mkt"], button[data-type="sell-mkt"],
+                    [class*="order-entry"], [class*="trade-panel"] {
+                        display: flex !important;
+                        visibility: visible !important;
+                        z-index: 99999 !important;
+                    }
+                `;
+
+                // 4. Click dismiss buttons
+                document.querySelectorAll('button, [role="button"]').forEach(btn => {
+                    const text = (btn.textContent || '').trim().toLowerCase();
+                    if (/^(got it|dismiss|close|no thanks|maybe later|ok|skip|continue|done)$/i.test(text)) {
+                        try { btn.click(); } catch(e) {}
+                    }
+                });
+
+                // 5. Open trade panel if hidden
+                const buyBtn = document.querySelector('button[data-type="buy-mkt"]');
+                if (!buyBtn || buyBtn.getBoundingClientRect().width === 0) {
+                    document.querySelectorAll('i.fa-dollar-sign, [class*="dollar"]').forEach(el => {
+                        try { el.click(); } catch(e) {}
+                    });
+                }
+            }""")
+            logger.info("[SNIPER] Clean Sniper View applied — popups blocked, trade panel pinned")
+        except Exception as e:
+            logger.debug("[SNIPER] Sniper view injection error (non-fatal): %s", e)
+
     # -----------------------------------------------------------------
     # Connection — Self-Healing Loop
     # -----------------------------------------------------------------
@@ -1497,6 +1592,7 @@ class WealthChartsSpecialist:
                             self._page = pg
                             self._connected = True
                             self._inject_stealth(pg)
+                            self._apply_sniper_view(pg)
                             logger.info("[SPECIALIST] Connected to WealthCharts: %s", pg.url[:80])
                             return True
 
