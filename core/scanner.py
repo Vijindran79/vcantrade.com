@@ -157,24 +157,36 @@ class CloudScanner:
             candidates.append(value)
 
     def _mt5_symbol_candidates(self, ticker: str) -> List[str]:
-        """Return broker-symbol candidates for an MT5 MarketWatch lookup."""
+        """Return broker-symbol candidates for an MT5 MarketWatch lookup.
+        SYMBOL BRIDGE: includes SYMBOL_MAP, SYMBOL_BRIDGE_CANDIDATES, and canonical forms."""
         candidates: List[str] = []
         raw = str(ticker or "").strip()
 
         if raw:
             self._add_symbol_candidate(candidates, raw)
 
-        mapped = ""
+        # Symbol Bridge: primary map
+        symbol_map = getattr(config, "SYMBOL_MAP", {}) or {}
+        mapped = symbol_map.get(raw) or symbol_map.get(raw.upper()) or ""
+        self._add_symbol_candidate(candidates, mapped)
+
+        # Symbol Bridge: extra candidates
+        bridge_candidates = getattr(config, "SYMBOL_BRIDGE_CANDIDATES", {}) or {}
+        for extra in bridge_candidates.get(raw, bridge_candidates.get(raw.upper(), ())):
+            self._add_symbol_candidate(candidates, extra)
+
+        # Legacy MT5_SYMBOL_MAP
         mt5_map = getattr(config, "MT5_SYMBOL_MAP", {}) or {}
         if raw:
-            mapped = mt5_map.get(raw) or mt5_map.get(raw.upper()) or ""
-            self._add_symbol_candidate(candidates, mapped)
+            legacy_mapped = mt5_map.get(raw) or mt5_map.get(raw.upper()) or ""
+            self._add_symbol_candidate(candidates, legacy_mapped)
 
         canonical = self._canonical_market_ticker(raw) if raw else ""
         self._add_symbol_candidate(candidates, canonical)
         if canonical:
             self._add_symbol_candidate(candidates, mt5_map.get(canonical, ""))
             self._add_symbol_candidate(candidates, mt5_map.get(canonical.upper(), ""))
+            self._add_symbol_candidate(candidates, symbol_map.get(canonical, ""))
 
         translation = translate_chart_symbol(raw) or translate_chart_symbol(canonical)
         if translation:
@@ -197,19 +209,87 @@ class CloudScanner:
         return candidates
 
     def _select_mt5_symbol(self, ticker: str) -> Optional[str]:
-        """Select the first available MT5 symbol into MarketWatch."""
+        """Select the first available MT5 symbol into MarketWatch.
+        SYMBOL BRIDGE: tries exact candidates first, then fuzzy MarketWatch search."""
         _mt5 = _lazy_mt5()
         if _mt5 is False:
             return None
 
+        # Phase 1: Try exact candidates from SYMBOL_MAP + SYMBOL_BRIDGE_CANDIDATES
         for candidate in self._mt5_symbol_candidates(ticker):
             try:
-                if _mt5.symbol_select(candidate, True):
-                    logger.debug("[MT5] MarketWatch symbol selected: %s", candidate)
-                    return candidate
-                logger.debug("[MT5] symbol_select(%s) returned False", candidate)
+                info = _mt5.symbol_info(candidate)
+                if info is not None:
+                    broker_name = getattr(info, "name", candidate) or candidate
+                    if _mt5.symbol_select(broker_name, True):
+                        logger.info("[MT5-BRIDGE] Resolved %s -> %s (exact candidate)", ticker, broker_name)
+                        return broker_name
             except Exception as exc:
-                logger.debug("[MT5] symbol_select(%s) failed: %s", candidate, exc)
+                logger.debug("[MT5] symbol_info/select(%s) failed: %s", candidate, exc)
+
+        # Phase 2: Fuzzy MarketWatch search using SYMBOL_FUZZY_TERMS
+        fuzzy_result = self._fuzzy_find_mt5_symbol(ticker, _mt5)
+        if fuzzy_result:
+            return fuzzy_result
+
+        return None
+
+    def _fuzzy_find_mt5_symbol(self, wealthcharts_symbol: str, _mt5) -> Optional[str]:
+        """Fuzzy search MT5 MarketWatch using SYMBOL_FUZZY_TERMS.
+        Scans symbol name, description, and path for matching terms."""
+        bridge_terms = getattr(config, "SYMBOL_FUZZY_TERMS", {})
+        terms = list(bridge_terms.get(wealthcharts_symbol, ()))
+        if not terms:
+            terms = [wealthcharts_symbol]
+        terms_lower = [t.casefold() for t in terms if t]
+
+        try:
+            all_symbols = list(_mt5.symbols_get() or ())
+        except Exception:
+            logger.debug("[MT5-FUZZY] symbols_get() failed for %s", wealthcharts_symbol, exc_info=True)
+            return None
+
+        # Prefer visible symbols, fall back to all
+        visible = [s for s in all_symbols if getattr(s, "visible", False)]
+        pool = visible or all_symbols
+
+        matches = []
+        for sym in pool:
+            name = getattr(sym, "name", None)
+            if not name:
+                continue
+            search_text = " ".join(
+                str(getattr(sym, field, "") or "")
+                for field in ("name", "description", "path", "currency_base", "currency_profit")
+            ).casefold()
+
+            score = 0
+            for term in terms_lower:
+                if not term:
+                    continue
+                name_lower = name.casefold()
+                if name_lower == term:
+                    score += 100
+                elif name_lower.startswith(term):
+                    score += 40
+                elif term in search_text:
+                    score += 20
+
+            if score > 0:
+                matches.append((-score, len(name), name))
+
+        if not matches:
+            return None
+
+        matches.sort()
+        for _, _, name in matches:
+            try:
+                if _mt5.symbol_select(name, True):
+                    logger.info("[MT5-FUZZY] Resolved %s -> %s (fuzzy match)", wealthcharts_symbol, name)
+                    return name
+            except Exception:
+                continue
+
         return None
 
     def _warm_up_mt5_symbols(self) -> None:

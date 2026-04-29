@@ -51,6 +51,34 @@ FUTURES_WHITELIST = ["MCLM6", "NQM6", "ESM6", "MGC"]
 # Block stocks like TSLA, AAPL, SPX from triggering trades
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
+# ===== SYMBOL BRIDGE (WealthCharts → MT5 Broker) =====
+# WealthCharts uses M6 contract codes. MT5 uses broker-specific names.
+# Override any value with an environment variable if your broker labels differ.
+WEALTHCHARTS_TICKERS = ("NQM6", "ESM6", "MCLM6", "MGC")
+
+SYMBOL_MAP = {
+    "NQM6": os.getenv("MT5_NQM6_SYMBOL", "NQM6"),
+    "ESM6": os.getenv("MT5_ESM6_SYMBOL", "ESM6"),
+    "MCLM6": os.getenv("MT5_MCLM6_SYMBOL", "WTI_SB"),
+    "MGC": os.getenv("MT5_MGC_SYMBOL", "XAUUSD"),
+}
+
+# Extra exact candidates to try before fuzzy searching the MT5 symbol list.
+SYMBOL_BRIDGE_CANDIDATES = {
+    "MCLM6": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "MCL"),
+    "MGC": ("XAUUSD", "GOLD_SB", "Gold_SB", "Gold", "XAU", "MGC"),
+    "NQM6": ("NQM6", "NAS100_SB", "NAS100", "MNQ"),
+    "ESM6": ("ESM6", "US500_SB", "US500", "MES"),
+}
+
+# Terms used for fuzzy MarketWatch fallback after exact candidates fail.
+SYMBOL_FUZZY_TERMS = {
+    "MCLM6": ("MCL", "WTI", "Crude", "Oil"),
+    "MGC": ("MGC", "XAU", "GOLD", "Gold"),
+    "NQM6": ("NQ", "NAS", "Nasdaq"),
+    "ESM6": ("ES", "SP500", "S&P"),
+}
+
 # ===== TRADING MODE =====
 TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
 
@@ -126,7 +154,7 @@ CLOUD_TICKERS = ["BTC-USD"]  # BTC-USD kept as 24/7 fallback; futures are watchl
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
-MULTI_ASSET_TICKERS = ["NYMEX:MCL1!"]
+MULTI_ASSET_TICKERS = ["NYMEX:MCL1!", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
@@ -174,6 +202,12 @@ TRADINGVIEW_SYMBOL_MAP = {
 # Pepperstone UK DEMO account — Spread Betting (GBP) uses _SB suffix.
 # Chart tabs show: Crude_SB, NAS100_SB, US500_SB
 MT5_SYMBOL_MAP = {
+    # ===== WealthCharts M6 tickers -> Pepperstone broker symbols =====
+    # These are the symbols the scanner receives — map them FIRST
+    "MCLM6": "Crude_SB",
+    "NQM6": "NAS100_SB",
+    "ESM6": "US500_SB",
+    "MGC": "Gold_SB",
     # CME / NYMEX prefixes -> Pepperstone exact terminal name
     "CME_MINI:MNQ1!": "NAS100_SB",
     "CME_MINI:MES1!": "US500_SB",
@@ -185,7 +219,7 @@ MT5_SYMBOL_MAP = {
     "CL=F": "Crude_SB",
     "NQ=F": "NAS100_SB",
     "ES=F": "US500_SB",
-    "GC=F": "XAUUSD",
+    "GC=F": "Gold_SB",
     "SI=F": "XAGUSD",
     "YM=F": "YM1!",
     "RTY=F": "M2K1!",
@@ -197,15 +231,18 @@ MT5_SYMBOL_MAP = {
     "MES": "US500_SB",
     "MNQ": "NAS100_SB",
     "MCL": "Crude_SB",
-    "GC": "XAUUSD",
+    "GC": "Gold_SB",
     "SI": "XAGUSD",
     "YM": "YM1!",
     # Gold / Silver
-    "GC=F": "Gold_SB",
-    "GC": "Gold_SB",
-    "MGC": "Gold_SB",
     "XAUUSD": "Gold_SB",
     "Gold_SB": "Gold_SB",
+    # Fuzzy fallback fragments (used by scanner fuzzy search)
+    "Crude": "Crude_SB",
+    "WTI": "Crude_SB",
+    "NAS100": "NAS100_SB",
+    "US500": "US500_SB",
+    "Gold": "Gold_SB",
     # PEPPERSTONE EXACT TERMINAL NAMES (self-references for suffix-stripped candidates)
     "Crude_SB": "Crude_SB",
     "NAS100_SB": "NAS100_SB",
