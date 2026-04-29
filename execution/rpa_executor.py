@@ -719,13 +719,10 @@ class RPAExecutor:
             else:
                 logger.info("[PLAYWRIGHT] Navigating to %s via keyboard search", tv_symbol)
                 wc_base = getattr(config, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
-                # Load base page only (no query params)
+                # ZERO-NAVIGATION: Do NOT call page.goto() — WealthCharts kills the session.
                 if "wealthcharts" not in (page.url or "").lower():
-                    try:
-                        page.goto(wc_base, wait_until="domcontentloaded", timeout=15000)
-                        time.sleep(2)
-                    except Exception as nav_err:
-                        logger.warning("[PLAYWRIGHT] page.goto failed: %s — staying on current page", nav_err)
+                    logger.error("[GHOST] Not on WealthCharts page! Please navigate to %s manually.", wc_base)
+                    return False
                 page.bring_to_front()
                 time.sleep(0.5)
                 # Clear search box and type symbol
@@ -1417,11 +1414,13 @@ class WealthChartsSpecialist:
             time.sleep(random.uniform(delay_ms / 1000 * 0.7, delay_ms / 1000 * 1.3))
 
     def _human_hover_click(self, page, locator):
-        """Hover over button, then click with randomized offset — mimics human eye-hand coordination."""
+        """Hover over button, then click with randomized offset — mimics human eye-hand coordination.
+        GHOST MODE: Uses page.mouse.click(x,y) based on coordinates, NOT locator.click().
+        Direct DOM clicks are detected by WealthCharts security."""
         box = locator.bounding_box()
         if not box:
-            locator.click()
-            return
+            logger.warning("[GHOST] No bounding box — cannot click stealthily")
+            return False
         # Random offset inside button (not dead center)
         offset_x = random.uniform(box["width"] * 0.2, box["width"] * 0.8)
         offset_y = random.uniform(box["height"] * 0.2, box["height"] * 0.8)
@@ -1430,7 +1429,9 @@ class WealthChartsSpecialist:
         # Hover first (human pre-click behavior)
         page.mouse.move(target_x, target_y, steps=random.randint(5, 15))
         time.sleep(random.uniform(0.15, 0.45))  # Hover pause
+        # GHOST CLICK: physical mouse click at coordinates — invisible to DOM listeners
         page.mouse.click(target_x, target_y)
+        return True
 
     def _inject_stealth(self, page):
         """Override browser fingerprint to hide Playwright/automation markers."""
@@ -1499,14 +1500,11 @@ class WealthChartsSpecialist:
                             logger.info("[SPECIALIST] Connected to WealthCharts: %s", pg.url[:80])
                             return True
 
-                # No existing WealthCharts tab — create one
-                logger.info("[SPECIALIST] No WealthCharts tab found — creating one")
-                self._page = contexts[0].new_page()
-                self._page.goto("https://app.wealthcharts.com", wait_until="domcontentloaded", timeout=30000)
-                self._connected = True
-                self._inject_stealth(self._page)
-                logger.info("[SPECIALIST] Created WealthCharts tab: %s", self._page.url[:80])
-                return True
+                # ZERO-NAVIGATION: Never create tabs or navigate via URL.
+                # WealthCharts detects page.goto() as bot behavior and kills the session.
+                logger.error("[GHOST] No WealthCharts tab found! Please open https://app.wealthcharts.com in Chrome and log in manually.")
+                logger.error("[GHOST] Bot will NOT navigate — it waits for the user's existing logged-in session.")
+                return False
 
             except Exception as conn_err:
                 logger.error("[SPECIALIST] Connect failed: %s", conn_err)
@@ -1614,7 +1612,8 @@ class WealthChartsSpecialist:
             pass
 
     def _ensure_panel(self, page):
-        """Force open the trading panel using the dollar-sign icon."""
+        """Force open the trading panel using the dollar-sign icon.
+        GHOST MODE: Uses mouse coordinates, NOT DOM clicks."""
         try:
             buy_visible = page.locator(self.SEL_BUY_MKT).count() > 0
             sell_visible = page.locator(self.SEL_SELL_MKT).count() > 0
@@ -1622,11 +1621,11 @@ class WealthChartsSpecialist:
                 return  # Panel already open
             panel_trigger = page.locator(self.SEL_PANEL_TRIGGER).first
             if panel_trigger.count() > 0:
-                panel_trigger.click()
+                self._human_hover_click(page, panel_trigger)
                 time.sleep(1)
-                logger.info("[SPECIALIST] Forced trading panel open via fa-dollar-sign")
+                logger.info("[GHOST] Forced trading panel open via fa-dollar-sign (stealth click)")
         except Exception as panel_err:
-            logger.debug("[SPECIALIST] Panel ensure error (non-fatal): %s", panel_err)
+            logger.debug("[GHOST] Panel ensure error (non-fatal): %s", panel_err)
 
     def _ensure_account(self, page):
         """Force select the correct Apex account."""
@@ -1662,11 +1661,11 @@ class WealthChartsSpecialist:
     # -----------------------------------------------------------------
     def execute(self, asset: str, action: str) -> bool:
         """
-        Execute a trade on WealthCharts using ID-based targeting.
+        Execute a trade on WealthCharts using ZERO-NAVIGATION Ghost Mode.
 
-        Step A: page.fill() on symbol search (no typing simulation)
-        Step B: Verify page.url contains symbol
-        Step C: click() on hard-coded buy/sell button ID
+        Step A: Visual symbol switching via keyboard (Ctrl+A, Backspace, type, Enter)
+        Step B: Verify chart loaded (no URL change)
+        Step C: Stealth click via page.mouse.click(x,y) coordinates
 
         Returns True on success.
         """
@@ -1690,38 +1689,60 @@ class WealthChartsSpecialist:
 
             # Pre-flight: kill popups, ensure panel, ensure account
             self._kill_popups(page)
-            self._human_sleep(0.4)  # Human: glance at screen after popup removal
+            self._human_sleep(0.4)
             self._ensure_panel(page)
             self._human_sleep(0.3)
             self._ensure_account(page)
-            self._human_sleep(0.5)  # Human: verify account after switch
+            self._human_sleep(0.5)
 
-            # Step A: Fill symbol search directly (typing simulation for anti-detection)
-            logger.info("[SPECIALIST] Step A — filling symbol search with %s", asset)
+            # ===== STEP A: VISUAL SYMBOL SWITCHING (Zero-Navigation) =====
+            # NEVER use page.goto() or page.fill() — WealthCharts detects these as bot actions.
+            # Use keyboard simulation: Ctrl+A → Backspace → type → Enter
+            logger.info("[GHOST] Step A — visual symbol switch to %s via keyboard", asset)
+
+            # Click search box via mouse coordinates (not DOM click)
             search_input = page.locator(self.SEL_SYMBOL_SEARCH).first
-            # Human: click search box
+            search_count = search_input.count()
+            if search_count == 0:
+                logger.error("[GHOST] Symbol search input not found: %s", self.SEL_SYMBOL_SEARCH)
+                return False
             self._human_hover_click(page, search_input)
             self._human_sleep(0.3)
-            # Human: type symbol at human speed (40-80ms per char)
+
+            # Clear existing text: Ctrl+A then Backspace
+            page.keyboard.press("Control+a")
+            self._human_sleep(0.1)
+            page.keyboard.press("Backspace")
+            self._human_sleep(0.2)
+
+            # Type symbol at human speed (40-80ms per char)
             self._human_type(page, asset, delay_ms=55)
-            self._human_sleep(random.uniform(0.2, 0.5))  # Human: pause before Enter
+            self._human_sleep(random.uniform(0.2, 0.5))
+
+            # Press Enter to switch symbol
             page.keyboard.press("Enter")
-            self._human_sleep(2.5)  # Wait for chart to load (human: watch chart load)
+            self._human_sleep(2.5)  # Wait for chart to load
 
-            # Step B: Verify URL contains symbol
-            current_url = page.url or ""
-            if asset.upper() not in current_url.upper():
-                logger.warning("[SPECIALIST] Step B — URL mismatch: %s not in %s", asset, current_url[:80])
-                # Proceed anyway — WealthCharts may use internal routing
-            else:
-                logger.info("[SPECIALIST] Step B — URL verified: %s", current_url[:80])
+            logger.info("[GHOST] Step A complete — symbol switched to %s", asset)
 
-            # Step C: Execute click on hard-coded button
+            # ===== STEP B: VERIFY CHART LOADED =====
+            # Do NOT check URL — WealthCharts uses internal routing.
+            # Instead, verify the symbol search box shows our symbol.
+            try:
+                search_value = page.locator(self.SEL_SYMBOL_SEARCH).first.input_value(timeout=2000)
+                if asset.upper() in search_value.upper():
+                    logger.info("[GHOST] Step B — search box shows %s", search_value)
+                else:
+                    logger.warning("[GHOST] Step B — search box shows '%s' (expected %s), proceeding", search_value, asset)
+            except Exception:
+                logger.warning("[GHOST] Step B — could not read search box, proceeding anyway")
+
+            # ===== STEP C: STEALTH CLICK VIA MOUSE COORDINATES =====
             selector = self.SEL_BUY_MKT if action_upper == "BUY" else self.SEL_SELL_MKT
             btn = page.locator(selector).first
             btn_count = btn.count()
             if btn_count == 0:
-                logger.error("[SPECIALIST] Step C — button not found: %s", selector)
+                logger.error("[GHOST] Step C — button not found: %s", selector)
                 return False
 
             # Human: pause to "read" the order panel before clicking
@@ -1734,44 +1755,44 @@ class WealthChartsSpecialist:
             except Exception:
                 account_label = ""
             if not account_label or not any(frag in account_label for frag in self.ACCOUNT_FRAGMENTS):
-                logger.error("[SPECIALIST] CHAIN-LOCK: Account label '%s' != target — BLOCKING CLICK", account_label)
+                logger.error("[GHOST] CHAIN-LOCK: Account label '%s' != target — BLOCKING CLICK", account_label)
                 return False
-
-            # BLOCK: Paper/Demo account guard
             if account_label and any(bad in account_label.lower() for bad in ('paper', 'demo', 'sim', 'test')):
-                logger.error("[SPECIALIST] CHAIN-LOCK: Paper/Demo account detected — BLOCKING CLICK")
+                logger.error("[GHOST] CHAIN-LOCK: Paper/Demo account detected — BLOCKING CLICK")
                 return False
 
-            # Human: hover over button, then click with randomized offset
-            self._human_hover_click(page, btn)
-            logger.info("[SPECIALIST] Step C — %s %s CLICKED", action_upper, asset)
+            # GHOST CLICK: page.mouse.click(x,y) — not btn.click()
+            clicked = self._human_hover_click(page, btn)
+            if not clicked:
+                logger.error("[GHOST] Step C — could not get button coordinates for stealth click")
+                return False
+            logger.info("[GHOST] Step C — %s %s CLICKED (stealth coordinates)", action_upper, asset)
 
-            # Human: wait for fill confirmation (humans don't instantly look away)
+            # Human: wait for fill confirmation
             self._human_sleep(1.5)
             try:
                 pos_count = page.locator(self.SEL_POSITION_COUNT).first.text_content(timeout=2000)
             except Exception:
                 pos_count = None
             if pos_count and pos_count.strip() != '0':
-                logger.info("[SPECIALIST] VERIFIED: Position count = %s after %s %s", pos_count.strip(), action_upper, asset)
+                logger.info("[GHOST] VERIFIED: Position count = %s after %s %s", pos_count.strip(), action_upper, asset)
                 return True
 
-            logger.warning("[SPECIALIST] Position count verification inconclusive for %s %s", action_upper, asset)
-            return True  # Click succeeded, verification ambiguous
+            logger.warning("[GHOST] Position count verification inconclusive for %s %s", action_upper, asset)
+            return True
 
         except Exception as exec_err:
             err_str = str(exec_err).lower()
-            # EPIPE recovery on ANY connection-level error
             if any(x in err_str for x in (
                 'epipe', 'socket', 'connection', 'protocol error',
                 'playwright error', 'target closed', 'browser closed',
                 'broken pipe', 'pipe', 'disconnected', 'remote end',
                 'target page', 'context closed', 'page closed'
             )):
-                logger.warning("[SPECIALIST] EPIPE during execution — triggering self-heal")
+                logger.warning("[GHOST] EPIPE during execution — triggering self-heal")
                 self._reconnect()
                 return False
-            logger.error("[SPECIALIST] Execution failed: %s", exec_err)
+            logger.error("[GHOST] Execution failed: %s", exec_err)
             return False
 
     # -----------------------------------------------------------------

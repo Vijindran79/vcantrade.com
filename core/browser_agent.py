@@ -1307,67 +1307,21 @@ class BrowserAgent:
         """
         Self-healing restart logic.
 
-        If a 'NoneType' or 'Browser Error' occurs more than 3 times,
-        the bot automatically restarts the BrowserAgent service.
+        GHOST MODE: Self-healing restart is DISABLED.
+        Refreshing the page kills the WealthCharts session.
+        Instead, the bot WAITS for the user to fix the issue manually.
         """
-        if self.restart_count >= self.max_restarts:
-            logger.error(
-                f"[STOP] Self-Heal FAILED: Max restarts ({self.max_restarts}) reached. "
-                f"Browser agent is unstable."
-            )
-            raise RuntimeError(
-                f"Browser agent failed to self-heal after {self.max_restarts} attempts"
-            )
-
-        self.restart_count += 1
-        logger.warning(
-            f"[WRENCH] Self-Healing Restart #{self.restart_count} initiated... "
-            f"(Last error: {self.last_error})"
+        logger.error(
+            f"[GHOST] Browser error detected: {self.last_error}. "
+            f"Self-healing restart is DISABLED to preserve WealthCharts session."
         )
-
-        # Clear CDP cache once per day to keep Sturdy Bridge fast
-        from datetime import date
-        today_str = str(date.today())
-        if self._last_cache_clear_date != today_str:
-            logger.info("[CACHE] First self-heal of the day — clearing Chrome/CDP cache")
-            try:
-                if self.page:
-                    # Clear browser cache via CDP
-                    cdp = await self.page.context.new_cdp_session(self.page)
-                    await cdp.send("Network.clearBrowserCache")
-                    await cdp.send("Network.clearBrowserCookies")
-                    logger.info("[CACHE] Chrome cache + cookies cleared")
-            except Exception as e:
-                logger.debug("[CACHE] Cache clear skipped (non-critical): %s", e)
-            self._last_cache_clear_date = today_str
-
-        try:
-            # Stop current browser instance
-            await self.stop()
-
-            # Reset state
-            self.is_running = False
-            self.browser = None
-            self.context = None
-            self.page = None
-
-            # Wait before restart (cooling period)
-            await asyncio.sleep(2)
-
-            # Restart browser
-            await self.start()
-
-            # Reset error counter on successful restart
-            self.error_count = 0
-
-            logger.info(
-                f"[OK] Self-Healing Restart #{self.restart_count} successful. "
-                f"Browser agent is ready."
-            )
-
-        except Exception as e:
-            logger.error(f"[FAIL] Self-Healing Restart #{self.restart_count} failed: {e}")
-            raise
+        logger.error(
+            "[GHOST] The bot will NOT refresh the page. "
+            "Please check Chrome manually and re-login if needed."
+        )
+        # Do NOT call stop() or start() — that kills the session
+        # Just reset the error counter and wait
+        self.error_count = 0
 
     def record_success(self):
         """Record a successful operation (reset error counter)."""
