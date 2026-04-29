@@ -1574,6 +1574,32 @@ class WealthChartsSpecialist:
         except Exception as e:
             logger.debug("[SNIPER] Sniper view injection error (non-fatal): %s", e)
 
+    def _inject_session_keepalive(self, page):
+        """Inject a JS interval that clicks a neutral area every 4 minutes to prevent session timeout."""
+        try:
+            page.evaluate("""() => {
+                if (window._wcKeepAlive) return;  // Already running
+                window._wcKeepAlive = setInterval(() => {
+                    // Click a neutral area — top-left corner of the chart canvas
+                    const canvas = document.querySelector('canvas');
+                    if (canvas) {
+                        const rect = canvas.getBoundingClientRect();
+                        const x = rect.left + 10;
+                        const y = rect.top + 10;
+                        const evt = new MouseEvent('mousedown', {bubbles: true, clientX: x, clientY: y});
+                        canvas.dispatchEvent(evt);
+                        const evt2 = new MouseEvent('mouseup', {bubbles: true, clientX: x, clientY: y});
+                        canvas.dispatchEvent(evt2);
+                    }
+                    // Also dispatch a keypress (Shift) to keep WebSocket alive
+                    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Shift', bubbles: true}));
+                    document.dispatchEvent(new KeyboardEvent('keyup', {key: 'Shift', bubbles: true}));
+                }, 240000);  // Every 4 minutes
+            }""")
+            logger.info("[KEEPALIVE] Session keep-alive injected (4-minute interval)")
+        except Exception as e:
+            logger.debug("[KEEPALIVE] Injection error (non-fatal): %s", e)
+
     # -----------------------------------------------------------------
     # Coordinate Laminate — Blind Click Fallback
     # -----------------------------------------------------------------
@@ -1741,6 +1767,7 @@ class WealthChartsSpecialist:
                             self._connected = True
                             self._inject_stealth(pg)
                             self._apply_sniper_view(pg)
+                            self._inject_session_keepalive(pg)
                             logger.info("[SPECIALIST] Connected to WealthCharts: %s", pg.url[:80])
                             return True
 
