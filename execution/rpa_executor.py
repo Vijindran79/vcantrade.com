@@ -1577,8 +1577,8 @@ class WealthChartsSpecialist:
             logger.debug("[SPECIALIST] Combat Ready tick error (non-fatal): %s", tick_err)
         finally:
             if self._running:
-                # Jitter the watchdog interval (8-12s) so it's not a detectable pattern
-                interval = random.uniform(8.0, 12.0)
+                # PRIORITY THREAD: jitter the watchdog interval (3-5s) for instant response
+                interval = random.uniform(3.0, 5.0)
                 self._ready_timer = threading.Timer(interval, self._combat_ready_tick)
                 self._ready_timer.daemon = True
                 self._ready_timer.start()
@@ -1811,3 +1811,66 @@ class WealthChartsSpecialist:
             return self._connected and self._page is not None and not self._page.is_closed()
         except Exception:
             return False
+
+    # -----------------------------------------------------------------
+    # Visual Price Lock — read live price from WealthCharts DOM
+    # -----------------------------------------------------------------
+    # Price label selectors (ordered by reliability)
+    WC_PRICE_SELECTORS = [
+        '[data-testid="last-price"]',
+        '[class*="lastPrice"]',
+        '[class*="last-price"]',
+        '[class*="current-price"]',
+        '[aria-label*="Last"]',
+        '[aria-label*="Price"]',
+        '.last-price-value',
+        '.tv-symbol-price',
+        '[data-name="last-price"]',
+    ]
+
+    def get_wc_live_price(self) -> float | None:
+        """Read the current live price directly from the WealthCharts DOM.
+        Returns the price as a float, or None if unavailable.
+        VISUAL PRICE LOCK: This ensures the signal matches what the user sees."""
+        page = self._get_page()
+        if not page:
+            return None
+
+        # Strategy 1: Try known price selectors
+        for selector in self.WC_PRICE_SELECTORS:
+            try:
+                el = page.locator(selector).first
+                if el.count() > 0:
+                    text = el.text_content(timeout=500)
+                    if text:
+                        cleaned = text.replace(",", "").replace("$", "").replace(" ", "").strip()
+                        price = float(cleaned)
+                        if price > 0:
+                            return price
+            except Exception:
+                continue
+
+        # Strategy 2: Scan all elements for a number that looks like a price
+        try:
+            price_text = page.evaluate("""() => {
+                const candidates = document.querySelectorAll(
+                    '[class*="price"], [class*="last"], [class*="bid"], [class*="ask"]'
+                );
+                for (const el of candidates) {
+                    const text = (el.textContent || '').trim();
+                    const num = parseFloat(text.replace(',', ''));
+                    if (num > 10 && num < 100000 && text.length < 20) {
+                        return text;
+                    }
+                }
+                return '';
+            }""")
+            if price_text:
+                cleaned = price_text.replace(",", "").replace("$", "").strip()
+                price = float(cleaned)
+                if price > 0:
+                    return price
+        except Exception:
+            pass
+
+        return None

@@ -56,6 +56,9 @@ BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 # Override any value with an environment variable if your broker labels differ.
 WEALTHCHARTS_TICKERS = ("NQM6", "ESM6", "MCLM6", "MGC")
 
+# Muted tickers: scanner will NEVER scan these — Oil suspended to free CPU
+MUTED_TICKERS = {"MCLM6", "CL=F", "MCL=F", "CL", "MCL", "NYMEX:MCL1!", "MCL1!"}
+
 SYMBOL_MAP = {
     "NQM6": os.getenv("MT5_NQM6_SYMBOL", "NQM6"),
     "ESM6": os.getenv("MT5_ESM6_SYMBOL", "ESM6"),
@@ -146,9 +149,9 @@ CHART_REGION_W = int(os.getenv("CHART_REGION_W", "1280"))
 CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
 
 # ===== MARKET DATA =====
-SCAN_INTERVAL = 10
+SCAN_INTERVAL = 5  # Reduced from 10 — MCLM6 muted frees 40% CPU
 WATCHLIST_INTERVAL = 60
-SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.5"))
+SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.0"))
 CLOUD_TICKERS = ["BTC-USD"]  # BTC-USD kept as 24/7 fallback; futures are watchlist-driven
 
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====

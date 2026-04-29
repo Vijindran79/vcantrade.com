@@ -295,6 +295,7 @@ class CloudScanner:
     def _warm_up_mt5_symbols(self) -> None:
         """Pre-select configured scanner symbols so MT5 MarketWatch is ready."""
         watchlist: List[str] = []
+        muted = getattr(config, "MUTED_TICKERS", set())
         for attr in ("CLOUD_TICKERS", "WATCHLIST", "MULTI_ASSET_TICKERS"):
             values = getattr(config, attr, None)
             if isinstance(values, (list, tuple, set)):
@@ -303,7 +304,7 @@ class CloudScanner:
 
         seen = set()
         for ticker in watchlist:
-            if ticker in seen:
+            if ticker in seen or ticker in muted:
                 continue
             seen.add(ticker)
             selected = self._select_mt5_symbol(ticker)
@@ -348,10 +349,11 @@ class CloudScanner:
 
     def _get_active_scan_list(self) -> List[str]:
         """Return sniper-priority list when configured; otherwise session-filtered tickers."""
+        muted = getattr(config, "MUTED_TICKERS", set())
         if self.priority_scan_list:
-            candidates = list(self.priority_scan_list)
+            candidates = [t for t in self.priority_scan_list if t not in muted]
         else:
-            candidates = [ticker for ticker in self.tickers if str(ticker).strip()]
+            candidates = [ticker for ticker in self.tickers if str(ticker).strip() and ticker not in muted]
 
         # Dynamic Eye Sync: if Browser Agent is showing a symbol, prioritize it
         eye = None

@@ -1159,9 +1159,10 @@ class AINarratorOverlay(GlassmorphicPanel):
         self.status_label.set_text_instant(detail or normalized or "Standing by")
     
     def notify_signal_detected(self, ticker: str, signal_type: str, confidence: float):
-        """Notify that a trading signal was detected."""
+        """Notify that a trading signal was detected.
+        SIGNAL DECAY: Alert auto-clears after 2 seconds — no stale signals."""
         icon = "[FIRE]" if confidence > 0.8 else "[WARN]"
-        self.trigger_signal_alert(duration_ms=3000)
+        self.trigger_signal_alert(duration_ms=2000)
         self.set_status("analyzing", f"{signal_type} on {ticker}")
         self.add_activity(
             icon, 

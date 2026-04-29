@@ -1248,10 +1248,14 @@ class VcaniTradeApp:
         saved_watchlist = self.settings.get("session_watchlist", [])
         if not isinstance(saved_watchlist, list):
             saved_watchlist = []
-        self.current_watchlist = self.settings.normalize_watchlist(saved_watchlist)
+        raw_watchlist = self.settings.normalize_watchlist(saved_watchlist)
+        # TURBO-SYNC: Filter out muted tickers at startup
+        muted = getattr(config, "MUTED_TICKERS", set())
+        self.current_watchlist = [t for t in raw_watchlist if t not in muted]
         if not self.current_watchlist:
             # Fallback: use CLOUD_TICKERS only if watchlist is truly empty at startup
-            self.current_watchlist = self.settings.normalize_watchlist(config.CLOUD_TICKERS)
+            fallback = self.settings.normalize_watchlist(config.CLOUD_TICKERS)
+            self.current_watchlist = [t for t in fallback if t not in muted]
         self.force_action_armed = False
         
         # STAGE 2: AI Strategist & Dynamic Architect
@@ -1866,12 +1870,17 @@ class VcaniTradeApp:
 
     def _on_watchlist_updated(self, watchlist: list):
         """Handle watchlist update from dashboard."""
-        self.current_watchlist = self.settings.normalize_watchlist(watchlist)
+        raw_watchlist = self.settings.normalize_watchlist(watchlist)
+        # TURBO-SYNC: Filter out muted tickers (MCLM6 Oil is suspended)
+        muted = getattr(config, "MUTED_TICKERS", set())
+        self.current_watchlist = [t for t in raw_watchlist if t not in muted]
         config.CLOUD_TICKERS = list(self.current_watchlist)
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
         self.cloud_scanner.scanner.priority_scan_list = []
         self.rpa_hand.active_watchlist = list(self.current_watchlist)
         self._sync_runtime_session_context()
+        if muted:
+            self.cmd.log(f"[MUTE] Suspended tickers: {', '.join(sorted(muted))}")
         self.cmd.log(f"[CHART] Watchlist updated: {len(self.current_watchlist)} tickers")
         self.ai_narrator.notify_scan_start(len(self.current_watchlist))
         self.ai_narrator.set_watchlist(self.current_watchlist)
@@ -1915,8 +1924,23 @@ class VcaniTradeApp:
             return zone_type
         return str(signal_data.get("liquidity_label") or signal_data.get("brain_reasoning") or "--")
 
+    def _sync_signal_to_wc_price(self, asset: str) -> float | None:
+        """VISUAL PRICE LOCK: Read live price from WealthCharts DOM to sync signals.
+        Ensures the Teacher Broadcast matches the chart exactly."""
+        specialist = getattr(self, 'wc_specialist', None)
+        if not specialist or not specialist.is_connected():
+            return None
+        try:
+            price = specialist.get_wc_live_price()
+            if price and price > 0:
+                return price
+        except Exception as e:
+            logger.debug("[PRICE-LOCK] Could not read WealthCharts DOM price: %s", e)
+        return None
+
     def _broadcast_trade_levels(self, signal_data: dict):
-        """Send large SL/TP/liquidity text to the mirror for teacher-mode readability."""
+        """Send large SL/TP/liquidity text to the mirror for teacher-mode readability.
+        SIGNAL DECAY: Levels auto-clear after 2 seconds to prevent stale display."""
         ticker = signal_data.get("ticker", "UNKNOWN")
         self.ai_narrator.update_trade_levels(
             ticker=ticker,
@@ -1924,6 +1948,15 @@ class VcaniTradeApp:
             take_profit=signal_data.get("take_profit"),
             liquidity_label=self._format_liquidity_label(signal_data),
         )
+        # SIGNAL DECAY: Clear stale levels after 2 seconds
+        self._signal_decay_timer = getattr(self, '_signal_decay_timer', None)
+        if self._signal_decay_timer:
+            self._signal_decay_timer.stop()
+        from PyQt6.QtCore import QTimer
+        self._signal_decay_timer = QTimer(self)
+        self._signal_decay_timer.setSingleShot(True)
+        self._signal_decay_timer.timeout.connect(lambda: self.ai_narrator.clear_trade_levels(announce=False))
+        self._signal_decay_timer.start(2000)
 
     def _on_settings_changed(self, settings: dict):
         """Handle trading settings update from dashboard."""
@@ -5121,11 +5154,16 @@ class VcaniTradeApp:
             return
             
         # Build overlay signal
+        # VISUAL PRICE LOCK: Sync signal to WealthCharts DOM price
+        wc_price = self._sync_signal_to_wc_price(analysis.asset)
+        if wc_price and wc_price > 0:
+            logger.info("[PRICE-LOCK] WealthCharts live price for %s: %.2f", analysis.asset, wc_price)
+
         overlay_signal = OverlaySignal(
             asset=analysis.asset,
             action=analysis.action,
             confidence=analysis.confidence,
-            entry_price=analysis.entry_price,
+            entry_price=wc_price if wc_price and wc_price > 0 else analysis.entry_price,
             stop_loss=analysis.stop_loss,
             take_profit=analysis.take_profit,
             reason=analysis.reason,
