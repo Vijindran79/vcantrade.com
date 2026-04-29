@@ -129,6 +129,9 @@ GROQ_KEY_LIST = _parse_key_list(GROQ_API_KEYS)
 NVIDIA_KEY_LIST = _parse_key_list(NVIDIA_API_KEY)
 BRAINSTORM_KEY_LIST = _parse_key_list(BRAINSTORM_API_KEY)
 
+# ===== MULTI-ACCOUNT TARGETING (NinjaTrader ATI) =====
+TARGET_ACCOUNTS = _parse_key_list(os.getenv("TARGET_ACCOUNTS", "APEX-314327-18,TOPSTEP-12345"))
+
 # Google API Key slot (reserved, stays empty as requested)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
@@ -151,9 +154,9 @@ CHART_REGION_W = int(os.getenv("CHART_REGION_W", "1280"))
 CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
 
 # ===== MARKET DATA =====
-SCAN_INTERVAL = 5  # Reduced from 10 — MCLM6 muted frees 40% CPU
+SCAN_INTERVAL = 15  # Reduced from 5 — less DOM polling = less detection
 WATCHLIST_INTERVAL = 60
-SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "1.0"))
+SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "3.0"))
 CLOUD_TICKERS = ["BTC-USD"]  # BTC-USD kept as 24/7 fallback; futures are watchlist-driven
 
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
@@ -347,6 +350,17 @@ FALLBACK_COORDS = {
 # ===== SLIPPAGE GUARD =====
 MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "2.50"))
 MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
+
+# ===== NINJATRADER ATI CONFIGURATION =====
+ATI_ORDER_DIR = os.getenv("ATI_ORDER_DIR", "C:\\NinjaTrader 8\\ATI\\Orders")
+# Ticker mapping for NinjaTrader/Topstep (usually same as Rithmic)
+NINJATRADER_TICKER_MAP = {
+    "NQM6": "NQ 06-26",
+    "ESM6": "ES 06-26",
+    "MCLM6": "MCL 06-26",
+    "MGC": "MGC 06-26",
+    "XAUUSD": "MGC 06-26",
+}
 
 # ===== AGGRESSIVE HUNTER =====
 # If signal confidence >= this threshold, skip 1m/3m MTF alignment and strike on 5m alone.

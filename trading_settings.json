@@ -1,7 +1,9 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "NYMEX:MCL1!"
+    "NQM6",
+    "ESM6",
+    "MCLM6"
   ],
   "investment_amount": 1000.0,
   "lot_size": 2.0,

@@ -1451,7 +1451,8 @@ class WealthChartsSpecialist:
         return True
 
     def _inject_stealth(self, page):
-        """Override browser fingerprint to hide Playwright/automation markers."""
+        """Override browser fingerprint to hide Playwright/automation markers.
+        STEALTH MODE: Disables webdriver flag and masks automation features."""
         try:
             page.evaluate("""() => {
                 // Hide navigator.webdriver
@@ -1475,9 +1476,18 @@ class WealthChartsSpecialist:
                     Promise.resolve({ state: Notification.permission }) :
                     originalQuery(parameters)
                 );
+                // Mask the Playwright automation flag via CDP
+                if (window.chrome && window.chrome.loadTimes) {
+                    delete window.chrome.loadTimes;
+                }
+                // Fake the hardware concurrency
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                // Fake the device memory
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
             }""")
-        except Exception:
-            pass
+            logger.info("[STEALTH] Playwright fingerprint masked (webdriver=undefined, plugins faked)")
+        except Exception as e:
+            logger.debug("[STEALTH] Injection error (non-fatal): %s", e)
 
     def _apply_sniper_view(self, page):
         """DOM Cleanse: Strip WealthCharts to a minimal Sniper View.
