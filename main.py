@@ -1940,23 +1940,30 @@ class VcaniTradeApp:
 
     def _broadcast_trade_levels(self, signal_data: dict):
         """Send large SL/TP/liquidity text to the mirror for teacher-mode readability.
-        SIGNAL DECAY: Levels auto-clear after 2 seconds to prevent stale display."""
-        ticker = signal_data.get("ticker", "UNKNOWN")
-        self.ai_narrator.update_trade_levels(
-            ticker=ticker,
-            stop_loss=signal_data.get("stop_loss"),
-            take_profit=signal_data.get("take_profit"),
-            liquidity_label=self._format_liquidity_label(signal_data),
-        )
-        # SIGNAL DECAY: Clear stale levels after 2 seconds
-        self._signal_decay_timer = getattr(self, '_signal_decay_timer', None)
-        if self._signal_decay_timer:
-            self._signal_decay_timer.stop()
-        from PyQt6.QtCore import QTimer
-        self._signal_decay_timer = QTimer(self)
-        self._signal_decay_timer.setSingleShot(True)
-        self._signal_decay_timer.timeout.connect(lambda: self.ai_narrator.clear_trade_levels(announce=False))
-        self._signal_decay_timer.start(2000)
+        SIGNAL DECAY: Levels auto-clear after 2 seconds to prevent stale display.
+        Wrapped in try/except — UI timer bugs must NEVER crash trade execution."""
+        try:
+            ticker = signal_data.get("ticker", "UNKNOWN")
+            self.ai_narrator.update_trade_levels(
+                ticker=ticker,
+                stop_loss=signal_data.get("stop_loss"),
+                take_profit=signal_data.get("take_profit"),
+                liquidity_label=self._format_liquidity_label(signal_data),
+            )
+            # SIGNAL DECAY: Clear stale levels after 2 seconds
+            from PyQt6.QtCore import QTimer
+            old_timer = getattr(self, '_signal_decay_timer', None)
+            if old_timer:
+                try:
+                    old_timer.stop()
+                except Exception:
+                    pass
+            self._signal_decay_timer = QTimer()  # No parent — avoids QMainWindow/QObject type mismatch
+            self._signal_decay_timer.setSingleShot(True)
+            self._signal_decay_timer.timeout.connect(lambda: self.ai_narrator.clear_trade_levels(announce=False))
+            self._signal_decay_timer.start(2000)
+        except Exception as timer_err:
+            logger.warning("[BROADCAST] Trade levels UI error (non-fatal): %s", timer_err)
 
     def _on_settings_changed(self, settings: dict):
         """Handle trading settings update from dashboard."""
@@ -4139,7 +4146,23 @@ class VcaniTradeApp:
         self._broadcast_trade_levels(signal_data)
 
     def _on_signal_received(self, signal_data: dict):
-        """Handle signal received from cloud via HTTP."""
+        """Handle signal received from cloud via HTTP.
+        CRITICAL: UI errors must NEVER crash this method — trade execution must proceed."""
+        try:
+            self._on_signal_received_inner(signal_data)
+        except Exception as outer_err:
+            logger.critical("[SIGNAL] CRASH in signal handler: %s — attempting emergency execution", outer_err)
+            # Emergency: still try to execute the trade even if UI crashed
+            try:
+                ticker = signal_data.get("ticker", "UNKNOWN")
+                action = signal_data.get("action", "UNKNOWN")
+                logger.info("[SIGNAL] EMERGENCY EXEC: %s %s", action, ticker)
+                self._execute_cloud_signal(signal_data)
+            except Exception as exec_err:
+                logger.critical("[SIGNAL] EMERGENCY EXEC ALSO FAILED: %s", exec_err)
+
+    def _on_signal_received_inner(self, signal_data: dict):
+        """Inner signal handler — UI-safe implementation."""
         self._mark_bridge_alive()
         brain_override_action = self._brain_override_action(signal_data)
         resolved_action = self._resolve_directional_action(signal_data)
