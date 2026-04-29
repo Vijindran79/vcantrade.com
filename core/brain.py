@@ -51,7 +51,16 @@ class GeminiBrain:
     def request_decision(
         self, proposed_action: str, package: dict[str, Any]
     ) -> dict[str, Any]:
-        """Return OpenRouter's verdict plus short reasoning for UI/execution use."""
+        """Return verdict plus short reasoning for UI/execution use.
+        DEFAULT_BRAIN='local' skips OpenRouter entirely — uses Ollama Predator only."""
+        # Force local mode: skip OpenRouter 404s entirely
+        if str(getattr(config, "DEFAULT_BRAIN", "local")).lower() == "local":
+            logger.info("[BRAIN] DEFAULT_BRAIN=local — using Ollama Predator (skipping OpenRouter)")
+            self.last_decision = self._use_predator_fallback(
+                proposed_action, package, "DEFAULT_BRAIN=local"
+            )
+            return dict(self.last_decision)
+
         if not self.is_available():
             logger.warning("OpenRouter brain unavailable - switching to local Predator")
             self.last_decision = self._use_predator_fallback(

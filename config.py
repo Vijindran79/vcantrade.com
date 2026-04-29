@@ -106,6 +106,8 @@ GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "20"))
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_API_KEYS = os.getenv("OPENROUTER_API_KEYS", "")
+# DEFAULT BRAIN: 'local' skips OpenRouter entirely, uses Ollama Predator only
+DEFAULT_BRAIN = os.getenv("DEFAULT_BRAIN", "local")
 GROQ_API_KEYS = os.getenv("GROQ_API_KEYS", "")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 BRAINSTORM_API_KEY = os.getenv("BRAINSTORM_API_KEY", "")
