@@ -50,6 +50,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
+from playwright.async_api import async_playwright  # Async Playwright for browser automation
 
 # Trade Alert Sound — Windows built-in, no extra dependencies
 try:
@@ -89,6 +90,7 @@ from core.watchtower import WatchtowerScanner
 from core.vision_engine import VisionCapture
 from core.scanner import CloudScanner
 from services.signal_dispatcher import SignalDispatcher
+from services.execution_socket_client import ExecutionSocketClient
 from core.browser_agent import BrowserAgent
 from core.settings import settings_manager
 from core.financial_safety import FinancialSafetyManager
@@ -990,7 +992,7 @@ class MultiAssetHunterThread(QThread):
         else:
             self.narrator_update.emit("[PAUSE]", f"VERDICT: NO TRADE | {reason[:60]}")
 
-    def _perform_monday_resync(self):
+    async def _perform_monday_resync(self):
         """
         Monday State Re-Sync (Anti-Ghosting).
         Called once on the first weekday scan after a weekend.
@@ -1016,7 +1018,7 @@ class MultiAssetHunterThread(QThread):
         # 2. Pull fresh account summary from UI/MT5 if available
         try:
             if hasattr(app, "_sync_live_balance"):
-                app._sync_live_balance()
+                await app._sync_live_balance()
                 logger.info("[RESYNC] Live balance re-synced")
             if hasattr(app, "_update_institutional_governor_ui"):
                 app._update_institutional_governor_ui()
@@ -1206,6 +1208,7 @@ class VcaniTradeApp:
 
         # Core
         self.trade_engine = TradeEngine()
+        self.trade_engine.reset_daily_limits()  # Reset PnL to $0.00 on startup
         self.grader = Grader()
         self.financial_safety = FinancialSafetyManager()
         self.executor = None  # Will be initialized when browser agent is ready
@@ -1330,6 +1333,10 @@ class VcaniTradeApp:
         self.cloud_bridge = CloudBridgeThread(self, host="0.0.0.0", port=8765)  # Remote dashboard bridge
         self.hunter = MultiAssetHunterThread(self) if config.MULTI_ASSET_ENABLED else None  # Vision-based multi-asset hunter
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
+
+        # Side-by-Side Execution Strategy: Raw socket client for port 5555
+        self.execution_socket_client = ExecutionSocketClient()
+        self.side_by_side_enabled = True  # Set to False to disable socket commands
 
         # State
         self.current_mode = "TEACHER" if config.TEACHER_MODE or config.DRY_RUN else "AUTONOMOUS"
@@ -1823,7 +1830,7 @@ class VcaniTradeApp:
         # News filter & safety timer
         if not hasattr(self, "safety_timer"):
             self.safety_timer = QTimer()
-            self.safety_timer.timeout.connect(self._update_safety_controls)
+            self.safety_timer.timeout.connect(self._safety_timer_wrapper)
             self.safety_timer.start(60000)  # Check every 60 seconds
 
         # Heartbeat monitor - logs system health every 60 seconds
@@ -3196,28 +3203,29 @@ class VcaniTradeApp:
             self.test_status_text = f"Error: {e}"
 
     def _on_force_test_trade(self):
-        """Handle manual force-hand request with visible cursor motion on TradingView."""
+        """Handle manual force-hand request - sends test command to Rithmic Desktop via port 5555."""
         import threading
 
         ticker_hint = self.current_watchlist[0] if self.current_watchlist else self.ticker_selector
-        self.cmd.log(f"[BOLT] FORCE HAND TEST: visible cursor move requested on {ticker_hint}")
-        self.ai_narrator.add_activity("[MOUSE]", f"Force hand move diagnostic on {ticker_hint}")
+        self.cmd.log(f"[BOLT] FORCE HAND TEST: Sending BUY_REAL to Desktop for {ticker_hint}")
+        self.ai_narrator.add_activity("[MOUSE]", f"Force hand test: sending to Rithmic Desktop for {ticker_hint}")
 
         def run_force_test_in_thread():
             try:
-                success = self.rpa_hand.force_hand_test_move(ticker_hint=ticker_hint)
+                # Send test command to Desktop via socket (port 5555)
+                success = self.execution_socket_client.send_command("BUY_REAL")
                 if success:
-                    self.cmd.log(f'<span style="color:#3FB950;font-weight:bold">[MOUSE] FORCE HAND TEST PASSED</span>: cursor moved on {ticker_hint}')
-                    self.ai_narrator.add_activity("[OK]", f"Visible hand move completed on {ticker_hint}")
+                    self.cmd.log(f'<span style="color:#3FB950;font-weight:bold">[MOUSE] FORCE HAND TEST PASSED</span>: BUY_REAL sent to Rithmic Desktop for {ticker_hint}')
+                    self.ai_narrator.add_activity("[OK]", f"Force hand test passed - Rithmic Desktop received command for {ticker_hint}")
                 else:
-                    self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE HAND TEST FAILED</span>: unable to move cursor on {ticker_hint}')
-                    self.ai_narrator.add_activity("[WARN]", f"Visible hand move failed for {ticker_hint}")
+                    self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE HAND TEST FAILED</span>: Could not reach Desktop on port 5555 for {ticker_hint}')
+                    self.ai_narrator.add_activity("[WARN]", f"Force hand test failed - Desktop not responding for {ticker_hint}")
             except Exception as e:
                 self.cmd.log(f'<span style="color:#F85149">[FAIL] FORCE HAND TEST ERROR</span>: {e}')
 
         hand_test_thread = threading.Thread(target=run_force_test_in_thread, daemon=True)
         hand_test_thread.start()
-        self.cmd.log("[BOLT] Force hand test dispatched to RPA executor")
+        self.cmd.log("[BOLT] Force hand test dispatched to Rithmic Desktop (port 5555)")
 
     def _on_rpa_blind(self, reason: Optional[str] = None):
         """
@@ -3517,10 +3525,10 @@ class VcaniTradeApp:
             # No positions - set to idle/scanning
             self.ai_narrator.set_status("scanning", "No active positions")
     
-    def _update_safety_controls(self):
+    async def _update_safety_controls(self):
         """Update financial safety controls and check news filter."""
         import asyncio
-        
+
         # Check news filter - use the browser event loop if available
         try:
             if hasattr(self, '_browser_loop') and self._browser_loop and not self._browser_loop.is_closed():
@@ -3544,11 +3552,11 @@ class VcaniTradeApp:
                     loop.close()
         except Exception as e:
             logger.error(f"News filter update failed: {e}")
-        
+
         # Check position size mode
         mode = self.financial_safety.current_mode
         paused = self.financial_safety.trading_paused
-        
+
         if paused:
             self.cmd.log(f"[STOP] Trading paused: {self.financial_safety.pause_reason}")
             self.ai_narrator.notify_error(f"Trading paused: {self.financial_safety.pause_reason}")
@@ -3559,16 +3567,33 @@ class VcaniTradeApp:
                 "[RULER]",
                 f"Position size: {mode.value} ({multiplier:.0%})"
             )
-        
+
         # Update dashboard with safety status
         safety_status = self.financial_safety.get_safety_status()
         self.cmd.update_safety_status(safety_status)
 
         # LIVE BALANCE SYNC: scrape real broker balance every 60s
         try:
-            self._sync_live_balance()
+            await self._sync_live_balance()
         except Exception as e:
             logger.warning("Live balance sync error in safety controls: %s", e)
+
+    def _safety_timer_wrapper(self):
+        """Qt timer sync wrapper to call async _update_safety_controls."""
+        try:
+            if hasattr(self, '_browser_loop') and self._browser_loop and not self._browser_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    self._update_safety_controls(),
+                    self._browser_loop
+                )
+            else:
+                # Fallback: run in new event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self._update_safety_controls())
+                loop.close()
+        except Exception as e:
+            logger.error("Safety timer wrapper failed: %s", e)
 
     def _update_institutional_governor_ui(self):
         """STAGE 3: Update Institutional Governor panel in dashboard."""
@@ -3917,11 +3942,11 @@ class VcaniTradeApp:
             # Fail-open: allow trading if reconciliation itself fails, but log loudly
             return True
 
-    def _sync_live_balance(self):
+    async def _sync_live_balance(self):
         """Scrape live balance from broker dashboard and sync internal state.
         Runs every 60 seconds alongside safety controls."""
         try:
-            scrape_result = self.rpa_hand.scrape_live_balance()
+            scrape_result = await self.rpa_hand.scrape_live_balance()
             if scrape_result is None:
                 self._apply_balance_fallback("live balance scrape returned no clean read")
                 return
@@ -4396,6 +4421,47 @@ class VcaniTradeApp:
         )
         self.ai_narrator.set_status("standby", "External Brain Connected")
         self.ai_narrator.add_activity("[BRIDGE]", "External Brain handshake confirmed")
+
+    def _send_side_by_side_command(self, action: str, confidence: float) -> bool:
+        """
+        Send Side-by-Side Execution command via raw socket to port 5555.
+        
+        Confidence Ladder:
+        - 50% - 84%: Send _SIM actions (for NinjaTrader)
+        - 85%+: Send _REAL actions (for Rithmic)
+        
+        Args:
+            action: Base action ("BUY" or "SELL" or "FLATTEN")
+            confidence: Confidence score (0-100)
+            
+        Returns:
+            True if command was sent successfully
+        """
+        if not self.side_by_side_enabled:
+            logger.debug("[SIDE-BY-SIDE] Disabled, skipping socket command")
+            return False
+            
+        if action.upper() == "FLATTEN":
+            # Map to FLATTEN_SIM or FLATTEN_REAL based on confidence
+            if confidence >= 85.0:
+                command = "FLATTEN_REAL"
+            else:
+                command = "FLATTEN_SIM"
+        else:
+            # Map to BUY_SIM/SELL_SIM or BUY_REAL/SELL_REAL based on confidence
+            command = ExecutionSocketClient._get_trade_action(action, confidence)
+        
+        logger.info(
+            "[SIDE-BY-SIDE] Sending command: %s (action=%s, confidence=%.1f%%)",
+            command, action, confidence
+        )
+        
+        self.cmd.log(
+            f'<span style="color:#58A6FF;font-weight:bold">[SOCKET] SIDE-BY-SIDE</span>: '
+            f'Sending {command} (confidence={confidence:.1f}%%)'
+        )
+        
+        return self.execution_socket_client.send_command(command)
 
     def _execute_cloud_signal(self, signal_data: dict):
         """Execute a cloud-generated signal locally with Professor Mode controls."""
@@ -4896,6 +4962,44 @@ class VcaniTradeApp:
             )
             self.ai_narrator.notify_error(f"RPA Hand paused: {ticker}")
             return
+
+        # Side-by-Side Execution: Send command to port 5555 before RPA execution
+        socket_sent = False
+        if self.side_by_side_enabled:
+            socket_sent = self._send_side_by_side_command(action, confidence_score)
+            if socket_sent:
+                self.cmd.log(
+                    f'<span style="color:#58A6FF;font-weight:bold">[SOCKET] SIDE-BY-SIDE</span>: '
+                    f'Command sent to port 5555 for {action} {ticker}'
+                )
+            else:
+                self.cmd.log(
+                    f'<span style="color:#D29922;font-weight:bold">[WARN] SIDE-BY-SIDE</span>: '
+                    f'Failed to send command to port 5555 for {action} {ticker}'
+                )
+
+        # PRIMARY: Socket command sent successfully - skip RPA/MT5 execution
+        if socket_sent:
+            self.cmd.log(
+                f'<span style="color:#3FB950;font-weight:bold">[OK] SIDE-BY-SIDE EXECUTION</span>: '
+                f'{action} {ticker} executed via socket command'
+            )
+            # Still save to journal for tracking
+            journal_id = self.sql_journal.save_trade(
+                coin=ticker,
+                entry=entry_price,
+                stop_loss=sl_price,
+                ai_confidence=confidence_score,
+                ai_reasoning=signal_data.get("reason", "Side-by-Side Execution"),
+                brain_used=brain_used,
+                outcome="OPEN",
+            )
+            return
+
+        # BACKUP: RPA execution if socket command failed
+        self.cmd.log(
+            f'<span style="color:#D29922">[BACKUP] Falling back to RPA execution for {action} {ticker}</span>'
+        )
         # PREDATOR-CLASS: Silent Error Alerting with try/except wrapper
         rpa_success = False
         try:
@@ -5455,6 +5559,39 @@ class VcaniTradeApp:
             )
             self._on_ticker_status_update(ticker, "mt5_unavailable")
             return
+
+        # Side-by-Side Execution: Send command to port 5555 before MT5 execution
+        socket_sent = False
+        if self.side_by_side_enabled:
+            socket_sent = self._send_side_by_side_command(action, confidence_score)
+            if socket_sent:
+                self.cmd.log(
+                    f'<span style="color:#58A6FF;font-weight:bold">[SOCKET] SIDE-BY-SIDE</span>: '
+                    f'Command sent to port 5555 for {action} {ticker} (MT5 path)'
+                )
+
+        # PRIMARY: Socket command sent successfully - skip MT5 execution
+        if socket_sent:
+            self.cmd.log(
+                f'<span style="color:#3FB950;font-weight:bold">[OK] SIDE-BY-SIDE EXECUTION</span>: '
+                f'{action} {ticker} executed via socket command (MT5 skipped)'
+            )
+            # Save to journal for tracking
+            journal_id = self.sql_journal.save_trade(
+                coin=ticker,
+                entry=entry_price,
+                stop_loss=sl_price,
+                ai_confidence=confidence_score,
+                ai_reasoning=signal_data.get("reason", "Side-by-Side Execution"),
+                brain_used=brain_used,
+                outcome="OPEN",
+            )
+            return
+
+        # BACKUP: MT5 execution if socket command failed
+        self.cmd.log(
+            f'<span style="color:#D29922">[BACKUP] Falling back to MT5 execution for {action} {ticker}</span>'
+        )
         success = mt5_executor.execute_trade(execution_ticker, action)
         order_status = "mt5_executed" if success else "mt5_failed"
         # ALERT SOUND: Play distinctive tone on every trade execution

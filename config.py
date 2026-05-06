@@ -28,12 +28,21 @@ PROP_IS_FUNDED = os.getenv("PROP_IS_FUNDED", "False").lower() == "true"
 # ===== ACCOUNT BALANCE (MUST MATCH YOUR PROP FIRM OR BROKER ACCOUNT) =====
 CURRENT_BALANCE = float(os.getenv("CURRENT_BALANCE", "50000.0"))
 # Fallback equity when live scrape fails (e.g., TradingView dashboard unreadable)
-HARDCODED_EQUITY_FALLBACK = float(os.getenv("HARDCODED_EQUITY_FALLBACK", "77500.0"))
+HARDCODED_EQUITY_FALLBACK = float(os.getenv("HARDCODED_EQUITY_FALLBACK", "50000.0"))
 
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
 # PRODUCTION RULE: DRY_RUN defaults to True. You MUST explicitly set DRY_RUN=False in .env to trade live.
 DRY_RUN = os.getenv("DRY_RUN", "True").lower() == "true"
-MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "100.00"))
+# MAX_DAILY_LOSS: Default to 2% of CURRENT_BALANCE (Apex standard), override with MAX_DAILY_LOSS env var
+_max_daily_loss_env = os.getenv("MAX_DAILY_LOSS", None)
+if _max_daily_loss_env is not None:
+    MAX_DAILY_LOSS = float(_max_daily_loss_env)
+else:
+    MAX_DAILY_LOSS = CURRENT_BALANCE * 0.02  # 2% of current balance
+# DAILY_LOSS_LIMIT: Absolute daily loss cap (user override for new accounts)
+DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "3000.0"))
+# MAX_TRADES_PER_DAY: Maximum number of trades allowed per day
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 COOLDOWN_AFTER_STOP = int(os.getenv("COOLDOWN_AFTER_STOP", "300"))
 KILL_SWITCH = False
@@ -47,28 +56,28 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 
 # ===== FUTURES ONLY WHITELIST =====
 # Only these assets are allowed to trigger RPA trades on Apex account
-FUTURES_WHITELIST = ["MCLM6", "NQM6", "ESM6", "MGC"]
+FUTURES_WHITELIST = ["CLM26", "NQM6", "ESM6", "MGC"]  # Updated to Crude Oil June 2026
 # Block stocks like TSLA, AAPL, SPX from triggering trades
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
 # ===== SYMBOL BRIDGE (WealthCharts → MT5 Broker) =====
 # WealthCharts uses M6 contract codes. MT5 uses broker-specific names.
 # Override any value with an environment variable if your broker labels differ.
-WEALTHCHARTS_TICKERS = ("NQM6", "ESM6", "MCLM6", "MGC")
+WEALTHCHARTS_TICKERS = ("NQM6", "ESM6", "CLM26", "MGC")  # Updated to CLM26
 
-# Muted tickers: scanner will NEVER scan these — Oil suspended to free CPU
-MUTED_TICKERS = {"MCLM6", "CL=F", "MCL=F", "CL", "MCL", "NYMEX:MCL1!", "MCL1!"}
+# Muted tickers: scanner will NEVER scan these — Unmuted for CLM26.NYMEX targeting
+MUTED_TICKERS = set()
 
 SYMBOL_MAP = {
     "NQM6": os.getenv("MT5_NQM6_SYMBOL", "NQM6"),
     "ESM6": os.getenv("MT5_ESM6_SYMBOL", "ESM6"),
-    "MCLM6": os.getenv("MT5_MCLM6_SYMBOL", "WTI_SB"),
+    "CLM26": os.getenv("MT5_CLM26_SYMBOL", "WTI_SB"),  # Updated to CLM26
     "MGC": os.getenv("MT5_MGC_SYMBOL", "XAUUSD"),
 }
 
 # Extra exact candidates to try before fuzzy searching the MT5 symbol list.
 SYMBOL_BRIDGE_CANDIDATES = {
-    "MCLM6": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "MCL"),
+    "CLM26": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),  # Updated to CLM26
     "MGC": ("XAUUSD", "GOLD_SB", "Gold_SB", "Gold", "XAU", "MGC"),
     "NQM6": ("NQM6", "NAS100_SB", "NAS100", "MNQ"),
     "ESM6": ("ESM6", "US500_SB", "US500", "MES"),
@@ -76,7 +85,7 @@ SYMBOL_BRIDGE_CANDIDATES = {
 
 # Terms used for fuzzy MarketWatch fallback after exact candidates fail.
 SYMBOL_FUZZY_TERMS = {
-    "MCLM6": ("MCL", "WTI", "Crude", "Oil"),
+    "CLM26": ("CL", "WTI", "Crude", "Oil"),  # Updated to CLM26
     "MGC": ("MGC", "XAU", "GOLD", "Gold"),
     "NQM6": ("NQ", "NAS", "Nasdaq"),
     "ESM6": ("ES", "SP500", "S&P"),
@@ -87,9 +96,9 @@ TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
 
 # ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
 # Native Ollama API (for /api/generate, /api/tags, model management)
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://openrouter.ai")
 # OpenAI-compatible v1 endpoint (for /v1/chat/completions with vision)
-OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://openrouter.ai/v1")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
 VAST_API_TOKEN = None
@@ -162,16 +171,16 @@ CLOUD_TICKERS = ["BTC-USD"]  # BTC-USD kept as 24/7 fallback; futures are watchl
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
-MULTI_ASSET_TICKERS = ["NYMEX:MCL1!", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"]
+MULTI_ASSET_TICKERS = ["NYMEX:CLM26!", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"]  # Updated to CLM26
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
 SYMBOL_MAP = {
     "CME_MINI:MNQ1!": "MNQ=F",
     "CME_MINI:MES1!": "MES=F",
-    "NYMEX:MCL1!": "CL=F",
+    "NYMEX:CLM26!": "CLM26.NYMEX",  # Updated to CLM26
+    "COMEX:MGC1!": "GC=F",
 }
-
 # Symbol mapping: Yahoo / internal ticker -> WealthCharts chart symbol (M6 contract codes)
 # Used by browser_agent and rpa_executor to navigate to the correct chart.
 # NQ=F/ES=F/CL=F map to June 2026 (M6) futures contract codes for WealthCharts.
@@ -181,23 +190,23 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MNQ=F": "NQM6",
     "ES=F":  "ESM6",
     "MES=F": "ESM6",
-    "CL=F":  "MCLM6",
-    "MCL=F": "MCLM6",
+    "CL=F":  "CLM26.NYMEX",  # Updated to CLM26
+    "MCL=F": "CLM26.NYMEX",  # Updated to CLM26
     # Canonical short forms (F stripped by candidate generator)
     "NQ":  "NQM6",
     "MNQ": "NQM6",
     "ES":  "ESM6",
     "MES": "ESM6",
-    "CL":  "MCLM6",
-    "MCL": "MCLM6",
+    "CL":  "CLM26.NYMEX",  # Updated to CLM26
+    "MCL": "CLM26.NYMEX",  # Updated to CLM26
     # WealthCharts June 2026 (M6) contract codes — exact symbols on dashboard
     "CME_MINI:MNQ1!": "NQM6",
     "CME_MINI:MES1!": "ESM6",
-    "NYMEX:MCL1!": "MCLM6",
+    "NYMEX:CLM26!": "CLM26.NYMEX",  # Updated to CLM26
     # Bare TradingView contract codes (user-specified analysis tickers)
     "MNQ1!": "NQM6",
     "MES1!": "ESM6",
-    "MCL1!": "MCLM6",
+    "CLM26!": "CLM26.NYMEX",  # Updated to CLM26
     # Gold (COMEX Micro Gold)
     "COMEX:MGC1!": "MGC",
     "GC=F": "MGC",
@@ -212,19 +221,19 @@ TRADINGVIEW_SYMBOL_MAP = {
 MT5_SYMBOL_MAP = {
     # ===== WealthCharts M6 tickers -> Pepperstone broker symbols =====
     # These are the symbols the scanner receives — map them FIRST
-    "MCLM6": "Crude_SB",
+    "CLM26": "Crude_SB",  # Updated to CLM26
     "NQM6": "NAS100_SB",
     "ESM6": "US500_SB",
     "MGC": "Gold_SB",
     # CME / NYMEX prefixes -> Pepperstone exact terminal name
     "CME_MINI:MNQ1!": "NAS100_SB",
     "CME_MINI:MES1!": "US500_SB",
-    "NYMEX:MCL1!": "Crude_SB",
-    "MCL1!": "Crude_SB",  # bare contract form
+    "NYMEX:CLM26!": "Crude_SB",  # Updated to CLM26
+    "CLM26!": "Crude_SB",  # Updated to CLM26
     # Yahoo-style aliases -> Pepperstone
     "MNQ=F": "NAS100_SB",
     "MES=F": "US500_SB",
-    "CL=F": "Crude_SB",
+    "CL=F": "Crude_SB",  # Updated to CLM26
     "NQ=F": "NAS100_SB",
     "ES=F": "US500_SB",
     "GC=F": "Gold_SB",
@@ -235,10 +244,10 @@ MT5_SYMBOL_MAP = {
     # Canonical short forms (F stripped) -> Pepperstone
     "ES": "US500_SB",
     "NQ": "NAS100_SB",
-    "CL": "Crude_SB",
+    "CL": "Crude_SB",  # Updated to CLM26
     "MES": "US500_SB",
     "MNQ": "NAS100_SB",
-    "MCL": "Crude_SB",
+    "MCL": "Crude_SB",  # Updated to CLM26
     "GC": "Gold_SB",
     "SI": "XAGUSD",
     "YM": "YM1!",
@@ -274,10 +283,13 @@ MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "UI")
 TRADING_SURFACE = os.getenv("TRADING_SURFACE", "WEALTHCHARTS")
 MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.1"))
-BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9223").strip()
+BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://192.168.0.39:9223").strip()
 
-# WealthCharts platform URL (replaces TradingView)
-WEALTHCHARTS_URL = os.getenv("WEALTHCHARTS_URL", "https://app.wealthcharts.com").strip().rstrip("/")
+# Side-by-Side Execution: Desktop IP for Rithmic/NinjaTrader
+EXECUTION_HOST = os.getenv("EXECUTION_HOST", "192.168.0.39").strip()
+
+# Tradovate Web Platform URL (uses Rithmic login)
+TRADOVATE_URL = os.getenv("TRADOVATE_URL", "https://trading.tradovate.com").strip().rstrip("/")
 SHOW_STARTUP_SWITCHBOARD = os.getenv("SHOW_STARTUP_SWITCHBOARD", "true").lower() == "true"
 SMART_EYE_ENABLED = os.getenv("SMART_EYE_ENABLED", "true").lower() == "true"
 AUTO_SYMBOL_DETECTION = os.getenv("AUTO_SYMBOL_DETECTION", "true").lower() == "true"
@@ -357,7 +369,7 @@ ATI_ORDER_DIR = os.getenv("ATI_ORDER_DIR", "C:\\NinjaTrader 8\\ATI\\Orders")
 NINJATRADER_TICKER_MAP = {
     "NQM6": "NQ 06-26",
     "ESM6": "ES 06-26",
-    "MCLM6": "MCL 06-26",
+    "CLM26": "CL 06-26",  # Updated to CLM26
     "MGC": "MGC 06-26",
     "XAUUSD": "MGC 06-26",
 }
