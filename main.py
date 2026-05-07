@@ -3858,6 +3858,10 @@ class VcaniTradeApp:
             self.equity = float(self.balance)
         if not hasattr(self, "daily_pnl"):
             self.daily_pnl = 0.0
+        # Reset daily_pnl to 0.00 on every script restart
+        if not hasattr(self, "_daily_pnl_initialized"):
+            self.daily_pnl = 0.0
+            self._daily_pnl_initialized = True
         if not hasattr(self, "total_pnl"):
             self.total_pnl = 0.0
         if not hasattr(self, "peak_balance"):
@@ -4714,7 +4718,8 @@ class VcaniTradeApp:
         contract_multipliers = {
             "NQ=F": 2.0,    # MNQ: $2 per point
             "ES=F": 5.0,    # MES: $5 per point
-            "CL=F": 100.0,  # MCL: $100 per $1.00 barrel move
+            "CL=F": 100.0,  # Full Crude Oil: $100 per $1.00 barrel move
+            "MCL=F": 10.0,  # Micro Crude Oil: $10 per $1.00 barrel move
             "GC=F": 10.0,   # MGC: $10 per point
             "SI=F": 10.0,   # Micro Silver: $10 per point
         }
@@ -5814,7 +5819,10 @@ class VcaniTradeApp:
                         f'<span style="color:#D29922;font-weight:bold">[RECONCILE]</span> '
                         f'Bot thought {pos["side"]} {pos["asset"]} was open, but MT5 shows closed. Resetting.'
                     )
-                    self.positions.remove(pos)
+                    if pos in self.positions:
+                        self.positions.remove(pos)
+                    else:
+                        logger.warning("[RECONCILE] Position %s not in list, skipping removal", pos.get("asset"))
                     removed.append(pos["asset"])
 
             # 3. Update P&L for positions that exist in both

@@ -21,6 +21,8 @@ class RPAExecutor:
         self.confidence_threshold = 0.8
         self.on_blind_error = on_blind_error
         self.human_latency_enabled = getattr(config, "HUMAN_LATENCY", True)
+        self.consecutive_window_failures = 0
+        self.trading_stalled_until = 0  # Timestamp when stall ends
         # Adaptive Color Logic: Ranges instead of fixed points
         self.color_targets = {
             "buy_button": {"rgb": (0, 255, 65), "tol": 30},  # Neon Green + Tolerance
@@ -999,6 +1001,7 @@ class RPAExecutor:
             scored_windows.sort(key=lambda item: item[0], reverse=True)
             selected = scored_windows[0][1]
             logger.info("[WINDOW] Selected browser window: %s", getattr(selected, "title", ""))
+            self.consecutive_window_failures = 0
             return selected
 
         for hint in hints:
@@ -1006,10 +1009,20 @@ class RPAExecutor:
                 windows = [w for w in gw.getWindowsWithTitle(hint) if getattr(w, "visible", True)]
                 if windows:
                     logger.info("[WINDOW] Selected browser window by hint '%s': %s", hint, windows[0].title)
+                    self.consecutive_window_failures = 0
                     return windows[0]
             except Exception:
                 continue
 
+        # No window found: increment failure counter
+        self.consecutive_window_failures += 1
+        logger.warning("[WINDOW] No window found. Consecutive failures: %s/3", self.consecutive_window_failures)
+        if self.consecutive_window_failures >= 3:
+            self.trading_stalled_until = time.time() + 300  # Stall for 5 minutes
+            logger.critical(
+                "[SYSTEM ALARM] 3 consecutive window failures! TRADING STALLED FOR 5 MINUTES UNTIL %s",
+                time.strftime("%H:%M:%S", time.localtime(self.trading_stalled_until))
+            )
         return None
 
     def _check_color_match(self, pixel_rgb, target_key):
@@ -1081,8 +1094,40 @@ class RPAExecutor:
             logger.warning("[CHAIN-LOCK] Micro-verify error: %s — proceeding", e)
             return True
 
+    def bring_rithmic_to_foreground(self):
+        """Aggressive fuzzy search for any window containing 'Trader', print exact title if found."""
+        try:
+            import pygetwindow as gw
+            windows = gw.getAllWindows()
+            for window in windows:
+                title = getattr(window, "title", "").strip()
+                if "trader" in title.lower():
+                    print(f"[RITHMIC] Found window with 'Trader': '{title}'")
+                    logger.info("[RITHMIC] Found window with 'Trader': '%s'", title)
+                    try:
+                        window.activate()
+                        logger.info("[RITHMIC] Activated window: '%s'", title)
+                    except Exception as e:
+                        logger.warning("[RITHMIC] Could not activate window: %s", e)
+                    return True
+            print("[RITHMIC] No window containing 'Trader' found.")
+            logger.warning("[RITHMIC] No window containing 'Trader' found.")
+            return False
+        except Exception as e:
+            print(f"[RITHMIC] Error searching for 'Trader' windows: {e}")
+            logger.error("[RITHMIC] Error searching for 'Trader' windows: %s", e)
+            return False
+
     def _lightning_strike_sequence(self, target_key, ticker):
         """The 'Lion Strike': Precise, Human-like, and Verified."""
+        # Check if trading is stalled due to window failures
+        if time.time() < self.trading_stalled_until:
+            remaining = int(self.trading_stalled_until - time.time())
+            logger.critical(
+                "[SYSTEM ALARM] TRADING STALLED FOR %s MORE SECONDS (window failures)",
+                remaining
+            )
+            return False
         window = self._get_browser_window(ticker)
         if not window:
             logger.error("[FAIL] Could not find WealthCharts window for %s", ticker)
