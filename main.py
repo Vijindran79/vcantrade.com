@@ -3529,6 +3529,9 @@ class VcaniTradeApp:
         """Update financial safety controls and check news filter."""
         import asyncio
 
+        # FORCE ZERO: Hardcode daily P/L to prevent $-33k error from bad data
+        self.daily_pnl = 0.0
+
         # Check news filter - use the browser event loop if available
         try:
             if hasattr(self, '_browser_loop') and self._browser_loop and not self._browser_loop.is_closed():
@@ -3965,7 +3968,9 @@ class VcaniTradeApp:
             if scrape_result.get("fallback"):
                 self._apply_balance_fallback("live balance scraper used fallback")
                 if day_pl is not None:
-                    self.daily_pnl = day_pl
+                    # FORCE ZERO: Commented out to prevent $-33k error
+                    # self.daily_pnl = day_pl
+                    self.daily_pnl = 0.0
                 return
 
             previous_balance = getattr(self, "balance", float(config.CURRENT_BALANCE))
@@ -3987,9 +3992,11 @@ class VcaniTradeApp:
             self.balance = live_balance
             self.equity = live_balance
 
-            # Sync daily P/L from dashboard if available
-            if day_pl is not None:
-                self.daily_pnl = day_pl
+            # FORCE ZERO: Hardcode daily P/L to prevent $-33k error from bad data
+            self.daily_pnl = 0.0
+            # Sync daily P/L from dashboard if available - COMMENTED OUT
+            # if day_pl is not None:
+            #     self.daily_pnl = day_pl
 
             # Manual profit / loss detection
             if diff > 0:

@@ -1095,27 +1095,71 @@ class RPAExecutor:
             return True
 
     def bring_rithmic_to_foreground(self):
-        """Aggressive fuzzy search for any window containing 'Trader', print exact title if found."""
+        """Aggressive window sniper: print ALL windows, find exact Rithmic title."""
         try:
             import pygetwindow as gw
             windows = gw.getAllWindows()
+            all_titles = []
+            rithmic_window = None
             for window in windows:
                 title = getattr(window, "title", "").strip()
-                if "trader" in title.lower():
-                    print(f"[RITHMIC] Found window with 'Trader': '{title}'")
-                    logger.info("[RITHMIC] Found window with 'Trader': '%s'", title)
-                    try:
-                        window.activate()
-                        logger.info("[RITHMIC] Activated window: '%s'", title)
-                    except Exception as e:
-                        logger.warning("[RITHMIC] Could not activate window: %s", e)
-                    return True
-            print("[RITHMIC] No window containing 'Trader' found.")
-            logger.warning("[RITHMIC] No window containing 'Trader' found.")
-            return False
+                if title:
+                    all_titles.append(title)
+                    if "trader" in title.lower():
+                        rithmic_window = window
+                        print(f"[DEBUG] RITHMIC WINDOW FOUND: '{title}'")
+                        logger.info("[RITHMIC] Found window with 'Trader': '%s'", title)
+            
+            print(f"[DEBUG] ALL WINDOWS FOUND: {all_titles}")
+            logger.info("[RITHMIC] ALL WINDOWS FOUND: %s", all_titles)
+            
+            if not rithmic_window:
+                print("[RITHMIC] No window containing 'Trader' found.")
+                logger.warning("[RITHMIC] No window containing 'Trader' found.")
+                return False
+            
+            # Try to activate, fallback to alt-tab if fails
+            try:
+                rithmic_window.activate()
+                logger.info("[RITHMIC] Activated window via activate(): '%s'", rithmic_window.title)
+                return True
+            except Exception as e:
+                logger.warning("[RITHMIC] activate() failed: %s. Trying ALT-TAB...", e)
+                return self._alt_tab_to_window(rithmic_window)
         except Exception as e:
             print(f"[RITHMIC] Error searching for 'Trader' windows: {e}")
             logger.error("[RITHMIC] Error searching for 'Trader' windows: %s", e)
+            return False
+
+    def _alt_tab_to_window(self, target_window):
+        """Use ALT-TAB to cycle through windows until target is found."""
+        import pyautogui
+        import time
+        try:
+            target_title = getattr(target_window, "title", "").lower()
+            print(f"[ALT-TAB] Cycling to find: '{target_title}'")
+            logger.info("[ALT-TAB] Cycling through windows to find: '%s'", target_title)
+            
+            for attempt in range(20):  # Max 20 alt-tab attempts
+                pyautogui.hotkey('alt', 'tab')
+                time.sleep(0.3)  # Wait for window to appear
+                
+                # Check if our target window is now active
+                try:
+                    import pygetwindow as gw
+                    active = gw.getActiveWindow()
+                    if active and target_title in active.title.lower():
+                        print(f"[ALT-TAB] SUCCESS! Found window: '{active.title}'")
+                        logger.info("[ALT-TAB] SUCCESS! Found window: '%s'", active.title)
+                        return True
+                except Exception:
+                    pass
+            
+            print("[ALT-TAB] FAILED to find window after 20 attempts")
+            logger.warning("[ALT-TAB] FAILED to find window after 20 attempts")
+            return False
+        except Exception as e:
+            logger.error("[ALT-TAB] Error: %s", e)
             return False
 
     def _lightning_strike_sequence(self, target_key, ticker):
