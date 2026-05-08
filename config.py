@@ -286,6 +286,7 @@ MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.1"))
 BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://192.168.0.39:9223").strip()
 
 # Side-by-Side Execution: Desktop IP for Rithmic/NinjaTrader
+# Your desktop IP (where R|Trader Pro runs): 192.168.0.39
 EXECUTION_HOST = os.getenv("EXECUTION_HOST", "192.168.0.39").strip()
 
 # Tradovate Web Platform URL (uses Rithmic login)

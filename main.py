@@ -1335,6 +1335,7 @@ class VcaniTradeApp:
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
 
         # Side-by-Side Execution Strategy: Raw socket client for port 5555
+        # Use EXECUTION_HOST from config (should be 192.168.0.39 for desktop)
         self.execution_socket_client = ExecutionSocketClient()
         logger.info("[INIT] ExecutionSocketClient initialized: host=%s, port=%s", 
                      self.execution_socket_client.host, self.execution_socket_client.port)
