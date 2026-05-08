@@ -125,20 +125,22 @@ def log(msg):
 
 
 def load_coordinates():
+    """Load button coordinates, return empty dict if file missing."""
     if not os.path.exists(CONFIG_FILE):
-        log(f"[ERROR] {CONFIG_FILE} not found. Run coordinate_calibration.py first.")
-        sys.exit(1)
-    with open(CONFIG_FILE, "r") as f:
-        config = json.load(f)
-    required = ["BUTTON_BUY", "BUTTON_SELL", "BUTTON_FLATTEN",
-                "ACCOUNT_DROPDOWN", "SIM_ACCOUNT_SLOT", "APEX_ACCOUNT_SLOT"]
-    for key in required:
-        if key not in config:
-            log(f"[ERROR] Missing coordinate: {key}")
-            sys.exit(1)
-    for key in required:
-        log(f"[CONFIG] {key}: ({config[key]['x']}, {config[key]['y']}) color={config[key]['color']}")
-    return config
+        log(f"[WARN] {CONFIG_FILE} not found - using R|Trader window detection only")
+        return {}
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            config = json.load(f)
+        required = ["BUTTON_BUY", "BUTTON_SELL", "BUTTON_FLATTEN",
+                    "ACCOUNT_DROPDOWN", "SIM_ACCOUNT_SLOT", "APEX_ACCOUNT_SLOT"]
+        for key in required:
+            if key not in config:
+                log(f"[WARN] Missing coordinate: {key} - some features may not work")
+        return config
+    except Exception as e:
+        log(f"[ERROR] Failed to load {CONFIG_FILE}: {e}")
+        return {}
 
 
 def hex_to_rgb(hex_color):
