@@ -5,9 +5,11 @@ import random
 import threading
 from pynput import keyboard, mouse
 import pyautogui
+import pygetwindow as gw
 
 pyautogui.FAILSAFE = False
 
+# R|Trader Pro coordinate labels
 COORDINATE_LABELS = [
     "BUTTON_BUY",
     "BUTTON_SELL",
@@ -16,6 +18,9 @@ COORDINATE_LABELS = [
     "SIM_ACCOUNT_SLOT",
     "APEX_ACCOUNT_SLOT"
 ]
+
+# R|Trader Pro window hints
+RTRADER_WINDOW_HINTS = ["Rithmic Trader Pro", "Rithmic Trader", "R|Trader Pro", "R|Trader", "RTrader Pro", "RTrader"]
 
 captured_points = {}
 current_label_index = 0
@@ -123,14 +128,44 @@ def on_press(key):
         pass
 
 
+def select_rtrader_window():
+    """Find and activate R|Trader Pro window before calibration."""
+    print("[SETUP] Looking for R|Trader Pro window...")
+    for hint in RTRADER_WINDOW_HINTS:
+        windows = gw.getWindowsWithTitle(hint)
+        for w in windows:
+            if getattr(w, "visible", True):
+                try:
+                    if getattr(w, "isMinimized", False):
+                        w.restore()
+                        time.sleep(0.5)
+                    w.activate()
+                    time.sleep(0.5)
+                    print(f"[SETUP] Activated R|Trader Pro window: {w.title}")
+                    return True
+                except Exception:
+                    pass
+    print("[WARN] R|Trader Pro window not found. Please open R|Trader Pro first.")
+    return False
+
+
 def main():
     print("=" * 60)
-    print("  COORDINATE CALIBRATION SCRIPT - TRADING DESKTOP")
+    print("  COORDINATE CALIBRATION SCRIPT - R|Trader Pro")
     print("=" * 60)
     print()
+    
+    # Select R|Trader Pro window first
+    if not select_rtrader_window():
+        print("[ERROR] Please open R|Trader Pro and restart calibration.")
+        return
+    
     print("Controls:")
     print("  [C] Capture current mouse position")
     print("  [Q] Quit and save progress")
+    print()
+    print("IMPORTANT: Make sure R|Trader Pro is on the monitor you want to calibrate.")
+    print("For multi-monitor setups, move your mouse to the correct monitor first.")
     print()
     print("Capture sequence:")
     for i, label in enumerate(COORDINATE_LABELS):

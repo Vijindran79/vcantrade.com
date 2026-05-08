@@ -7,6 +7,7 @@ import math
 import threading
 import os
 import sys
+import pygetwindow as gw
 from datetime import datetime
 
 try:
@@ -21,8 +22,101 @@ HOST = "0.0.0.0"
 PORT = 5555
 CONFIG_FILE = "config_coordinates.json"
 
+# R|Trader Pro window hints
+RTRADER_WINDOW_HINTS = ["Rithmic Trader Pro", "Rithmic Trader", "R|Trader Pro", "R|Trader", "RTrader Pro", "RTrader"]
 CLICK_JITTER = 2
 COLOR_TOLERANCE = 30
+
+
+def find_rtrader_window():
+    """Find R|Trader Pro window across all monitors, handle minimized/hidden windows."""
+    try:
+        # Use module-level gw (imported at top of file)
+        all_windows = gw.getAllWindows()
+        found_windows = []
+        
+        # Print all window titles for debugging
+        all_titles = []
+        for w in all_windows:
+            title = getattr(w, "title", "").strip()
+            if title:
+                all_titles.append(title)
+                # Check if any hint matches
+                for hint in RTRADER_WINDOW_HINTS:
+                    if hint.lower() in title.lower():
+                        found_windows.append((title, w))
+        
+        log(f"[WINDOW] All window titles: {all_titles[:20]}")  # Print first 20
+        log(f"[WINDOW] Found {len(found_windows)} windows matching hints: {[w[0] for w in found_windows]}")
+        
+        if found_windows:
+            # Use the first matching window
+            title, window = found_windows[0]
+            log(f"[WINDOW] Found R|Trader window: '{title}'")
+            
+            # Restore minimized window
+            try:
+                if getattr(window, "isMinimized", False):
+                    log(f"[WINDOW] Restoring minimized window: '{title}'")
+                    window.restore()
+                    time.sleep(0.5)
+                if getattr(window, "visible", True):
+                    return window
+            except Exception as e:
+                log(f"[WINDOW] Error restoring window: {e}")
+        
+        # Fallback to getWindowsWithTitle
+        log("[WINDOW] Trying fallback with getWindowsWithTitle...")
+        for hint in RTRADER_WINDOW_HINTS:
+            windows = gw.getWindowsWithTitle(hint)
+            for w in windows:
+                if getattr(w, "visible", True):
+                    log(f"[WINDOW] Fallback found: '{getattr(w, 'title', '')}'")
+                    return w
+        
+        log("[WINDOW] No R|Trader Pro window found")
+        return None
+    except Exception as e:
+        log(f"[WINDOW] Error finding R|Trader window: {e}")
+        return None
+
+
+def bring_window_to_foreground(window):
+    """Bring window to foreground, handle multi-monitor setups."""
+    if not window:
+        return False
+    try:
+        # Restore if minimized
+        if getattr(window, "isMinimized", False):
+            window.restore()
+            time.sleep(0.3)
+        # Activate window
+        window.activate()
+        time.sleep(0.5)
+        # Verify it's active
+        active = gw.getActiveWindow()
+        if active and getattr(active, "title", "") == getattr(window, "title", ""):
+            return True
+        # Fallback: ALT-TAB to window
+        return _alt_tab_to_window(window)
+    except Exception as e:
+        log(f"[WINDOW] Error bringing window to foreground: {e}")
+        return False
+
+
+def _alt_tab_to_window(target_window):
+    """Use ALT-TAB to cycle to target window."""
+    target_title = getattr(target_window, "title", "").lower()
+    for _ in range(20):
+        pyautogui.hotkey("alt", "tab")
+        time.sleep(0.3)
+        try:
+            active = gw.getActiveWindow()
+            if active and target_title in active.title.lower():
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def log(msg):
@@ -112,6 +206,22 @@ def human_click(btn_x, btn_y):
 def execute_strike(config, action):
     log(f"[STRIKE] Lion executing: {action}")
 
+    # Step0: Bring R|Trader window to foreground
+    log("[STEP 0] Bringing R|Trader window to foreground...")
+    rtrader_window = find_rtrader_window()
+    
+    if not rtrader_window:
+        log("[WINDOW HIDDEN] R|Trader Pro window not found - Window not found")
+        log("[DEBUG] Make sure R|Trader Pro is running on this machine")
+        log(f"[DEBUG] RTRADER_WINDOW_HINTS: {RTRADER_WINDOW_HINTS}")
+        return False
+    
+    if not bring_window_to_foreground(rtrader_window):
+        log("[WINDOW ERROR] Failed to bring R|Trader window to foreground")
+        return False
+    
+    log(f"[WINDOW] Successfully activated R|Trader window: {rtrader_window.title}")
+
     if action != "FLATTEN":
         dd = config["ACCOUNT_DROPDOWN"]
         log(f"[ACCOUNT] Moving to dropdown ({dd['x']}, {dd['y']})")
@@ -135,6 +245,7 @@ def execute_strike(config, action):
     time.sleep(random.uniform(0.05, 0.15))
     human_click(btn["x"], btn["y"])
     log(f"[STRIKE] {action} execution complete.")
+    return True
 
 
 def handle_client(config, conn, addr):
@@ -144,10 +255,14 @@ def handle_client(config, conn, addr):
         if data:
             cmd = json.loads(data)
             action = cmd.get("action", "UNKNOWN")
-            execute_strike(config, action)
-            response = json.dumps({"status": "SUCCESS", "action": action})
+            success = execute_strike(config, action)
+            if success:
+                response = json.dumps({"status": "SUCCESS", "action": action})
+                log(f"[RESPONSE] Sent: {response}")
+            else:
+                response = json.dumps({"status": "ERROR", "message": "Execution failed - check window status"})
+                log(f"[ERROR] Execution failed for {action}")
             conn.send(response.encode("utf-8"))
-            log(f"[RESPONSE] Sent: {response}")
     except json.JSONDecodeError:
         log(f"[ERROR] Invalid JSON from {addr}")
         conn.send(json.dumps({"status": "ERROR", "message": "Invalid JSON"}).encode("utf-8"))

@@ -306,7 +306,17 @@ BROWSER_WINDOW_HINTS = [
     value.strip()
     for value in os.getenv(
         "BROWSER_WINDOW_HINTS",
-        "WealthCharts,TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
+        "WealthCharts,TradingView,R|Trader Pro,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
+    ).split(",")
+    if value.strip()
+]
+
+# R|Trader Pro specific window hints
+RTRADER_WINDOW_HINTS = [
+    value.strip()
+    for value in os.getenv(
+        "RTRADER_WINDOW_HINTS",
+        "Rithmic Trader Pro,Rithmic Trader,R|Trader Pro,R|Trader,RTrader Pro,RTrader",
     ).split(",")
     if value.strip()
 ]
@@ -353,11 +363,17 @@ HOTKEY_CLOSE = "<ctrl>+x"
 HUMAN_LATENCY = os.getenv("HUMAN_LATENCY", "True").lower() == "true"
 
 # Safe fallback coordinates for RPA button clicks when color detection fails.
-# Update these to match your screen resolution and WealthCharts layout.
-FALLBACK_COORDS = {
-    "buy_button": (int(os.getenv("FALLBACK_BUY_X", "960")), int(os.getenv("FALLBACK_BUY_Y", "540"))),
-    "sell_button": (int(os.getenv("FALLBACK_SELL_X", "960")), int(os.getenv("FALLBACK_SELL_Y", "580"))),
+# Update these to match your R|Trader Pro layout and monitor setup.
+RTRADER_FALLBACK_COORDS = {
+    "buy_button": (int(os.getenv("RTRADER_BUY_X", "960")), int(os.getenv("RTRADER_BUY_Y", "540"))),
+    "sell_button": (int(os.getenv("RTRADER_SELL_X", "960")), int(os.getenv("RTRADER_SELL_Y", "580"))),
+    "flatten_button": (int(os.getenv("RTRADER_FLATTEN_X", "960")), int(os.getenv("RTRADER_FLATTEN_Y", "620"))),
 }
+
+# Multi-monitor support
+MULTI_MONITOR_ENABLED = os.getenv("MULTI_MONITOR_ENABLED", "True").lower() == "true"
+PRIMARY_MONITOR_WIDTH = int(os.getenv("PRIMARY_MONITOR_WIDTH", "1920"))
+PRIMARY_MONITOR_HEIGHT = int(os.getenv("PRIMARY_MONITOR_HEIGHT", "1080"))
 
 # ===== SLIPPAGE GUARD =====
 MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "2.50"))

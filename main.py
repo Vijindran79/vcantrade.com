@@ -1336,6 +1336,8 @@ class VcaniTradeApp:
 
         # Side-by-Side Execution Strategy: Raw socket client for port 5555
         self.execution_socket_client = ExecutionSocketClient()
+        logger.info("[INIT] ExecutionSocketClient initialized: host=%s, port=%s", 
+                     self.execution_socket_client.host, self.execution_socket_client.port)
         self.side_by_side_enabled = True  # Set to False to disable socket commands
 
         # State
