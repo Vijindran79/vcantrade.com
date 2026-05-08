@@ -37,6 +37,7 @@ htmlcov/
 
 # Local runtime artifacts
 *.db
+config_coordinates.json
 browser_profile/
 screenshots/
 debug_failures/
