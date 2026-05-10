@@ -15,6 +15,7 @@ Architecture:
 import logging
 import time
 import asyncio
+from numbers import Number
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
@@ -44,7 +45,7 @@ from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
 from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
 from core.market_sessions import MarketSessionDetector, is_crypto_ticker, is_weekend_closed
 from core.liquidity_engine import LiquidityEngine
-from core.symbol_mapper import translate_chart_symbol
+from core.symbol_mapper import normalize_yfinance_symbol, translate_chart_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -408,19 +409,28 @@ class CloudScanner:
 
     def _canonical_market_ticker(self, ticker: str) -> str:
         """Map watchlist aliases to yfinance-compatible symbols."""
+        raw = str(ticker or "").strip()
+        yf_map = getattr(config, "YFINANCE_SYMBOL_MAP", {})
+        for candidate in (raw, raw.upper(), raw.replace("-", "").upper()):
+            if candidate in yf_map:
+                return yf_map[candidate]
+
         # 1. Check explicit TradingView -> Yahoo Finance mapping
-        if hasattr(config, "SYMBOL_MAP") and ticker in config.SYMBOL_MAP:
-            return config.SYMBOL_MAP[ticker]
+        if hasattr(config, "SYMBOL_MAP") and raw in config.SYMBOL_MAP:
+            return normalize_yfinance_symbol(config.SYMBOL_MAP[raw])
         # 2. Normalize via settings aliases
-        normalized = settings_manager.normalize_ticker(ticker)
+        normalized = settings_manager.normalize_ticker(raw)
+        for candidate in (normalized, normalized.upper(), normalized.replace("-", "").upper()):
+            if candidate in yf_map:
+                return yf_map[candidate]
         if hasattr(config, "SYMBOL_MAP") and normalized in config.SYMBOL_MAP:
-            return config.SYMBOL_MAP[normalized]
+            return normalize_yfinance_symbol(config.SYMBOL_MAP[normalized])
         # 3. Broker/chart labels like MNQ-JUN26 are translated automatically.
         translation = translate_chart_symbol(ticker) or translate_chart_symbol(normalized)
         if translation:
             return translation.yahoo_symbol
         # 4. Fall back to normalized ticker
-        return normalized
+        return normalize_yfinance_symbol(normalized)
 
     def get_scan_interval(self) -> float:
         """Scale scan cadence based on active watchlist size."""
@@ -757,6 +767,15 @@ class CloudScanner:
         if candle["close"] <= 0:
             return None
 
+        prev_close = float(df["Close"].iloc[-2]) if len(df) >= 2 else candle["close"]
+        recent_closes = df["Close"].dropna().tail(4)
+        recent_momentum_pct = 0.0
+        if len(recent_closes) >= 2 and float(recent_closes.iloc[0]) > 0:
+            recent_momentum_pct = (
+                (float(recent_closes.iloc[-1]) - float(recent_closes.iloc[0]))
+                / float(recent_closes.iloc[0])
+            ) * 100.0
+
         rsi_value = float(last.get("RSI", 50.0) or 50.0)
         atr_value = float(last.get("ATR", 0.0) or 0.0)
         distance_ratio = abs(candle["close"] - zone_level) / max(abs(zone_level), 1.0)
@@ -850,6 +869,23 @@ class CloudScanner:
                 if candle["close"] >= candle["open"]:
                     logger.info("[SNIPER] Rejected %s %s: no bearish momentum (close >= open)", ticker, signal_type)
                     return None
+                if candle["close"] >= prev_close:
+                    logger.info(
+                        "[SNIPER] Rejected %s %s: no breakdown confirmation (close %.2f >= prev close %.2f)",
+                        ticker,
+                        signal_type,
+                        candle["close"],
+                        prev_close,
+                    )
+                    return None
+                if recent_momentum_pct > 0:
+                    logger.info(
+                        "[SNIPER] Rejected %s %s: shorting into bullish 4-bar momentum (%+.2f%%)",
+                        ticker,
+                        signal_type,
+                        recent_momentum_pct,
+                    )
+                    return None
 
         logger.info(
             "[TARGET] Liquidity trigger armed for %s: %s near %s",
@@ -883,7 +919,26 @@ class CloudScanner:
         """Fetch OHLCV market data from MetaTrader 5 using copy_rates_from_pos."""
         import concurrent.futures
 
-        market_ticker = self._canonical_market_ticker(ticker)
+        ticker_str = str(ticker).strip() if ticker is not None else ""
+        allowed_symbol_chars = set(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz"
+            "0123456789"
+            "-_.=^:/!_"
+        )
+        if (
+            not ticker_str
+            or ticker_str.lower() in {"nan", "none", "null"}
+            or isinstance(ticker, Number)
+            or ticker_str.replace(".", "", 1).isdigit()
+            or not any(ch.isalpha() for ch in ticker_str)
+            or any(ch not in allowed_symbol_chars for ch in ticker_str)
+        ):
+            logger.debug("[SCANNER] Aborting fetch: '%s' is not a valid symbol string", ticker)
+            return None
+
+        ticker = ticker_str
+        market_ticker = self._canonical_market_ticker(ticker_str)
         cache_key = (market_ticker, period, interval)
 
         max_retries = 3
@@ -1308,9 +1363,11 @@ class CloudScanner:
             else:
                 votes[label] = "WAIT"
 
-        # AGGRESSIVE HUNTER: High-confidence signals strike on 5m alone
+        # AGGRESSIVE HUNTER: High-confidence BUY signals can strike on 5m alone.
+        # SELL signals need extra confirmation because crypto equal-high sweeps
+        # often continue upward instead of reversing.
         hunter_threshold = getattr(config, "AGGRESSIVE_HUNTER_CONFIDENCE_PCT", 75.0)
-        if confidence >= hunter_threshold and votes.get("5m") == action:
+        if confidence >= hunter_threshold and votes.get("5m") == action and action == "BUY":
             logger.info(
                 "[FIRE] AGGRESSIVE HUNTER: %s %s confidence=%.1f%% >= %.1f%% — striking on 5m alone | votes=%s",
                 action, ticker, confidence, hunter_threshold, votes,
@@ -1332,11 +1389,15 @@ class CloudScanner:
         if runtime_mode == "AUTONOMOUS":
             matching_timeframes = sum(1 for tf in ["5m", "3m", "1m"] if votes.get(tf) == action)
             if is_liquidity and is_strong:
-                # For liquidity sweeps/rejections, SMAs naturally oppose the sweep
-                # (price drops during demand sweeps = bearish SMAs). Don't require
-                # agreement from lagging indicators. Just don't fight the 5m trend.
-                five_m_opposite = votes.get("5m") == ("SELL" if action == "BUY" else "BUY")
-                aligned = matching_timeframes >= 1 or not five_m_opposite
+                # BUY liquidity reversals can be relaxed because demand sweeps
+                # often print while SMAs still lag. SELL reversals are stricter:
+                # do not short BTC/ETH uptrends unless 5m and one helper agree.
+                if action == "SELL":
+                    aligned = votes.get("5m") == "SELL" and matching_timeframes >= 2
+                    five_m_opposite = votes.get("5m") == "BUY"
+                else:
+                    five_m_opposite = votes.get("5m") == "SELL"
+                    aligned = matching_timeframes >= 1 or not five_m_opposite
                 if aligned:
                     logger.info(
                         "[TARGET] AUTONOMOUS LIQUIDITY SNIPER: %s %s passed | %d/3 agree | 5m_opposite=%s | votes=%s",
@@ -1606,6 +1667,50 @@ class CloudScanner:
         key = f"{ticker}:{signal_type}"
         self.recent_signals[key] = datetime.utcnow()
 
+    def _technical_action_from_signal(self, signal: TechnicalSignal) -> str:
+        """Infer BUY/SELL from deterministic scanner signal metadata."""
+        signal_type = str(signal.signal_type or "").upper()
+        metadata = signal.metadata or {}
+        if "BUY" in signal_type or "BULLISH" in signal_type or "OVERSOLD" in signal_type:
+            return "BUY"
+        if "SELL" in signal_type or "BEARISH" in signal_type or "OVERBOUGHT" in signal_type:
+            return "SELL"
+
+        action = str(
+            metadata.get("action_hint")
+            or metadata.get("liquidity_bias")
+            or metadata.get("action")
+            or metadata.get("direction")
+            or ""
+        ).upper()
+        if action in {"BUY", "SELL"}:
+            return action
+        if action == "UP":
+            return "BUY"
+        if action == "DOWN":
+            return "SELL"
+        return "HOLD"
+
+    def _brain_unavailable(self, brain_decision: dict) -> bool:
+        """Return True when the confirmation model failed rather than vetoed."""
+        if not bool(brain_decision.get("fallback_mode")):
+            return False
+        text = " ".join(
+            str(brain_decision.get(key, "") or "").lower()
+            for key in ("reasoning", "raw_text")
+        )
+        return any(
+            marker in text
+            for marker in (
+                "not found",
+                "unavailable",
+                "http error",
+                "404",
+                "connection",
+                "timeout",
+            )
+        )
+
     def _validate_zone_origin(self, signal: TechnicalSignal, action: str) -> bool:
         """
         Validate that BUY signals originate from demand zones
@@ -1735,6 +1840,35 @@ class CloudScanner:
                 # ALWAYS return signal - let user decide, not the AI
                 self._record_signal(signal.ticker, signal.signal_type)
 
+                technical_action = self._technical_action_from_signal(signal)
+                runtime_mode = str(
+                    self.session_detector.get_session_context().get(
+                        "runtime_mode", "AUTONOMOUS"
+                    )
+                    or "AUTONOMOUS"
+                ).upper()
+                # If the model collapses to HOLD while the deterministic scanner
+                # has a strong directional setup, keep the trade candidate alive.
+                if (
+                    analysis.action.value == "HOLD"
+                    and technical_action in {"BUY", "SELL"}
+                    and signal.strength >= 0.60
+                ):
+                    logger.info(
+                        "[FIRE] TECHNICAL OVERRIDE: %s %s kept alive as %s "
+                        "(strength %.2f, mode=%s)",
+                        signal.signal_type,
+                        signal.ticker,
+                        technical_action,
+                        signal.strength,
+                        runtime_mode,
+                    )
+                    analysis.action = SignalAction(technical_action)
+                    analysis.reason = (
+                        f"Strong technical {signal.signal_type} setup "
+                        f"(strength {signal.strength:.2f}); model HOLD was treated as caution."
+                    )
+
                 # FILTER: Only dispatch BUY/SELL signals (skip HOLD)
                 if analysis.action.value == "HOLD":
                     logger.info(
@@ -1796,18 +1930,33 @@ class CloudScanner:
                     self._emit_status(signal.ticker, f"brain_fallback:{brain_used}")
                 self._emit_status(signal.ticker, f"brain_verdict:{brain_verdict}")
                 if brain_verdict != approved_brain_verdict:
-                    logger.info(
-                        "BRAIN VETOED TRADE: %s %s | response=%s | brain=%s | model=%s | reasoning=%s",
-                        analysis.action.value,
-                        signal.ticker,
-                        brain_verdict,
-                        brain_used,
-                        brain_decision.get("model", "n/a"),
-                        brain_decision.get("reasoning", ""),
-                    )
-                    self._emit_status(signal.ticker, "trade_rejected")
-                    continue
-
+                    if (
+                        self._brain_unavailable(brain_decision)
+                        and signal.strength >= 0.60
+                        and confidence_score >= float(getattr(config, "SWARM_CONFIDENCE_THRESHOLD", 0.60))
+                    ):
+                        logger.warning(
+                            "BRAIN UNAVAILABLE: allowing technical strike gate for %s %s "
+                            "| response=%s | model=%s | reasoning=%s",
+                            analysis.action.value,
+                            signal.ticker,
+                            brain_verdict,
+                            brain_decision.get("model", "n/a"),
+                            brain_decision.get("reasoning", ""),
+                        )
+                        brain_verdict = approved_brain_verdict
+                    else:
+                        logger.info(
+                            "BRAIN VETOED TRADE: %s %s | response=%s | brain=%s | model=%s | reasoning=%s",
+                            analysis.action.value,
+                            signal.ticker,
+                            brain_verdict,
+                            brain_used,
+                            brain_decision.get("model", "n/a"),
+                            brain_decision.get("reasoning", ""),
+                        )
+                        self._emit_status(signal.ticker, "trade_rejected")
+                        continue
                 # [FIRE] FIX: Ensure entry/stop/tp are set (use signal price if LLM returned 0)
                 signal_price = signal.metadata.get("price", market_data.price)
                 if analysis.entry_price == 0.0 or analysis.entry_price is None:

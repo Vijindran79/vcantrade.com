@@ -3,7 +3,7 @@ VcaniTrade AI - Configuration
 Safety-first trading configuration with strict defaults
 """
 
-# --- LION MODE CONFIGURATION ---
+# ===== LION MODE CONFIGURATION =====
 MAX_DAILY_TRADES = 30          # Hard cap to prevent overtrading
 RE_ENTRY_LOCKOUT_MINUTES = 5   # Cooldown after a trade closes
 TRAILING_STOP_CANDLE_MIN = 3   # Use 3-min candles for smoother stops
@@ -11,6 +11,18 @@ RSI_VETO_THRESHOLD = 85        # Abort if RSI > 85 (Buy) or < 20 (Sell) — rela
 WINDOW_SETTLE_TIME = 1.5       # Seconds to wait for window focus
 MOUSE_HUMAN_DELAY_MIN = 0.8    # Min reaction time
 MOUSE_HUMAN_DELAY_MAX = 1.6    # Max reaction time
+
+# ===== TARGET-LOCKED SCANNING =====
+# The bot will scan ONLY these symbols. No weekday/holiday checks.
+# If only one symbol, the scanner locks onto it and executes directly.
+ACTIVE_SYMBOLS = ["BTCUSD"]
+# Confidence-Based Take Profit Targets
+TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  ($50)
+TP_HIGH_CONFIDENCE_MIN = 150.0 # Minimum target when AI confidence >= 85% ($150)
+TP_HIGH_CONFIDENCE_MAX = 200.0 # Maximum target when AI confidence >= 85% ($200)
+# Fast-trailing stop: lock break-even + trail after N dollars in profit
+TRAILING_STOP_ACTIVATE_AFTER_PROFIT = 30.0  # $30 profit before trailing activates
+TRAILING_STOP_DISTANCE = 15.0              # $15 trail distance after activation
 
 import os
 from dotenv import load_dotenv
@@ -54,16 +66,19 @@ KILL_SWITCH = False
 TRADING_START_HOUR_UTC = int(os.getenv("TRADING_START_HOUR_UTC", "12"))
 TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 
-# ===== FUTURES ONLY WHITELIST =====
-# Only these assets are allowed to trigger RPA trades on Apex account
-FUTURES_WHITELIST = ["CLM26", "NQM6", "ESM6", "MGC"]  # Updated to Crude Oil June 2026
-# Block stocks like TSLA, AAPL, SPX from triggering trades
+# ===== OPTIONAL SYMBOL SAFETY LISTS =====
+# These are only used by legacy broker-specific paths. TradingView and MT5 route
+# through their own execution handlers and should not be blocked by an Apex list.
+FUTURES_WHITELIST = ["CLM26", "NQM6", "ESM6", "MGC"]
+# Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
-# ===== SYMBOL BRIDGE (WealthCharts → MT5 Broker) =====
-# WealthCharts uses M6 contract codes. MT5 uses broker-specific names.
+# ===== SYMBOL BRIDGE (TradingView → MT5 Broker) =====
+# TradingView chart symbols can differ from broker-specific MT5 names.
 # Override any value with an environment variable if your broker labels differ.
-WEALTHCHARTS_TICKERS = ("NQM6", "ESM6", "CLM26", "MGC")  # Updated to CLM26
+TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "CLM26", "MGC")
+# Backward-compatible alias for old modules while the repo is being cleaned.
+WEALTHCHARTS_TICKERS = TRADINGVIEW_TICKERS
 
 # Muted tickers: scanner will NEVER scan these — Unmuted for CLM26.NYMEX targeting
 MUTED_TICKERS = set()
@@ -96,11 +111,16 @@ TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
 
 # ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
 # Native Ollama API (for /api/generate, /api/tags, model management)
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://openrouter.ai")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # OpenAI-compatible v1 endpoint (for /v1/chat/completions with vision)
-OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://openrouter.ai/v1")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
-OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
+OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
+MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+OLLAMA_MODEL = os.getenv(
+    "OLLAMA_MODEL",
+    MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen2.5:7b-instruct-q4_K_M",
+)
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 VAST_API_TOKEN = None
 
 # ===== GEMINI LIVE BRAIN =====
@@ -150,10 +170,24 @@ OLLAMA_TIMEOUT = LLM_TIMEOUT  # Alias used by llm_analyzer swarm runner
 JSON_OUTPUT = True
 
 # ===== VISION / VLM CONFIGURATION =====
-USE_VISION = os.getenv("USE_VISION", "False").lower() == "true"
+# 1. Enable Vision & Screen capturing
+USE_VISION = True
 VLM_MODEL = os.getenv("VLM_MODEL", "llava:7b")
 VISION_TIMEOUT = 120
-SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "False").lower() == "true"
+SAVE_DEBUG_SCREENSHOTS = True
+
+# 2. Turn on the Alarms and Sound Effects
+PLAY_ALERT_SOUNDS = os.getenv("PLAY_ALERT_SOUNDS", "True").lower() == "true"
+ENABLE_AUDIO_NARRATION = os.getenv("ENABLE_AUDIO_NARRATION", "True").lower() == "true"
+PLAY_SCAN_TICK_SOUNDS = os.getenv("PLAY_SCAN_TICK_SOUNDS", "True").lower() == "true"
+SCAN_TICK_SOUND_INTERVAL_SECONDS = float(os.getenv("SCAN_TICK_SOUND_INTERVAL_SECONDS", "3.0"))
+
+# Visual command-center feedback
+CONFIDENCE_OVERLAY_ENABLED = os.getenv("CONFIDENCE_OVERLAY_ENABLED", "True").lower() == "true"
+ENABLE_FLASHING_ALERTS = os.getenv("ENABLE_FLASHING_ALERTS", "True").lower() == "true"
+ALERT_FLASH_DURATION_MS = int(os.getenv("ALERT_FLASH_DURATION_MS", "6500"))
+REALTIME_SCAN_FEED = os.getenv("REALTIME_SCAN_FEED", "True").lower() == "true"
+SCAN_ACTIVITY_THROTTLE_SECONDS = float(os.getenv("SCAN_ACTIVITY_THROTTLE_SECONDS", "3.0"))
 
 # Default TradingView chart capture region.
 # Safe fallbacks prevent startup crashes even when vision is disabled.
@@ -168,6 +202,28 @@ WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "3.0"))
 CLOUD_TICKERS = ["BTC-USD"]  # BTC-USD kept as 24/7 fallback; futures are watchlist-driven
 
+# yfinance requires dashed crypto symbols. Keep chart/broker symbols separate.
+YFINANCE_SYMBOL_MAP = {
+    "BTC": "BTC-USD",
+    "BTCUSD": "BTC-USD",
+    "BTCUSDT": "BTC-USD",
+    "BTC-USD": "BTC-USD",
+    "XBT": "BTC-USD",
+    "XBTUSD": "BTC-USD",
+    "ETH": "ETH-USD",
+    "ETHUSD": "ETH-USD",
+    "ETHUSDT": "ETH-USD",
+    "ETH-USD": "ETH-USD",
+    "SOL": "SOL-USD",
+    "SOLUSD": "SOL-USD",
+    "SOLUSDT": "SOL-USD",
+    "SOL-USD": "SOL-USD",
+    "XRP": "XRP-USD",
+    "XRPUSD": "XRP-USD",
+    "XRPUSDT": "XRP-USD",
+    "XRP-USD": "XRP-USD",
+}
+
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
@@ -181,9 +237,9 @@ SYMBOL_MAP = {
     "NYMEX:CLM26!": "CLM26.NYMEX",  # Updated to CLM26
     "COMEX:MGC1!": "GC=F",
 }
-# Symbol mapping: Yahoo / internal ticker -> WealthCharts chart symbol (M6 contract codes)
-# Used by browser_agent and rpa_executor to navigate to the correct chart.
-# NQ=F/ES=F/CL=F map to June 2026 (M6) futures contract codes for WealthCharts.
+# Symbol mapping: Yahoo / internal ticker -> TradingView chart symbol.
+# Used by browser_agent/rpa_executor when a chart symbol needs to be resolved.
+# NQ=F/ES=F/CL=F map to the current working futures contract codes.
 TRADINGVIEW_SYMBOL_MAP = {
     # Yahoo futures -> CME_MINI / NYMEX contract names
     "NQ=F":  "NQM6",
@@ -199,7 +255,7 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MES": "ESM6",
     "CL":  "CLM26.NYMEX",  # Updated to CLM26
     "MCL": "CLM26.NYMEX",  # Updated to CLM26
-    # WealthCharts June 2026 (M6) contract codes — exact symbols on dashboard
+    # TradingView futures contract codes.
     "CME_MINI:MNQ1!": "NQM6",
     "CME_MINI:MES1!": "ESM6",
     "NYMEX:CLM26!": "CLM26.NYMEX",  # Updated to CLM26
@@ -219,8 +275,8 @@ TRADINGVIEW_SYMBOL_MAP = {
 # Pepperstone UK DEMO account — Spread Betting (GBP) uses _SB suffix.
 # Chart tabs show: Crude_SB, NAS100_SB, US500_SB
 MT5_SYMBOL_MAP = {
-    # ===== WealthCharts M6 tickers -> Pepperstone broker symbols =====
-    # These are the symbols the scanner receives — map them FIRST
+    # ===== TradingView futures aliases -> Pepperstone broker symbols =====
+    # These are the symbols the scanner receives - map them FIRST.
     "CLM26": "Crude_SB",  # Updated to CLM26
     "NQM6": "NAS100_SB",
     "ESM6": "US500_SB",
@@ -278,19 +334,34 @@ MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llava:7b")
 MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====
-# "UI"  = Click buttons on screen via Playwright/RPA (default)
+# "TV_DESKTOP" = Connect to TradingView Desktop via CDP on port 9222 (ghost JS injection)
 # "MT5" = Send orders to MetaTrader 5 via mt5.order_send()
-EXECUTION_MODE = os.getenv("EXECUTION_MODE", "UI")
-TRADING_SURFACE = os.getenv("TRADING_SURFACE", "WEALTHCHARTS")
+# TEACHER/AUTONOMOUS is controlled separately by DRY_RUN and TEACHER_MODE.
+EXECUTION_MODE = os.getenv("EXECUTION_MODE", "TV_DESKTOP").upper().strip()
+TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_DESKTOP")
 MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.1"))
-BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://192.168.0.39:9223").strip()
 
 # Side-by-Side Execution: Desktop IP for Rithmic/NinjaTrader
 # Your desktop IP (where R|Trader Pro runs): 192.168.0.39
 EXECUTION_HOST = os.getenv("EXECUTION_HOST", "192.168.0.39").strip()
 
-# Tradovate Web Platform URL (uses Rithmic login)
-TRADOVATE_URL = os.getenv("TRADOVATE_URL", "https://trading.tradovate.com").strip().rstrip("/")
+# SYNCHRONIZED CDP URL — all modules use this for port 9222
+# Legacy modules (browser_agent) and new modules (ghost_executor) both read this.
+BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9222").strip()
+
+# TradingView Desktop CDP — explicit alias for ghost_executor
+TV_DESKTOP_CDP_URL = os.getenv("TV_DESKTOP_CDP_URL", "http://127.0.0.1:9222").strip()
+# How long (seconds) to wait for TradingView Desktop to be ready after launch
+TV_DESKTOP_CONNECT_TIMEOUT = int(os.getenv("TV_DESKTOP_CONNECT_TIMEOUT", "15"))
+LOW_LATENCY_EXECUTION_ENABLED = os.getenv("LOW_LATENCY_EXECUTION_ENABLED", "true").lower() == "true"
+HYBRID_GATEWAY_PRIMARY = os.getenv("HYBRID_GATEWAY_PRIMARY", "broker_ws").lower().strip()
+BROKER_WS_URL = os.getenv("BROKER_WS_URL", "").strip()
+BROKER_WS_TOKEN = os.getenv("BROKER_WS_TOKEN", "").strip()
+BROKER_WS_TIMEOUT_SECONDS = float(os.getenv("BROKER_WS_TIMEOUT_SECONDS", "0.75"))
+BROKER_WS_DRY_RUN = os.getenv("BROKER_WS_DRY_RUN", "true").lower() == "true"
+FAST_VISION_ENABLED = os.getenv("FAST_VISION_ENABLED", "true").lower() == "true"
+FAST_VISION_BACKEND = os.getenv("FAST_VISION_BACKEND", "auto").lower().strip()
+HUD_GLASS_ENABLED = os.getenv("HUD_GLASS_ENABLED", "true").lower() == "true"
 SHOW_STARTUP_SWITCHBOARD = os.getenv("SHOW_STARTUP_SWITCHBOARD", "true").lower() == "true"
 SMART_EYE_ENABLED = os.getenv("SMART_EYE_ENABLED", "true").lower() == "true"
 AUTO_SYMBOL_DETECTION = os.getenv("AUTO_SYMBOL_DETECTION", "true").lower() == "true"
@@ -344,6 +415,7 @@ SMA_FAST = 20
 SMA_SLOW = 50
 SWARM_CONFIDENCE_THRESHOLD = 0.60  # TEMPORARY TEST: lowered from 0.50 for Sunday signal testing
 MIN_CONFIDENCE_THRESHOLD = 60.0    # TEMPORARY TEST: lowered from 50.0 for Sunday signal testing
+VISUAL_ALERT_MIN_CONFIDENCE = SWARM_CONFIDENCE_THRESHOLD
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_ENABLED = True
@@ -409,3 +481,9 @@ POSITION_OPEN_IMAGE = "assets/tv_position_open_label.png"
 # ===== NEWS/EVENTS TIMEOUTS =====
 NEWS_REQUEST_TIMEOUT = 10
 NEWS_CONNECT_TIMEOUT = 5
+
+DAILY_PROFIT_TARGET = 1500.0
+
+POSITION_SIZE_HIGH_CONF = 10
+
+DAILY_LOSS_KILL = 1000.0

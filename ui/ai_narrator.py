@@ -31,6 +31,8 @@ import logging
 import sys
 import time
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,7 +166,13 @@ class GlassmorphicPanel(QWidget):
         background = "rgba(56, 16, 22, 240)" if aggression else "rgba(16, 22, 36, 235)"
         signal_alert = getattr(self, "_signal_alert_active", False) and getattr(self, "_signal_alert_flash_state", False)
         if signal_alert:
-            border = "rgba(57, 255, 20, 235)"
+            kind = str(getattr(self, "_signal_alert_kind", "signal") or "signal").lower()
+            if kind in {"error", "sell"}:
+                border = "rgba(255, 0, 60, 235)"
+            elif kind in {"warning", "hold"}:
+                border = "rgba(242, 204, 96, 235)"
+            else:
+                border = "rgba(57, 255, 20, 235)"
         else:
             border = "rgba(248, 81, 73, 200)" if aggression else "rgba(100, 120, 160, 120)"
         self.setStyleSheet(
@@ -204,8 +212,16 @@ class GlassmorphicPanel(QWidget):
                 highlight_top = QColor(255, 255, 255, 30)
 
             if getattr(self, "_signal_alert_active", False) and getattr(self, "_signal_alert_flash_state", False):
-                border_color = QColor(57, 255, 20, 225)
-                highlight_top = QColor(120, 255, 140, 58)
+                kind = str(getattr(self, "_signal_alert_kind", "signal") or "signal").lower()
+                if kind in {"error", "sell"}:
+                    border_color = QColor(255, 0, 60, 225)
+                    highlight_top = QColor(255, 110, 130, 58)
+                elif kind in {"warning", "hold"}:
+                    border_color = QColor(242, 204, 96, 225)
+                    highlight_top = QColor(255, 220, 120, 58)
+                else:
+                    border_color = QColor(57, 255, 20, 225)
+                    highlight_top = QColor(120, 255, 140, 58)
             
             # Draw rounded rectangle
             rect = self.rect().adjusted(2, 2, -2, -2)
@@ -285,7 +301,14 @@ class AINarratorOverlay(GlassmorphicPanel):
         self._signal_alert_active = False
         self._signal_alert_flash_state = False
         self._signal_alert_deadline = 0.0
-        self._current_opacity = 0.96 if sys.platform == "win32" else 1.0
+        self._signal_alert_kind = "signal"
+        self._last_scan_activity = {}
+        glass_enabled = bool(getattr(config, "HUD_GLASS_ENABLED", True))
+        self._current_opacity = (
+            0.88 if glass_enabled and sys.platform == "win32"
+            else 0.96 if sys.platform == "win32"
+            else 1.0
+        )
         self.setWindowOpacity(self._current_opacity)
         self.signal_alert_timer = QTimer(self)
         self.signal_alert_timer.timeout.connect(self._pulse_signal_alert_border)
@@ -320,6 +343,27 @@ class AINarratorOverlay(GlassmorphicPanel):
             "color: #3FB950; font-size: 12px; font-weight: bold; background: transparent;"
         )
         main_layout.addWidget(self.live_pnl_label)
+
+        self.confidence_meter_frame = QFrame()
+        self.confidence_meter_frame.setStyleSheet(
+            "QFrame { background: rgba(12,18,30,225); border: 1px solid rgba(242,204,96,0.45); border-radius: 8px; }"
+        )
+        confidence_layout = QVBoxLayout()
+        confidence_layout.setContentsMargins(10, 8, 10, 8)
+        confidence_layout.setSpacing(3)
+        self.confidence_meter_label = QLabel("CONFIDENCE --% | WAITING")
+        self.confidence_meter_label.setStyleSheet(
+            "color: #F2CC60; font-size: 18px; font-weight: bold; background: transparent;"
+        )
+        self.confidence_meter_detail = QLabel("SCAN FEED: STARTING")
+        self.confidence_meter_detail.setStyleSheet(
+            "color: #8B949E; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        confidence_layout.addWidget(self.confidence_meter_label)
+        confidence_layout.addWidget(self.confidence_meter_detail)
+        self.confidence_meter_frame.setLayout(confidence_layout)
+        self.confidence_meter_frame.setVisible(bool(getattr(config, "CONFIDENCE_OVERLAY_ENABLED", True)))
+        main_layout.addWidget(self.confidence_meter_frame)
 
         # BIG GREEN TRADE NOTIFICATION BOX
         self.trade_alert_box = QLabel("")
@@ -836,6 +880,68 @@ class AINarratorOverlay(GlassmorphicPanel):
             f"color: {color}; font-size: 12px; font-weight: bold; background: transparent;"
         )
 
+    def _confidence_to_percent(self, confidence) -> float:
+        if isinstance(confidence, str):
+            mapping = {
+                "LOW": 30.0,
+                "MEDIUM": 60.0,
+                "HIGH": 80.0,
+                "VERY_HIGH": 95.0,
+            }
+            return mapping.get(confidence.strip().upper(), 0.0)
+        try:
+            value = float(confidence or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if value <= 1.0:
+            value *= 100.0
+        return max(0.0, min(100.0, value))
+
+    def update_confidence_meter(
+        self,
+        ticker: str,
+        action: str = "SCAN",
+        confidence=0.0,
+        status: str = "",
+    ):
+        """Update the large live confidence strip."""
+        if not bool(getattr(config, "CONFIDENCE_OVERLAY_ENABLED", True)):
+            self.confidence_meter_frame.setVisible(False)
+            return
+
+        score = self._confidence_to_percent(confidence)
+        action_label = str(action or "SCAN").upper()
+        ticker_label = str(ticker or "UNKNOWN").upper()
+        threshold = float(getattr(config, "VISUAL_ALERT_MIN_CONFIDENCE", 0.60) or 0.60)
+        if threshold <= 1.0:
+            threshold *= 100.0
+        if action_label == "BUY":
+            color = "#00FF41"
+            border = "rgba(0,255,65,184)"
+        elif action_label == "SELL":
+            color = "#FF003C"
+            border = "rgba(255,0,60,184)"
+        elif score >= 85:
+            color = "#00FF41"
+            border = "rgba(0,255,65,184)"
+        elif score >= threshold:
+            color = "#F2CC60"
+            border = "rgba(242,204,96,184)"
+        else:
+            color = "#58A6FF"
+            border = "rgba(88,166,255,108)"
+
+        self.confidence_meter_label.setText(f"CONFIDENCE {score:.0f}% | {action_label} {ticker_label}")
+        self.confidence_meter_label.setStyleSheet(
+            f"color: {color}; font-size: 18px; font-weight: bold; background: transparent;"
+        )
+        detail = str(status or "LIVE SCAN").upper()
+        self.confidence_meter_detail.setText(f"SCAN FEED: {detail}")
+        self.confidence_meter_frame.setStyleSheet(
+            f"QFrame {{ background: rgba(12,18,30,230); border: 1px solid {border}; border-radius: 8px; }}"
+        )
+        self.confidence_meter_frame.setVisible(True)
+
     def set_daily_bullets(self, used: int, limit: int = 30):
         """Update the Lion HUD trade-cap counter."""
         self.daily_bullets_label.setText(f"Daily Bullets: {int(used)}/{int(limit)}")
@@ -886,10 +992,11 @@ class AINarratorOverlay(GlassmorphicPanel):
             f"color: {rate_color}; font-size: 12px; font-weight: bold; background: transparent;"
         )
 
-    def trigger_signal_alert(self, duration_ms: int = 3000):
+    def trigger_signal_alert(self, duration_ms: int = 3000, kind: str = "signal"):
         """Pulse the mirror border neon green after a fresh signal broadcast."""
         self._signal_alert_active = True
         self._signal_alert_flash_state = True
+        self._signal_alert_kind = str(kind or "signal").lower()
         self._signal_alert_deadline = time.monotonic() + max(0.5, duration_ms / 1000.0)
         if not self.signal_alert_timer.isActive():
             self.signal_alert_timer.start(150)
@@ -1035,6 +1142,19 @@ class AINarratorOverlay(GlassmorphicPanel):
         """Notify that market scanning has started."""
         self.set_status("scanning", f"{ticker_count} tickers")
         self.add_activity("[SAT]", f"Started scanning {ticker_count} markets", datetime.now().strftime("%H:%M:%S"))
+        self.update_confidence_meter("WATCHLIST", "SCAN", 0.0, status=f"{ticker_count} markets armed")
+
+    def notify_scan_tick(self, ticker: str):
+        """Show a live scanner heartbeat without flooding the activity feed."""
+        ticker_label = str(ticker or "UNKNOWN").upper()
+        self.set_status("scanning", ticker_label)
+        self.update_confidence_meter(ticker_label, "SCAN", 0.0, status="active screen scan")
+        now = time.monotonic()
+        throttle = float(getattr(config, "SCAN_ACTIVITY_THROTTLE_SECONDS", 8.0) or 8.0)
+        last = float(self._last_scan_activity.get(ticker_label, 0.0) or 0.0)
+        if now - last >= throttle:
+            self._last_scan_activity[ticker_label] = now
+            self.add_activity("[SCAN]", f"Scanning {ticker_label} live", datetime.now().strftime("%H:%M:%S"))
 
     def set_watchlist(self, tickers: list[str]):
         """Replace live watchlist badge rows in the mirror."""
@@ -1161,12 +1281,22 @@ class AINarratorOverlay(GlassmorphicPanel):
     def notify_signal_detected(self, ticker: str, signal_type: str, confidence: float):
         """Notify that a trading signal was detected.
         SIGNAL DECAY: Alert auto-clears after 2 seconds — no stale signals."""
-        icon = "[FIRE]" if confidence > 0.8 else "[WARN]"
-        self.trigger_signal_alert(duration_ms=2000)
+        confidence_pct = self._confidence_to_percent(confidence)
+        confidence_ratio = confidence_pct / 100.0
+        signal_upper = str(signal_type or "SIGNAL").upper()
+        icon = "[FIRE]" if confidence_ratio > 0.8 else "[WARN]"
+        if "SELL" in signal_upper:
+            alert_kind = "sell"
+        elif "BUY" in signal_upper:
+            alert_kind = "buy"
+        else:
+            alert_kind = "warning"
+        self.trigger_signal_alert(duration_ms=int(getattr(config, "ALERT_FLASH_DURATION_MS", 4500)), kind=alert_kind)
+        self.update_confidence_meter(ticker, signal_upper, confidence_pct, status="opportunity found")
         self.set_status("analyzing", f"{signal_type} on {ticker}")
         self.add_activity(
             icon, 
-            f"{signal_type} detected on {ticker} ({confidence:.0%} confidence)",
+            f"{signal_type} detected on {ticker} ({confidence_pct:.0f}% confidence)",
             datetime.now().strftime("%H:%M:%S")
         )
     
@@ -1194,6 +1324,8 @@ class AINarratorOverlay(GlassmorphicPanel):
     
     def notify_trade_executed(self, ticker: str, action: str, entry_price: float):
         """Notify that trade was successfully executed."""
+        alert_kind = "sell" if str(action).upper() == "SELL" else "buy"
+        self.trigger_signal_alert(duration_ms=5000, kind=alert_kind)
         self.set_status("success", f"{action} {ticker} @ ${entry_price:.2f}")
         self.add_activity(
             "[MONEY]",
@@ -1262,6 +1394,7 @@ class AINarratorOverlay(GlassmorphicPanel):
     
     def notify_error(self, error_message: str):
         """Notify about an error."""
+        self.trigger_signal_alert(duration_ms=2500, kind="error")
         self.set_status("error", error_message)
         self.add_activity(
             "[FAIL]",

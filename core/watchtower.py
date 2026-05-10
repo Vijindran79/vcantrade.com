@@ -18,7 +18,7 @@ import time
 import statistics
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -51,6 +51,8 @@ CRYPTO_WATCHLIST = [
     "ETH/USDT",
     "SOL/USDT",
 ]
+
+CRYPTO_YFINANCE_SUFFIX = "-USD"
 
 # Anomaly thresholds
 VOLUME_SPIKE_RATIO = 3.0  # 300% of baseline triggers alert
@@ -184,23 +186,55 @@ class WatchtowerScanner(QThread):
         cycle_start = time.time()
 
         # Scan Forex/Stocks via yfinance
-        self._scan_yfinance()
+        yfinance_watchlist, crypto_watchlist = self._active_watchlists()
+        self._scan_yfinance(yfinance_watchlist)
 
         # Scan Crypto via ccxt
-        self._scan_crypto()
+        self._scan_crypto(crypto_watchlist)
 
         elapsed = time.time() - cycle_start
         self.scan_status.emit(f"Watchtower: Scan complete ({elapsed:.1f}s)")
 
-    def _scan_yfinance(self):
+    def _active_watchlists(self) -> Tuple[Dict[str, str], List[str]]:
+        """Build Watchtower lists from the live dashboard/config watchlist.
+
+        When the operator has an active dashboard watchlist, Watchtower follows
+        that list instead of polling the broad legacy macro/futures basket.
+        """
+        configured = [
+            str(ticker or "").strip().upper()
+            for ticker in getattr(config, "CLOUD_TICKERS", [])
+            if str(ticker or "").strip()
+        ]
+        if not configured:
+            return dict(YFINANCE_WATCHLIST), list(CRYPTO_WATCHLIST)
+
+        yfinance_watchlist: Dict[str, str] = {}
+        crypto_watchlist: List[str] = []
+        for ticker in configured:
+            if ticker.endswith(CRYPTO_YFINANCE_SUFFIX):
+                base = ticker[: -len(CRYPTO_YFINANCE_SUFFIX)]
+                crypto_watchlist.append(f"{base}/USDT")
+                continue
+
+            mapped = getattr(config, "YFINANCE_SYMBOL_MAP", {}).get(ticker)
+            mapped = mapped or getattr(config, "SYMBOL_MAP", {}).get(ticker)
+            yfinance_watchlist[ticker] = mapped or ticker
+
+        return yfinance_watchlist, crypto_watchlist
+
+    def _scan_yfinance(self, watchlist: Dict[str, str]):
         """Scan Forex and Stock watchlist via yfinance"""
+        if not watchlist:
+            return
+
         try:
             import yfinance as yf
         except ImportError:
             logger.debug("yfinance not installed [DASH] skipping Forex/Stock scan")
             return
 
-        for asset_name, ticker_symbol in YFINANCE_WATCHLIST.items():
+        for asset_name, ticker_symbol in watchlist.items():
             if not self.running:
                 return
 
@@ -232,8 +266,11 @@ class WatchtowerScanner(QThread):
                 logger.debug(f"yfinance scan failed for {asset_name}: {e}")
                 continue
 
-    def _scan_crypto(self):
+    def _scan_crypto(self, watchlist: List[str]):
         """Scan crypto watchlist via ccxt"""
+        if not watchlist:
+            return
+
         try:
             import ccxt
         except ImportError:
@@ -251,7 +288,7 @@ class WatchtowerScanner(QThread):
             logger.error(f"ccxt exchange init failed: {e}")
             return
 
-        for symbol in CRYPTO_WATCHLIST:
+        for symbol in watchlist:
             if not self.running:
                 return
 

@@ -14,16 +14,13 @@ Architecture:
 - Watchtower runs independently, feeds anomalies to Swarm
 """
 
-# Fix Windows terminal encoding issues - runs before ANY other import so that
-# even early import-time prints/logs never hit cp1252 raw.
+# Fix Windows terminal encoding issues - runs before ANY other import
 import sys
 import os
 import io
 
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    # Re-wrap stdout/stderr with ASCII + ignore so emojis are silently dropped
-    # instead of raising UnicodeEncodeError on cp1252 / cp850 terminals.
     try:
         sys.stdout = io.TextIOWrapper(
             sys.stdout.buffer, encoding='ascii', errors='ignore', line_buffering=True
@@ -32,12 +29,7 @@ if sys.platform == 'win32':
             sys.stderr.buffer, encoding='ascii', errors='ignore', line_buffering=True
         )
     except AttributeError:
-        # Already wrapped (e.g. pytest capture) - nothing to do.
         pass
-
-# Patch asyncio to allow nested event loops (sync Playwright inside async QThreads)
-import nest_asyncio
-nest_asyncio.apply()
 
 import signal
 import socket
@@ -50,7 +42,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
-from playwright.async_api import async_playwright  # Async Playwright for browser automation
+from playwright.async_api import async_playwright  # Async Playwright only - no sync mix
 
 # Trade Alert Sound — Windows built-in, no extra dependencies
 try:
@@ -98,9 +90,11 @@ from core.executor import UnifiedTradeExecutor, ExchangeLimitExecutor, ExchangeI
 from core.risk import calculate_position_size, build_hard_stop_plan
 from core.journal import TradeJournalDB
 from core.risk_manager import RiskManager, PositionSizer
-from core.symbol_mapper import root_matches
+from core.symbol_mapper import normalize_yfinance_symbol, root_matches
 from core.vibe_adapter import VibeTradingAdapter
-from execution.rpa_executor import RPAExecutor, WealthChartsSpecialist
+from execution.rpa_executor import RPAExecutor
+from core.ghost_executor import GhostExecutor
+from core.hybrid_execution_gateway import HybridExecutionGateway
 from core.trade_executor import TradeExecutor
 from core.market_sessions import MarketSessionDetector
 from ui.dashboard import CommandCenter
@@ -161,10 +155,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _is_passive_visual_mode() -> bool:
+    """Return True when the bot must not capture browser/desktop screenshots."""
+    execution_mode = str(getattr(config, "EXECUTION_MODE", "")).upper().strip()
+    trading_surface = str(getattr(config, "TRADING_SURFACE", "")).upper().strip()
+    return execution_mode in {
+        "TV_DESKTOP",
+        "TRADOVATE",
+    } or trading_surface in {
+        "TV_DESKTOP",
+        "TRADOVATE",
+        "TRADINGVIEW_DESKTOP",
+        "TRADINGVIEW_TRADOVATE",
+    }
+
+
 def _play_trade_alert(action: str, success: bool):
     """Play a distinctive alert sound when a trade is executed.
     BUY = rising tone (optimistic). SELL = falling tone (urgent).
     Failed trade = low buzz."""
+    if not bool(getattr(config, "PLAY_ALERT_SOUNDS", False)):
+        return
     if not _ALERT_SOUND_AVAILABLE:
         return
     try:
@@ -182,6 +193,101 @@ def _play_trade_alert(action: str, success: bool):
             winsound.Beep(400, 500)
     except Exception:
         pass  # Sound may fail in sandboxed or remote environments
+
+
+_last_scan_tick_sound_at = 0.0
+_last_spoken_alert_at = 0.0
+
+
+def _play_ui_alert(kind: str, action: str = "", confidence: float = 0.0):
+    """Play non-blocking dashboard/narrator alert sounds."""
+    if not bool(getattr(config, "PLAY_ALERT_SOUNDS", False)):
+        return
+    if not _ALERT_SOUND_AVAILABLE:
+        return
+
+    kind = str(kind or "signal").lower()
+    if kind == "scan":
+        if not bool(getattr(config, "PLAY_SCAN_TICK_SOUNDS", False)):
+            return
+        global _last_scan_tick_sound_at
+        now = time.monotonic()
+        interval = float(getattr(config, "SCAN_TICK_SOUND_INTERVAL_SECONDS", 8.0) or 8.0)
+        if now - _last_scan_tick_sound_at < interval:
+            return
+        _last_scan_tick_sound_at = now
+
+    action = str(action or "").upper()
+    if kind == "gatekeeper":
+        pattern = [(420, 140), (360, 170), (300, 260)]
+    elif kind == "error":
+        pattern = [(320, 280), (320, 280)]
+    elif kind == "scan":
+        pattern = [(640, 55)]
+    elif action == "SELL":
+        pattern = [(1450, 110), (1050, 140), (720, 190)]
+    elif action == "BUY":
+        pattern = [(720, 110), (1050, 140), (1450, 190)]
+    else:
+        pattern = [(880, 110), (1180, 140), (980, 110)]
+
+    def _runner():
+        try:
+            for frequency, duration in pattern:
+                winsound.Beep(int(frequency), int(duration))
+                time.sleep(0.03)
+        except Exception:
+            pass
+
+    threading.Thread(target=_runner, daemon=True).start()
+
+
+def _speak_alert(message: str, min_interval_seconds: float = 3.0):
+    """Use Windows speech synthesis for important alerts when enabled."""
+    if not bool(getattr(config, "ENABLE_AUDIO_NARRATION", False)):
+        return
+    if sys.platform != "win32":
+        return
+
+    global _last_spoken_alert_at
+    now = time.monotonic()
+    if now - _last_spoken_alert_at < min_interval_seconds:
+        return
+    _last_spoken_alert_at = now
+
+    text = re.sub(r"[^A-Za-z0-9 .,:;%$\\-]", " ", str(message or "")).strip()
+    if not text:
+        return
+    text = text[:180]
+
+    def _runner():
+        try:
+            import subprocess
+
+            env = os.environ.copy()
+            env["VCAN_SPEAK_TEXT"] = text
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Add-Type -AssemblyName System.Speech; "
+                        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                        "$s.Rate = 1; "
+                        "$s.Speak($env:VCAN_SPEAK_TEXT)"
+                    ),
+                ],
+                env=env,
+                capture_output=True,
+                timeout=6,
+                creationflags=flags,
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_runner, daemon=True).start()
 logger.info("Logging system initialized")
 
 VISION_ANALYSIS_COOLDOWN_SECONDS = 3.0
@@ -319,6 +425,8 @@ class DataScoutListenerThread(QThread):
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
             self.loop.run_until_complete(self._run_server())
+        except asyncio.CancelledError:
+            logger.info("Data Scout Listener stopped")
         except Exception as e:
             logger.error(f"Data Scout Listener error: {e}")
         finally:
@@ -384,6 +492,7 @@ class CloudScannerThread(QThread):
     """
 
     signal_detected = pyqtSignal(object)  # Emits trade signal data
+    technical_signal_detected = pyqtSignal(object)  # Emits raw scanner opportunities before swarm dispatch
     scanner_error = pyqtSignal(str)  # Emits error message
     ticker_status = pyqtSignal(str, str)  # Emits per-ticker status updates
     heartbeat_pulse = pyqtSignal(bool)  # Emits True when heartbeat is healthy
@@ -403,6 +512,39 @@ class CloudScannerThread(QThread):
 
     def _emit_ticker_status(self, ticker: str, status: str):
         self.ticker_status.emit(ticker, status)
+
+    def _technical_signal_payload(self, signal) -> dict:
+        """Convert a scanner TechnicalSignal into a UI-friendly opportunity payload."""
+        signal_type = str(getattr(signal, "signal_type", "SIGNAL") or "SIGNAL").upper()
+        strength = float(getattr(signal, "strength", 0.0) or 0.0)
+        metadata = getattr(signal, "metadata", {}) or {}
+        if "BUY" in signal_type or "BULLISH" in signal_type:
+            action = "BUY"
+        elif "SELL" in signal_type or "BEARISH" in signal_type:
+            action = "SELL"
+        elif "OVERSOLD" in signal_type:
+            action = "BUY"
+        elif "OVERBOUGHT" in signal_type:
+            action = "SELL"
+        else:
+            action = str(
+                metadata.get("action_hint")
+                or metadata.get("liquidity_bias")
+                or metadata.get("direction")
+                or metadata.get("action")
+                or "SIGNAL"
+            ).upper()
+            if action == "UP":
+                action = "BUY"
+            elif action == "DOWN":
+                action = "SELL"
+        return {
+            "ticker": str(getattr(signal, "ticker", "UNKNOWN") or "UNKNOWN"),
+            "action": action,
+            "signal_type": signal_type,
+            "confidence": max(0.0, min(1.0, strength)),
+            "metadata": metadata,
+        }
 
     def run(self):
         logger.info("=" * 60)
@@ -459,6 +601,9 @@ class CloudScannerThread(QThread):
                 
                 # Scan all tickers
                 signals = await self.scanner.scan_all_tickers()
+
+                for signal in signals or []:
+                    self.technical_signal_detected.emit(self._technical_signal_payload(signal))
                 
                 # Update heartbeat timestamp on successful market sweep
                 self.last_scan_time = time.time()
@@ -762,6 +907,20 @@ class MultiAssetHunterThread(QThread):
         self.running = True
         self.index = 0
 
+    def _get_ready_browser_agent(self, symbol: str, require_page: bool = True):
+        """Return BrowserAgent only when the async startup path is ready."""
+        agent = getattr(self.app, "browser_agent", None)
+        status = str(getattr(self.app, "browser_agent_status", "unknown") or "unknown")
+        if agent is None:
+            logger.debug("[HUNTER] Browser agent unavailable for %s (status=%s)", symbol, status)
+            self.status_update.emit(symbol, "WAITING", f"Browser agent {status}; retrying next cycle")
+            return None
+        if require_page and getattr(agent, "page", None) is None:
+            logger.debug("[HUNTER] Browser page not ready for %s (status=%s)", symbol, status)
+            self.status_update.emit(symbol, "WAITING", f"Browser page not ready ({status})")
+            return None
+        return agent
+
     def run(self):
         from core.market_sessions import is_crypto_ticker
         from datetime import timezone
@@ -791,9 +950,15 @@ class MultiAssetHunterThread(QThread):
                 # Never auto-add MNQ/MES/MCL — the user controls the watchlist.
                 active_symbols = list(watchlist) if watchlist else []  # strict: no fallback, user must set watchlist
 
-            # Monday State Re-Sync (Anti-Ghosting)
+            # Monday State Re-Sync (Anti-Ghosting) - properly awaited via asyncio
             if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
-                self._perform_monday_resync()
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self._perform_monday_resync())
+                    loop.close()
+                except Exception as resync_err:
+                    logger.warning("[RESYNC] Monday resync failed (non-fatal): %s", resync_err)
 
             symbol = active_symbols[self.index % len(active_symbols)]
             self._cycle_symbol(symbol)
@@ -817,34 +982,48 @@ class MultiAssetHunterThread(QThread):
                 logger.debug("[HUNTER] Skipping weekend-closed symbol: %s", symbol)
                 return
 
+            agent = self._get_ready_browser_agent(symbol, require_page=True)
+            if agent is None:
+                return
+
             # STURDY BRIDGE: Skip this cycle if browser is busy (user interacting / chart loading)
-            if hasattr(self.app, 'browser_agent') and self.app.browser_agent and self.app.browser_agent.is_browser_busy():
+            if hasattr(agent, "is_browser_busy") and agent.is_browser_busy():
                 logger.debug("[BRIDGE] Browser busy — skipping %s cycle (user may be interacting)", symbol)
                 self.status_update.emit(symbol, "WAITING", "Browser busy — will retry next cycle")
                 return
 
-            self.status_update.emit(symbol, "NAVIGATING", f"Switching to {symbol}...")
+            self.status_update.emit(symbol, "OBSERVING", f"Monitoring active tab for {symbol}")
 
-            # 1. Navigate browser to symbol
+            # 1. Passive observer sync. BrowserAgent never navigates or switches symbols.
             loop = self.app._browser_loop if hasattr(self.app, "_browser_loop") else None
             if not loop or loop.is_closed():
                 self.status_update.emit(symbol, "ERROR", "Browser loop not available")
                 return
 
+            navigate_to_symbol = getattr(agent, "navigate_to_symbol", None)
+            if not callable(navigate_to_symbol):
+                logger.warning("[HUNTER] Browser agent has no navigate_to_symbol method for %s", symbol)
+                self.status_update.emit(symbol, "WAITING", "Browser navigation unavailable")
+                return
+
             future = asyncio.run_coroutine_threadsafe(
-                self.app.browser_agent.navigate_to_symbol(symbol),
+                navigate_to_symbol(symbol),
                 loop,
             )
             nav_ok = future.result(timeout=35)
             if not nav_ok:
                 self.status_update.emit(symbol, "ERROR", "Navigation failed")
                 # Trigger self-healing: record error and attempt browser restart
-                self.app.browser_agent.record_error("Navigation failed for " + symbol)
-                if self.app.browser_agent.error_count >= self.app.browser_agent.error_threshold:
+                if hasattr(agent, "record_error"):
+                    agent.record_error("Navigation failed for " + symbol)
+                if getattr(agent, "error_count", 0) >= getattr(agent, "error_threshold", 999999):
                     logger.warning("[WRENCH] Navigation failures reached threshold — triggering browser self-heal")
                     try:
+                        self_heal_restart = getattr(agent, "self_heal_restart", None)
+                        if not callable(self_heal_restart):
+                            return
                         heal_future = asyncio.run_coroutine_threadsafe(
-                            self.app.browser_agent.self_heal_restart(), loop,
+                            self_heal_restart(), loop,
                         )
                         heal_future.result(timeout=30)
                         logger.info("[WRENCH] Browser self-heal completed after navigation failure")
@@ -859,23 +1038,51 @@ class MultiAssetHunterThread(QThread):
                 except Exception:
                     pass
 
+            # Force exit before screenshot triggers in passive modes.
+            browser_passive = False
+            if getattr(self.app, "browser_agent", None):
+                browser_passive = bool(
+                    getattr(
+                        self.app.browser_agent,
+                        "_is_passive_observer_mode",
+                        lambda: False,
+                    )()
+                )
+            passive_visual = _is_passive_visual_mode() or browser_passive
+            if passive_visual:
+                logger.debug("[VISION] Skipping visual screenshot in passive mode.")
+                return
+
             self.status_update.emit(symbol, "SCREENSHOT", "Capturing chart...")
 
             # 2. Take screenshot
+            agent = self._get_ready_browser_agent(symbol, require_page=True)
+            if agent is None:
+                return
+            take_screenshot = getattr(agent, "take_screenshot", None)
+            if not callable(take_screenshot):
+                logger.warning("[HUNTER] Browser agent has no take_screenshot method for %s", symbol)
+                self.status_update.emit(symbol, "WAITING", "Screenshot unavailable")
+                return
+
             future = asyncio.run_coroutine_threadsafe(
-                self.app.browser_agent.take_screenshot(),
+                take_screenshot(),
                 loop,
             )
             screenshot_b64 = future.result(timeout=15)
             if not screenshot_b64:
                 self.status_update.emit(symbol, "ERROR", "Screenshot failed")
                 # Trigger self-healing for screenshot failures
-                self.app.browser_agent.record_error("Screenshot failed for " + symbol)
-                if self.app.browser_agent.error_count >= self.app.browser_agent.error_threshold:
+                if hasattr(agent, "record_error"):
+                    agent.record_error("Screenshot failed for " + symbol)
+                if getattr(agent, "error_count", 0) >= getattr(agent, "error_threshold", 999999):
                     logger.warning("[WRENCH] Screenshot failures reached threshold — triggering browser self-heal")
                     try:
+                        self_heal_restart = getattr(agent, "self_heal_restart", None)
+                        if not callable(self_heal_restart):
+                            return
                         heal_future = asyncio.run_coroutine_threadsafe(
-                            self.app.browser_agent.self_heal_restart(), loop,
+                            self_heal_restart(), loop,
                         )
                         heal_future.result(timeout=30)
                         logger.info("[WRENCH] Browser self-heal completed after screenshot failure")
@@ -1083,7 +1290,7 @@ class AnalysisWorker(QThread):
                 try:
                     # Capture chart screenshot if vision is enabled
                     chart_base64 = None
-                    if self.vision:
+                    if self.vision and not _is_passive_visual_mode():
                         try:
                             screenshot = self.vision.capture_active_chart(asset=market_data.asset)
                             if screenshot:
@@ -1098,6 +1305,8 @@ class AnalysisWorker(QThread):
                         except Exception as vision_error:
                             logger.error(f"Vision capture failed for {market_data.asset}: {vision_error}")
                             chart_base64 = None  # Fallback to text-only
+                    elif self.vision:
+                        logger.debug("[VISION] Skipping visual screenshot in passive mode.")
 
                     # Run swarm debate (with or without vision)
                     try:
@@ -1214,6 +1423,10 @@ class VcaniTradeApp:
         self.executor = None  # Will be initialized when browser agent is ready
         self.risk_manager = RiskManager(risk_per_trade_pct=1.0)
         self.trade_executor = TradeExecutor(exchange_client=None)
+        # Side-by-Side Execution Strategy: Raw socket client for port 5555.
+        # Initialize before HybridExecutionGateway so all execution paths share it.
+        self.execution_socket_client = ExecutionSocketClient()
+        self.side_by_side_enabled = True  # Set to False to disable socket commands
         exchange_provider = os.getenv("EXCHANGE_PROVIDER", "binance")
         exchange_api_key = os.getenv("EXCHANGE_API_KEY") or os.getenv("BINANCE_API_KEY") or os.getenv("BYBIT_API_KEY")
         exchange_api_secret = os.getenv("EXCHANGE_API_SECRET") or os.getenv("BINANCE_API_SECRET") or os.getenv("BYBIT_API_SECRET")
@@ -1225,14 +1438,17 @@ class VcaniTradeApp:
         # RPA Hand - clicks TradingView paper trading UI directly (no API keys needed)
         # on_blind_error fires when TradingView is minimized or covered by another app
         self.rpa_hand = RPAExecutor(on_blind_error=self._on_rpa_blind)
-        # WealthChartsSpecialist — dedicated ID-based execution agent
-        self.wc_specialist = WealthChartsSpecialist()
-        self.wc_specialist.connect()
-        self.wc_specialist.start_always_ready()
+        self._ghost_executor = GhostExecutor()
         # MT5 Executor - routes trades to MetaTrader 5 when EXECUTION_MODE == "MT5"
         self.mt5_executor = None
         if self._is_mt5_mode():
             self.mt5_executor = self._get_mt5_executor()
+        self._ghost_executor.set_mt5_executor(self.mt5_executor)
+        self.hybrid_gateway = HybridExecutionGateway(
+            socket_client=self.execution_socket_client,
+            mt5_executor=self.mt5_executor,
+            ghost_executor=self._ghost_executor,
+        )
         self.sql_journal = TradeJournalDB(db_path="trades.db")
         self.vibe_adapter = VibeTradingAdapter()
         self._vibe_strategy_worker = None
@@ -1243,6 +1459,8 @@ class VcaniTradeApp:
         self.analysis_mode_status = "READY"
         self.gatekeeper_block_stats = Counter()
         self._gatekeeper_summary_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        self._last_audio_alerts = {}
+        self._last_gatekeeper_alert_at = 0.0
 
         # Load persistent trading settings before deriving any session state from them.
         self.settings = settings_manager
@@ -1334,13 +1552,6 @@ class VcaniTradeApp:
         self.hunter = MultiAssetHunterThread(self) if config.MULTI_ASSET_ENABLED else None  # Vision-based multi-asset hunter
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
 
-        # Side-by-Side Execution Strategy: Raw socket client for port 5555
-        # Use EXECUTION_HOST from config (should be 192.168.0.39 for desktop)
-        self.execution_socket_client = ExecutionSocketClient()
-        logger.info("[INIT] ExecutionSocketClient initialized: host=%s, port=%s", 
-                     self.execution_socket_client.host, self.execution_socket_client.port)
-        self.side_by_side_enabled = True  # Set to False to disable socket commands
-
         # State
         self.current_mode = "TEACHER" if config.TEACHER_MODE or config.DRY_RUN else "AUTONOMOUS"
         self.analysis_mode = False
@@ -1423,6 +1634,15 @@ class VcaniTradeApp:
         self._log_ui(
             f'<span style="color:#F85149;font-weight:bold;font-size:14px">[STOP] {message}</span>'
         )
+        now = time.monotonic()
+        if now - getattr(self, "_last_gatekeeper_alert_at", 0.0) >= 2.0:
+            self._last_gatekeeper_alert_at = now
+            _play_ui_alert("gatekeeper")
+            _speak_alert(f"Trade aborted. {normalized_category}.")
+        if hasattr(self, "ai_narrator") and self.ai_narrator:
+            self._run_on_ui_thread(
+                lambda: self.ai_narrator.notify_error(f"{normalized_category}: {reason_text[:120]}")
+            )
 
     def _emit_gatekeeper_summary_if_due(self):
         current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -1456,7 +1676,21 @@ class VcaniTradeApp:
         self._gatekeeper_summary_hour = current_hour
 
     def _canonical_market_ticker(self, ticker: str) -> str:
-        return self.settings.normalize_ticker(ticker)
+        raw = str(ticker or "").strip()
+        yf_map = getattr(config, "YFINANCE_SYMBOL_MAP", {})
+        normalized = self.settings.normalize_ticker(raw)
+        compact = re.sub(r"[^A-Z0-9]", "", raw.upper())
+        for candidate in (raw, raw.upper(), raw.replace("-", "").upper(), compact, normalized, normalized.upper()):
+            if candidate in yf_map:
+                return yf_map[candidate]
+        crypto_match = re.fullmatch(r"(BTC|ETH|SOL|XRP|DOGE|ADA|BNB|LTC|BCH|DOT|AVAX|LINK)(?:USD|USDT)?", compact)
+        if crypto_match:
+            return f"{crypto_match.group(1)}-USD"
+        if hasattr(config, "SYMBOL_MAP") and raw in config.SYMBOL_MAP:
+            return normalize_yfinance_symbol(config.SYMBOL_MAP[raw])
+        if hasattr(config, "SYMBOL_MAP") and normalized in config.SYMBOL_MAP:
+            return normalize_yfinance_symbol(config.SYMBOL_MAP[normalized])
+        return normalize_yfinance_symbol(normalized or raw)
 
     def _fetch_mt5_price_for_m6(self, m6_ticker: str) -> float | None:
         """Fetch live midpoint price from MT5 for WealthCharts M6 contract codes.
@@ -1703,8 +1937,8 @@ class VcaniTradeApp:
             self.browser_agent_status = "starting"
             self.browser_agent = BrowserAgent(headless=True)
             await self.browser_agent.start()
-            # Auto-navigate to WealthCharts chart
-            await self.browser_agent.navigate_to_wealthcharts()
+            if self.browser_agent and self.browser_agent.page:
+                self._ghost_executor.set_page(self.browser_agent.page)
             self.browser_agent_status = "ready"
         except Exception as e:
             self.browser_agent_status = "error"
@@ -1789,6 +2023,7 @@ class VcaniTradeApp:
 
         # Cloud Scanner -> UI + Narrator
         self.cloud_scanner.signal_detected.connect(self._on_cloud_signal)
+        self.cloud_scanner.technical_signal_detected.connect(self._on_technical_signal_detected)
         self.cloud_scanner.scanner_error.connect(self._on_scanner_error)
         self.cloud_scanner.ticker_status.connect(self._on_ticker_status_update)
 
@@ -1909,10 +2144,28 @@ class VcaniTradeApp:
         """Update dashboard and mirror with per-ticker scanner state."""
         self.cmd.update_watchlist_status(ticker, status)
         self.ai_narrator.update_ticker_status(ticker, status)
+        if status == "scanning" and bool(getattr(config, "REALTIME_SCAN_FEED", False)):
+            if hasattr(self.ai_narrator, "notify_scan_tick"):
+                self.ai_narrator.notify_scan_tick(ticker)
+            _play_ui_alert("scan")
         if status.startswith("brain_reasoning:"):
             self.ai_narrator.notify_brain_thinking(ticker, status.split(":", 1)[1])
         elif status.startswith("brain_fallback:"):
             self._sync_brain_runtime_ui(status.split(":", 1)[1], True)
+
+    def _announce_signal_alert(self, ticker: str, action: str, confidence, source: str = "signal"):
+        """Debounced audible announcement for actionable opportunities."""
+        ticker = str(ticker or "UNKNOWN").upper()
+        action = str(action or "SIGNAL").upper()
+        key = f"{source}:{ticker}:{action}"
+        now = time.monotonic()
+        last = float(getattr(self, "_last_audio_alerts", {}).get(key, 0.0) or 0.0)
+        if now - last < 3.0:
+            return
+        self._last_audio_alerts[key] = now
+        confidence_score = self._confidence_to_score(confidence)
+        _play_ui_alert("signal", action, confidence_score)
+        _speak_alert(f"{action} signal on {ticker}. Confidence {confidence_score:.0f} percent.")
 
     def _toggle_mirror_visibility(self):
         """Hide/show the mirror instantly for single-screen research."""
@@ -1934,18 +2187,12 @@ class VcaniTradeApp:
             return zone_type
         return str(signal_data.get("liquidity_label") or signal_data.get("brain_reasoning") or "--")
 
-    def _sync_signal_to_wc_price(self, asset: str) -> float | None:
-        """VISUAL PRICE LOCK: Read live price from WealthCharts DOM to sync signals.
-        Ensures the Teacher Broadcast matches the chart exactly."""
-        specialist = getattr(self, 'wc_specialist', None)
-        if not specialist or not specialist.is_connected():
-            return None
-        try:
-            price = specialist.get_wc_live_price()
-            if price and price > 0:
-                return price
-        except Exception as e:
-            logger.debug("[PRICE-LOCK] Could not read WealthCharts DOM price: %s", e)
+    def _sync_signal_to_visible_chart_price(self, asset: str) -> float | None:
+        """Optional visible-chart price sync.
+
+        TradingView execution no longer depends on legacy WealthCharts DOM reads.
+        Scanner/MT5 data remains the source of truth for signal prices.
+        """
         return None
 
     def _broadcast_trade_levels(self, signal_data: dict):
@@ -1960,6 +2207,13 @@ class VcaniTradeApp:
                 take_profit=signal_data.get("take_profit"),
                 liquidity_label=self._format_liquidity_label(signal_data),
             )
+            if hasattr(self.ai_narrator, "update_confidence_meter"):
+                self.ai_narrator.update_confidence_meter(
+                    ticker,
+                    signal_data.get("action", "SIGNAL"),
+                    signal_data.get("confidence", self.latest_confidence_score),
+                    status="LEVELS LIVE",
+                )
             # SIGNAL DECAY: Clear stale levels after 2 seconds
             from PyQt6.QtCore import QTimer
             old_timer = getattr(self, '_signal_decay_timer', None)
@@ -2819,6 +3073,7 @@ class VcaniTradeApp:
         ]
         votes = {}
         timeframe_rsi = {}
+        market_ticker = self._canonical_market_ticker(ticker)
 
         transcript = dict((signal_data or {}).get("transcript") or {})
         technical_sniper = dict(transcript.get("technical_sniper") or {})
@@ -2843,12 +3098,12 @@ class VcaniTradeApp:
         for label, period, interval in tf_map:
             try:
                 if interval == "3m":
-                    one_min_df = yf.Ticker(ticker).history(period=period, interval="1m")
+                    one_min_df = yf.Ticker(market_ticker).history(period=period, interval="1m")
                     df = _resample_to_3m(one_min_df)
                 else:
-                    df = yf.Ticker(ticker).history(period=period, interval=interval)
+                    df = yf.Ticker(market_ticker).history(period=period, interval=interval)
             except Exception as e:
-                logger.warning("MTF %s fetch failed for %s: %s", label, ticker, e)
+                logger.warning("MTF %s fetch failed for %s via %s: %s", label, ticker, market_ticker, e)
                 votes[label] = "WAIT"
                 continue
 
@@ -2895,9 +3150,11 @@ class VcaniTradeApp:
         votes["5m_rsi"] = round(five_min_rsi, 2) if isinstance(five_min_rsi, (int, float)) else None
         votes["mtf_bias"] = mtf_bias
 
-        # AGGRESSIVE HUNTER: High-confidence signals strike on 5m alone
+        # AGGRESSIVE HUNTER: High-confidence BUY signals can strike on 5m alone.
+        # SELL signals require more confirmation to avoid shorting BTC/ETH
+        # continuation moves after equal-high liquidity tags.
         hunter_threshold = getattr(config, "AGGRESSIVE_HUNTER_CONFIDENCE_PCT", 75.0)
-        if confidence >= hunter_threshold and votes.get("5m") == action:
+        if confidence >= hunter_threshold and votes.get("5m") == action and action == "BUY":
             votes["override"] = "AGGRESSIVE_HUNTER"
             logger.warning(
                 "[FIRE] AGGRESSIVE HUNTER: %s %s confidence=%.1f%% >= %.1f%% — striking on 5m alone | votes=%s",
@@ -2934,7 +3191,13 @@ class VcaniTradeApp:
         is_liquidity = "LIQUIDITY" in signal_type
         if not passed and is_liquidity:
             five_m_opposite = votes.get("5m") == ("SELL" if action == "BUY" else "BUY")
-            if not five_m_opposite:
+            if action == "SELL":
+                logger.info(
+                    "[TARGET] SELL liquidity override disabled for %s; requiring 2/3 MTF confirmation | votes=%s",
+                    ticker,
+                    votes,
+                )
+            elif not five_m_opposite:
                 votes["override"] = "LIQUIDITY_RELAXED_MTF"
                 logger.warning(
                     "[TARGET] LIQUIDITY OVERRIDE: %s %s allowed against MTF because liquidity sweep/rejection signal detected and 5m is not opposing | votes=%s",
@@ -3206,29 +3469,29 @@ class VcaniTradeApp:
             self.test_status_text = f"Error: {e}"
 
     def _on_force_test_trade(self):
-        """Handle manual force-hand request - sends test command to Rithmic Desktop via port 5555."""
+        """Handle manual force-hand request through the local execution socket."""
         import threading
 
         ticker_hint = self.current_watchlist[0] if self.current_watchlist else self.ticker_selector
-        self.cmd.log(f"[BOLT] FORCE HAND TEST: Sending BUY_REAL to Desktop for {ticker_hint}")
-        self.ai_narrator.add_activity("[MOUSE]", f"Force hand test: sending to Rithmic Desktop for {ticker_hint}")
+        self.cmd.log(f"[BOLT] FORCE HAND TEST: Sending BUY_REAL to local execution socket for {ticker_hint}")
+        self.ai_narrator.add_activity("[MOUSE]", f"Force hand test: sending to local execution socket for {ticker_hint}")
 
         def run_force_test_in_thread():
             try:
-                # Send test command to Desktop via socket (port 5555)
+                # Send test command to the local execution socket (port 5555).
                 success = self.execution_socket_client.send_command("BUY_REAL")
                 if success:
-                    self.cmd.log(f'<span style="color:#3FB950;font-weight:bold">[MOUSE] FORCE HAND TEST PASSED</span>: BUY_REAL sent to Rithmic Desktop for {ticker_hint}')
-                    self.ai_narrator.add_activity("[OK]", f"Force hand test passed - Rithmic Desktop received command for {ticker_hint}")
+                    self.cmd.log(f'<span style="color:#3FB950;font-weight:bold">[MOUSE] FORCE HAND TEST PASSED</span>: BUY_REAL sent to local execution socket for {ticker_hint}')
+                    self.ai_narrator.add_activity("[OK]", f"Force hand test passed - local execution socket received command for {ticker_hint}")
                 else:
-                    self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE HAND TEST FAILED</span>: Could not reach Desktop on port 5555 for {ticker_hint}')
-                    self.ai_narrator.add_activity("[WARN]", f"Force hand test failed - Desktop not responding for {ticker_hint}")
+                    self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE HAND TEST FAILED</span>: Could not reach local execution socket on port 5555 for {ticker_hint}')
+                    self.ai_narrator.add_activity("[WARN]", f"Force hand test failed - local execution socket not responding for {ticker_hint}")
             except Exception as e:
                 self.cmd.log(f'<span style="color:#F85149">[FAIL] FORCE HAND TEST ERROR</span>: {e}')
 
         hand_test_thread = threading.Thread(target=run_force_test_in_thread, daemon=True)
         hand_test_thread.start()
-        self.cmd.log("[BOLT] Force hand test dispatched to Rithmic Desktop (port 5555)")
+        self.cmd.log("[BOLT] Force hand test dispatched to local execution socket (port 5555)")
 
     def _on_rpa_blind(self, reason: Optional[str] = None):
         """
@@ -3603,12 +3866,23 @@ class VcaniTradeApp:
 
     def _update_institutional_governor_ui(self):
         """STAGE 3: Update Institutional Governor panel in dashboard."""
-        # Trigger live news scan if due
+        # Trigger live news scan if due — dispatch to browser event loop
         if self.sentiment_pulse.should_check():
             try:
                 import asyncio
-                loop = asyncio.get_event_loop()
-                loop.run_until_complete(self.sentiment_pulse.check_news())
+                browser_loop = getattr(self, '_browser_loop', None)
+                if browser_loop and not browser_loop.is_closed():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.sentiment_pulse.check_news(), browser_loop
+                    )
+                    future.result(timeout=10)
+                else:
+                    # Fallback: run in a dedicated event loop
+                    loop = asyncio.new_event_loop()
+                    try:
+                        loop.run_until_complete(self.sentiment_pulse.check_news())
+                    finally:
+                        loop.close()
             except Exception as e:
                 logger.warning("[SAT] Sentiment news check failed: %s", e)
         
@@ -4136,13 +4410,52 @@ class VcaniTradeApp:
         # Update AI Narrator
         self.ai_narrator.notify_signal_detected(
             signal_data["ticker"],
-            signal_data.get("signal_type", "Signal"),
+            signal_data.get("action", signal_data.get("signal_type", "Signal")),
             signal_data["confidence"]
+        )
+        self._announce_signal_alert(
+            signal_data["ticker"],
+            signal_data.get("action", "SIGNAL"),
+            signal_data.get("confidence", 0.0),
+            source="cloud",
         )
         self.cmd.log(
             f'<span style="color:#8B949E">[MAIL] CLOUD ROUTE</span>: '
             f'{signal_data["action"]} {signal_data["ticker"]} delivered to local listener'
         )
+
+    def _on_technical_signal_detected(self, signal_data: dict):
+        """Light up the UI as soon as the scanner finds an opportunity."""
+        ticker = str(signal_data.get("ticker", "UNKNOWN") or "UNKNOWN").upper()
+        action = str(signal_data.get("action", "SIGNAL") or "SIGNAL").upper()
+        signal_type = str(signal_data.get("signal_type", "SIGNAL") or "SIGNAL").upper()
+        confidence = float(signal_data.get("confidence", 0.0) or 0.0)
+        confidence_score = self._confidence_to_score(confidence)
+
+        logger.info(
+            "[UI] Technical opportunity: %s %s | %s | %.0f%%",
+            action,
+            ticker,
+            signal_type,
+            confidence_score,
+        )
+        label = action if action in {"BUY", "SELL"} else "SIGNAL"
+        color = "#3FB950" if label == "BUY" else "#F85149" if label == "SELL" else "#F2CC60"
+        self.cmd.log(
+            f'<span style="color:{color};font-weight:bold">[RADAR] {label}</span>: '
+            f'{signal_type} on {ticker} | {label} bias | confidence {confidence_score:.0f}%'
+        )
+        self.cmd.update_watchlist_status(
+            ticker,
+            "awaiting_strike" if action in {"BUY", "SELL"} else "analyzing_liquidity",
+            confidence=confidence,
+            last_signal=action if action in {"BUY", "SELL"} else signal_type,
+        )
+        if hasattr(self.ai_narrator, "notify_signal_detected"):
+            self.ai_narrator.notify_signal_detected(ticker, action, confidence)
+        elif hasattr(self.ai_narrator, "update_confidence_meter"):
+            self.ai_narrator.update_confidence_meter(ticker, action, confidence, status=signal_type)
+        self._announce_signal_alert(ticker, action, confidence_score, source="technical")
 
     def _on_signal_approved(self, signal_data: dict):
         """Handle user approval of trade signal."""
@@ -4307,6 +4620,27 @@ class VcaniTradeApp:
             f'<span style="color:#8B949E">[MAGNIFY] DEBUG</span>: '
             f'Mode={self.current_mode}, Action={action}, Confidence={confidence}, EntryPrice={entry_price}'
         )
+        confidence_display = confidence_score / 100.0
+        self.cmd.update_watchlist_status(
+            ticker,
+            "awaiting_strike" if action in {"BUY", "SELL"} else "monitoring",
+            confidence=confidence_display,
+            last_signal=action,
+        )
+        if hasattr(self.ai_narrator, "update_confidence_meter"):
+            self.ai_narrator.update_confidence_meter(
+                ticker,
+                action,
+                confidence_display,
+                status="SIGNAL RECEIVED",
+            )
+        if action in {"BUY", "SELL"}:
+            self.ai_narrator.notify_signal_detected(
+                ticker,
+                action,
+                confidence_display,
+            )
+            self._announce_signal_alert(ticker, action, confidence_score, source="listener")
 
         # Update trade ledger
         self._add_to_trade_ledger(signal_data)
@@ -4441,8 +4775,8 @@ class VcaniTradeApp:
         Send Side-by-Side Execution command via raw socket to port 5555.
         
         Confidence Ladder:
-        - 50% - 84%: Send _SIM actions (for NinjaTrader)
-        - 85%+: Send _REAL actions (for Rithmic)
+        - 50% - 84%: Send _SIM actions
+        - 85%+: Send _REAL actions
         
         Args:
             action: Base action ("BUY" or "SELL" or "FLATTEN")
@@ -4827,19 +5161,8 @@ class VcaniTradeApp:
             )
             return
 
-        # -- RPA Hand: move mouse and click on WealthCharts Apex account --
-
-        # FUTURES-ONLY WHITELIST: Block TSLA, AAPL, SPX, etc.
-        if not is_whitelisted_futures(ticker):
-            logger.warning("[WHITELIST] BLOCKED: %s is not in futures whitelist %s", ticker, config.FUTURES_WHITELIST)
-            self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WHITELIST] BLOCKED</span>: {ticker} is not a whitelisted futures contract')
-            self._on_ticker_status_update(ticker, "trade_rejected")
-            return
-        if is_blocked_stock(ticker):
-            logger.warning("[WHITELIST] BLOCKED STOCK: %s - only futures allowed on Apex account", ticker)
-            self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WHITELIST] BLOCKED STOCK</span>: {ticker} - trade not allowed')
-            self._on_ticker_status_update(ticker, "trade_rejected")
-            return
+        # -- TradingView UI path: execute through GhostExecutor/RPA.
+        # Legacy broker-specific futures whitelists do not apply here.
 
         mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data, confidence=confidence_score)
         if not mtf_passed and not force_execute:
@@ -4978,54 +5301,52 @@ class VcaniTradeApp:
             self.ai_narrator.notify_error(f"RPA Hand paused: {ticker}")
             return
 
-        # Side-by-Side Execution: Send command to port 5555 before RPA execution
-        socket_sent = False
-        if self.side_by_side_enabled:
-            socket_sent = self._send_side_by_side_command(action, confidence_score)
-            if socket_sent:
-                self.cmd.log(
-                    f'<span style="color:#58A6FF;font-weight:bold">[SOCKET] SIDE-BY-SIDE</span>: '
-                    f'Command sent to port 5555 for {action} {ticker}'
-                )
-            else:
-                self.cmd.log(
-                    f'<span style="color:#D29922;font-weight:bold">[WARN] SIDE-BY-SIDE</span>: '
-                    f'Failed to send command to port 5555 for {action} {ticker}'
-                )
-
-        # PRIMARY: Socket command sent successfully - skip RPA/MT5 execution
-        if socket_sent:
-            self.cmd.log(
-                f'<span style="color:#3FB950;font-weight:bold">[OK] SIDE-BY-SIDE EXECUTION</span>: '
-                f'{action} {ticker} executed via socket command'
-            )
-            # Still save to journal for tracking
-            journal_id = self.sql_journal.save_trade(
-                coin=ticker,
-                entry=entry_price,
-                stop_loss=sl_price,
-                ai_confidence=confidence_score,
-                ai_reasoning=signal_data.get("reason", "Side-by-Side Execution"),
-                brain_used=brain_used,
-                outcome="OPEN",
-            )
-            return
-
-        # BACKUP: RPA execution if socket command failed
-        self.cmd.log(
-            f'<span style="color:#D29922">[BACKUP] Falling back to RPA execution for {action} {ticker}</span>'
-        )
-        # PREDATOR-CLASS: Silent Error Alerting with try/except wrapper
+        # HYBRID GATEWAY: broker WebSocket -> local socket -> MT5 -> TradingView JS.
         rpa_success = False
+        execution_route = "legacy_rpa"
         try:
-            # SPECIALIST PRIORITY: Use WealthChartsSpecialist for futures symbols
-            specialist = getattr(self, 'wc_specialist', None)
-            if specialist and specialist.is_connected() and ticker.upper() in WealthChartsSpecialist.ALLOWED_SYMBOLS:
-                logger.info("[SPECIALIST] Routing %s %s through WealthChartsSpecialist", action, ticker)
-                self.cmd.log(f'<span style="color:#58A6FF">[SPECIALIST] ID-based execution for {action} {ticker}</span>')
-                rpa_success = specialist.execute(ticker, action)
-            else:
+            if bool(getattr(config, "LOW_LATENCY_EXECUTION_ENABLED", True)):
+                ghost = getattr(self, "_ghost_executor", None)
+                if ghost and self.browser_agent and self.browser_agent.page:
+                    ghost.set_page(self.browser_agent.page)
+                if ghost:
+                    ghost.set_mt5_executor(self.mt5_executor)
+                gateway = getattr(self, "hybrid_gateway", None)
+                if gateway:
+                    gateway.mt5_executor = self.mt5_executor
+                    gateway.ghost_executor = ghost
+                    gateway_loop = asyncio.new_event_loop()
+                    try:
+                        gateway_result = gateway_loop.run_until_complete(
+                            gateway.execute(
+                                symbol=ticker,
+                                action=action,
+                                confidence=confidence_score,
+                                quantity=float(quantity or config.MT5_VOLUME),
+                                browser_loop=getattr(self, "_browser_loop", None),
+                            )
+                        )
+                    finally:
+                        gateway_loop.close()
+
+                    execution_route = gateway_result.route
+                    rpa_success = gateway_result.success
+                    self.cmd.log(
+                        f'<span style="color:{"#3FB950" if rpa_success else "#D29922"};font-weight:bold">'
+                        f'[HYBRID]</span>: {execution_route} '
+                        f'{"filled" if rpa_success else "failed"} in {gateway_result.latency_ms:.1f}ms'
+                    )
+                    if not rpa_success and gateway_result.message:
+                        logger.warning("[HYBRID] %s", gateway_result.message)
+
+            # FINAL FALLBACK: legacy local RPA only.
+            if not rpa_success:
+                self.cmd.log(
+                    f'<span style="color:#D29922">[BACKUP]</span>: '
+                    f'Falling back to legacy RPA execution for {action} {ticker}'
+                )
                 rpa_success = self.rpa_hand.execute_trade(rpa_trade)
+                execution_route = "legacy_rpa"
         except Exception as exec_err:
             # SILENT ERROR ALERT: Voice + Pop-up notification
             error_msg = f"RPA Execution FAILED for {action} {ticker}: {exec_err}"
@@ -5063,13 +5384,16 @@ class VcaniTradeApp:
                 f'<span style="color:#F85149;font-weight:bold">[SIREN] EXECUTION ALERT</span>: {error_msg}'
             )
         
-        order_status = "rpa_executed" if rpa_success else "rpa_failed"
-        logger.info("EXEC_CLOUD: rpa result for %s %s -> %s", action, ticker, order_status)
+        order_status = "executed" if rpa_success else "execution_failed"
+        logger.info(
+            "EXEC_CLOUD: execution result for %s %s via %s -> %s",
+            action, ticker, execution_route, order_status
+        )
         # ALERT SOUND: Play distinctive tone on every trade execution
         _play_trade_alert(action, rpa_success)
         self.cmd.log(
             f'<span style="color:{"#3FB950" if rpa_success else "#F85149"};font-weight:bold">'
-            f'{"[MOUSE] RPA HAND CLICKED" if rpa_success else "[WARN] RPA HAND FAILED"}</span>: '
+            f'{"[OK] EXECUTED" if rpa_success else "[WARN] EXECUTION FAILED"}</span>: '
             f'{action} {ticker} @ ${entry_price:.2f}'
         )
         # Mirror the chart: ensure TradingView is on the right ticker
@@ -5284,6 +5608,11 @@ class VcaniTradeApp:
             f'<span style="color:#F85149;font-weight:bold">WATCHTOWER</span>: '
             f"[{alert.severity}] {alert.alert_type} on {alert.asset} - {alert.reason}"
         )
+        if hasattr(self.ai_narrator, "trigger_signal_alert"):
+            self.ai_narrator.trigger_signal_alert(kind="warning")
+        self.ai_narrator.add_activity("[WATCH]", f"{alert.alert_type} on {alert.asset}: {alert.reason[:90]}")
+        _play_ui_alert("signal", "WATCH")
+        _speak_alert(f"Watchtower alert on {alert.asset}.")
 
     def _on_analysis_complete(self, analysis, transcript: DebateTranscript = None):
         """Handle Swarm Consensus result - all UI updates on main thread."""
@@ -5296,16 +5625,15 @@ class VcaniTradeApp:
             return
             
         # Build overlay signal
-        # VISUAL PRICE LOCK: Sync signal to WealthCharts DOM price
-        wc_price = self._sync_signal_to_wc_price(analysis.asset)
-        if wc_price and wc_price > 0:
-            logger.info("[PRICE-LOCK] WealthCharts live price for %s: %.2f", analysis.asset, wc_price)
+        chart_price = self._sync_signal_to_visible_chart_price(analysis.asset)
+        if chart_price and chart_price > 0:
+            logger.info("[PRICE-LOCK] Visible chart price for %s: %.2f", analysis.asset, chart_price)
 
         overlay_signal = OverlaySignal(
             asset=analysis.asset,
             action=analysis.action,
             confidence=analysis.confidence,
-            entry_price=wc_price if wc_price and wc_price > 0 else analysis.entry_price,
+            entry_price=chart_price if chart_price and chart_price > 0 else analysis.entry_price,
             stop_loss=analysis.stop_loss,
             take_profit=analysis.take_profit,
             reason=analysis.reason,
@@ -5967,6 +6295,7 @@ class VcaniTradeApp:
         self.ai_narrator.add_activity("[HUNTER]", f"{action} {symbol}")
         # Trigger the green border blink — this is the missing feature!
         self.ai_narrator.notify_signal_detected(symbol, action, 0.85)
+        self._announce_signal_alert(symbol, action, 85.0, source="hunter")
 
         if config.TEACHER_MODE:
             self.cmd.log(f"[TEACHER] Would execute {action} {symbol} | {reason}")
