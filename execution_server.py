@@ -325,10 +325,41 @@ def handle_client(config, conn, addr):
         log(f"[CONN] {addr} disconnected")
 
 
+def purge_deprecated_assets():
+    """Scorched-earth cleanup: delete stale image assets from old platforms."""
+    deprecated = [
+        "rithmic_buy.png",
+        "rithmic_sell.png",
+        "rithmic_exit.png",
+        "ninja_buy.png",
+        "ninja_sell.png",
+        "ninja_exit.png",
+    ]
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    removed = 0
+    for fname in deprecated:
+        for root, _dirs, files in os.walk(script_dir):
+            if fname in files:
+                fpath = os.path.join(root, fname)
+                try:
+                    os.remove(fpath)
+                    log(f"[PURGE] Deleted deprecated asset: {fpath}")
+                    removed += 1
+                except OSError as exc:
+                    log(f"[PURGE] Could not delete {fpath}: {exc}")
+    if removed:
+        log(f"[PURGE] {removed} deprecated asset(s) removed.")
+    else:
+        log("[PURGE] No deprecated assets found — repo is clean.")
+
+
 def main():
     log("=" * 60)
-    log("  GHOST-HAND SERVER - INSTITUTIONAL EXECUTION ENGINE")
+    log("[VISION] Active Master Target: TradingView UI Surface Matrix Enabled.")
     log("=" * 60)
+
+    # STAGE 0: Purge stale assets from legacy platforms
+    purge_deprecated_assets()
 
     # STAGE 1: Auto-calibrate button coordinates from screen templates
     calibrate_trading_interface()

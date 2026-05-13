@@ -45,7 +45,7 @@ HARDCODED_EQUITY_FALLBACK = float(os.getenv("HARDCODED_EQUITY_FALLBACK", "50000.
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
 # PRODUCTION RULE: DRY_RUN defaults to True. You MUST explicitly set DRY_RUN=False in .env to trade live.
 DRY_RUN = os.getenv("DRY_RUN", "True").lower() == "true"
-# MAX_DAILY_LOSS: Default to 2% of CURRENT_BALANCE (Apex standard), override with MAX_DAILY_LOSS env var
+# MAX_DAILY_LOSS: Default to 2% of CURRENT_BALANCE (prop firm standard), override with MAX_DAILY_LOSS env var
 _max_daily_loss_env = os.getenv("MAX_DAILY_LOSS", None)
 if _max_daily_loss_env is not None:
     MAX_DAILY_LOSS = float(_max_daily_loss_env)
@@ -68,7 +68,7 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 
 # ===== OPTIONAL SYMBOL SAFETY LISTS =====
 # These are only used by legacy broker-specific paths. TradingView and MT5 route
-# through their own execution handlers and should not be blocked by an Apex list.
+# through their own execution handlers and should not be blocked by a prop firm list.
 FUTURES_WHITELIST = ["CL=F", "CL1!", "NQM6", "ESM6", "MGC"]
 # Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
@@ -77,8 +77,7 @@ BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 # TradingView chart symbols can differ from broker-specific MT5 names.
 # Override any value with an environment variable if your broker labels differ.
 TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "CL1!", "MGC")
-# Backward-compatible alias for old modules while the repo is being cleaned.
-WEALTHCHARTS_TICKERS = TRADINGVIEW_TICKERS
+# TradingView is the sole charting surface. No legacy aliases remain.
 
 # Muted tickers: scanner will NEVER scan these.
 MUTED_TICKERS = set()
@@ -164,8 +163,9 @@ GROQ_KEY_LIST = _parse_key_list(GROQ_API_KEYS)
 NVIDIA_KEY_LIST = _parse_key_list(NVIDIA_API_KEY)
 BRAINSTORM_KEY_LIST = _parse_key_list(BRAINSTORM_API_KEY)
 
-# ===== MULTI-ACCOUNT TARGETING (NinjaTrader ATI) =====
-TARGET_ACCOUNTS = _parse_key_list(os.getenv("TARGET_ACCOUNTS", "APEX-314327-18,TOPSTEP-12345"))
+# ===== ACCOUNT TARGETING =====
+# Single account mode for retail brokers. Comma-separated if you run multi-account.
+TARGET_ACCOUNTS = _parse_key_list(os.getenv("TARGET_ACCOUNTS", ""))
 
 # Google API Key slot (reserved, stays empty as requested)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
@@ -405,7 +405,7 @@ BROWSER_WINDOW_HINTS = [
     value.strip()
     for value in os.getenv(
         "BROWSER_WINDOW_HINTS",
-        "WealthCharts,TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
+        "TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
     ).split(",")
     if value.strip()
 ]
@@ -497,18 +497,9 @@ PRIMARY_MONITOR_HEIGHT = int(os.getenv("PRIMARY_MONITOR_HEIGHT", "1080"))
 MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "2.50"))
 MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 
-# ===== NINJATRADER ATI CONFIGURATION =====
-ATI_ORDER_DIR = os.getenv("ATI_ORDER_DIR", "C:\\NinjaTrader 8\\ATI\\Orders")
-# Ticker mapping for legacy desktop adapters.
-NINJATRADER_TICKER_MAP = {
-    "NQM6": "NQ 06-26",
-    "ESM6": "ES 06-26",
-    "CL=F": "CL 1!",
-    "CL1!": "CL 1!",
-    "CLM26": "CL 06-26",  # Legacy alias only
-    "MGC": "MGC 06-26",
-    "XAUUSD": "MGC 06-26",
-}
+# ===== RETAIL BROKER CONFIGURATION =====
+# All execution routes through TradingView RPA or MT5 native API.
+# Legacy desktop adapters have been fully removed.
 
 # ===== AGGRESSIVE HUNTER =====
 # If signal confidence >= this threshold, skip 1m/3m MTF alignment and strike on 5m alone.
