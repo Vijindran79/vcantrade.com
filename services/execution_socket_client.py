@@ -32,13 +32,13 @@ class ExecutionSocketClient:
         self,
         host: str = EXECUTION_HOST,
         port: int = EXECUTION_PORT,
-        reconnect_attempts: int = 5,
-        reconnect_delay: float = 0.35,
+        reconnect_attempts: int = 15,
+        reconnect_delay: float = 2.0,
     ):
         self.host = host
         self.port = port
-        self.reconnect_attempts = max(1, int(reconnect_attempts or 1))
-        self.reconnect_delay = max(0.05, float(reconnect_delay or 0.35))
+        self.reconnect_attempts = max(1, int(reconnect_attempts or 15))
+        self.reconnect_delay = max(0.5, float(reconnect_delay or 2.0))
         self.last_handshake_ok = False
         self.last_error = ""
 
@@ -59,7 +59,11 @@ class ExecutionSocketClient:
         return self.last_handshake_ok
 
     def reconnect(self, attempts: Optional[int] = None, timeout: float = 1.0) -> bool:
-        """Actively retry the local socket until the execution server acknowledges."""
+        """Actively retry the local socket until the execution server acknowledges.
+
+        Retries every 2 seconds for up to 30 seconds (15 attempts) to tolerate
+        slow server startup. Logs [RETRY] while waiting.
+        """
         max_attempts = max(1, int(attempts or self.reconnect_attempts))
         for attempt in range(1, max_attempts + 1):
             logger.info(
@@ -72,7 +76,15 @@ class ExecutionSocketClient:
             if self.handshake(timeout=timeout):
                 return True
             if attempt < max_attempts:
-                time.sleep(self.reconnect_delay * attempt)
+                logger.info(
+                    "[RETRY] Waiting for local execution server to wake up on port %s... "
+                    "(attempt %d/%d, retrying in %.1fs)",
+                    self.port,
+                    attempt,
+                    max_attempts,
+                    self.reconnect_delay,
+                )
+                time.sleep(self.reconnect_delay)
         logger.error(
             "[EXEC_SOCKET] Ghost-Hand socket unavailable after %d attempts to %s:%s. Last error: %s",
             max_attempts,

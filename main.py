@@ -38,6 +38,7 @@ import random
 import asyncio
 import logging
 import threading
+import queue
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -1270,7 +1271,7 @@ class AnalysisWorker(QThread):
     def __init__(self):
         super().__init__()
         self.analyzer = LLMAnalyzer()
-        self.market_data_queue = []
+        self.market_data_queue = queue.Queue()
         self.vision = (
             VisionCapture(
                 chart_region=(
@@ -1286,54 +1287,53 @@ class AnalysisWorker(QThread):
         )
 
     def add_to_queue(self, market_data: MarketDataPoint):
-        self.market_data_queue.append(market_data)
+        self.market_data_queue.put(market_data)
 
     def run(self):
         logger.info("Analysis worker started (Swarm Consensus mode)")
 
         while True:
-            if self.market_data_queue:
-                market_data = self.market_data_queue.pop(0)
+            market_data = self.market_data_queue.get()  # Native OS-block; 0% CPU when idle
 
-                try:
-                    # Capture chart screenshot if vision is enabled
-                    chart_base64 = None
-                    if self.vision and not _is_passive_visual_mode():
-                        try:
-                            screenshot = self.vision.capture_active_chart(asset=market_data.asset)
-                            if screenshot:
-                                chart_base64 = screenshot.to_base64()
-                                logger.info(
-                                    f"Chart screenshot captured for {market_data.asset}"
-                                )
-                            else:
-                                logger.warning(
-                                    f"Screenshot failed for {market_data.asset} - text-only"
-                                )
-                        except Exception as vision_error:
-                            logger.error(f"Vision capture failed for {market_data.asset}: {vision_error}")
-                            chart_base64 = None  # Fallback to text-only
-                    elif self.vision:
-                        logger.debug("[VISION] Skipping visual screenshot in passive mode.")
-
-                    # Run swarm debate (with or without vision)
+            try:
+                # Capture chart screenshot if vision is enabled
+                chart_base64 = None
+                if self.vision and not _is_passive_visual_mode():
                     try:
-                        if chart_base64:
-                            _wait_for_vision_analysis_slot(f"analysis:{market_data.asset}")
-                        output, transcript = self.analyzer.analyze_market(
-                            market_data, chart_image_base64=chart_base64
-                        )
-                        self.analysis_complete.emit(output, transcript)
-                    except Exception as analysis_error:
-                        logger.error(f"Swarm analysis failed for {market_data.asset}: {analysis_error}")
-                        # Emit None to indicate failure - UI should handle gracefully
-                        self.analysis_complete.emit(None, None)
-                        
-                except Exception as worker_error:
-                    logger.error(f"Analysis worker critical error: {worker_error}")
-                    # Continue loop - don't crash the thread
-            else:
-                time.sleep(0.1)
+                        screenshot = self.vision.capture_active_chart(asset=market_data.asset)
+                        if screenshot:
+                            chart_base64 = screenshot.to_base64()
+                            logger.info(
+                                f"Chart screenshot captured for {market_data.asset}"
+                            )
+                        else:
+                            logger.warning(
+                                f"Screenshot failed for {market_data.asset} - text-only"
+                            )
+                    except Exception as vision_error:
+                        logger.error(f"Vision capture failed for {market_data.asset}: {vision_error}")
+                        chart_base64 = None  # Fallback to text-only
+                elif self.vision:
+                    logger.debug("[VISION] Skipping visual screenshot in passive mode.")
+
+                # Run swarm debate (with or without vision)
+                try:
+                    if chart_base64:
+                        _wait_for_vision_analysis_slot(f"analysis:{market_data.asset}")
+                    output, transcript = self.analyzer.analyze_market(
+                        market_data, chart_image_base64=chart_base64
+                    )
+                    self.analysis_complete.emit(output, transcript)
+                except Exception as analysis_error:
+                    logger.error(f"Swarm analysis failed for {market_data.asset}: {analysis_error}")
+                    # Emit None to indicate failure - UI should handle gracefully
+                    self.analysis_complete.emit(None, None)
+                    
+            except Exception as worker_error:
+                logger.error(f"Analysis worker critical error: {worker_error}")
+                # Continue loop - don't crash the thread
+            finally:
+                self.market_data_queue.task_done()
 
 
 class VibeStrategyWorker(QThread):

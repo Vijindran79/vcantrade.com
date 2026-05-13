@@ -22,7 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import pandas as pd
 import pandas_ta as ta
-import requests
+import aiohttp
 
 # Lazy import MetaTrader5 — only loaded when EXECUTION_MODE == "MT5"
 mt5 = None
@@ -102,6 +102,7 @@ class CloudScanner:
         self.last_dispatch_status_code: Optional[int] = None
         self.last_dispatch_target = ""
         self.public_dispatch_retry_after_ts = 0.0
+        self._session: Optional[aiohttp.ClientSession] = None
 
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
@@ -2321,9 +2322,22 @@ class CloudScanner:
         )
         return round(final_confidence, 2)
 
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Lazy-init shared aiohttp session for signal dispatch."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close_session(self):
+        """Close the shared aiohttp session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
     async def dispatch_to_local(self, signal_data: dict) -> bool:
         """
         Dispatch trade signal to local laptop executor via HTTP.
+        Uses shared async aiohttp.ClientSession to avoid blocking the event loop.
         Returns True if successfully received.
         """
         timeout = float(getattr(config, "LOCAL_EXECUTION_TIMEOUT", 30.0) or 30.0)
@@ -2353,6 +2367,9 @@ class CloudScanner:
             30.0, float(getattr(config, "SCAN_INTERVAL", 10)) * 12.0
         )
 
+        session = await self._get_session()
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+
         for target_name, target_url in targets:
             try:
                 logger.info(
@@ -2364,14 +2381,15 @@ class CloudScanner:
                     float(signal_data.get("confidence", 0.0) or 0.0),
                 )
 
-                response = requests.post(
+                async with session.post(
                     target_url,
                     json=payload,
-                    timeout=timeout,
                     headers=headers,
-                )
-                status_code = int(response.status_code)
-                body_preview = (response.text or "").strip().replace("\n", " ")[:240]
+                    timeout=client_timeout,
+                ) as response:
+                    status_code = int(response.status)
+                    body_text = await response.text()
+                    body_preview = body_text.strip().replace("\n", " ")[:240]
 
                 if status_code == 200:
                     self.dispatch_failure_streak = 0
@@ -2410,7 +2428,7 @@ class CloudScanner:
                 logger.error("[FAIL] %s", failure_message)
                 return False
 
-            except requests.exceptions.ConnectionError:
+            except aiohttp.ClientConnectorError:
                 failure_message = (
                     f"Signal dispatch failed via {target_name}: connection refused"
                 )
@@ -2435,7 +2453,7 @@ class CloudScanner:
                 logger.error("[FAIL] %s", failure_message)
                 return False
 
-            except requests.exceptions.Timeout:
+            except asyncio.TimeoutError:
                 failure_message = f"Signal dispatch failed via {target_name}: timeout after {timeout:.1f}s"
                 self.last_dispatch_status_code = None
                 self.last_dispatch_target = target_name
