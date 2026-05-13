@@ -10,12 +10,15 @@ Architecture:
 - Provides health check endpoint
 """
 
+import asyncio
 import logging
 import json
+import time
 from datetime import datetime
 from typing import Optional, Callable
 from secrets import compare_digest
 
+import aiohttp
 from aiohttp import web
 
 import config
@@ -290,3 +293,89 @@ class SignalDispatcher:
     def set_handshake_callback(self, callback: Callable):
         """Set callback for when handshake is received."""
         self.on_handshake_received = callback
+
+
+class AsyncSignalDispatcher:
+    """
+    Persistent async HTTP client for dispatching trade signals.
+    Uses a shared aiohttp.ClientSession with connection pooling to avoid
+    blocking the event loop during signal forwarding.
+    """
+
+    def __init__(self):
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def initialize_session(self):
+        """Instantiates a single persistent, thread-safe TCP connector pool."""
+        if not self.session or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=5.0)
+            connector = aiohttp.TCPConnector(limit=10, ttl_dns_cache=300)
+            self.session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+            logger.info("[BRIDGE] Persistent aiohttp ClientSession initialized securely.")
+
+    async def close_session(self):
+        """Gracefully drains network handles before application tear-down."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            self.session = None
+
+    async def dispatch(
+        self,
+        signal_payload: dict,
+        target_url: str,
+        headers: Optional[dict] = None,
+        timeout: float = 30.0,
+    ) -> tuple[bool, Optional[int], str]:
+        """
+        Forwards a signal payload to a target URL without blocking execution.
+
+        Returns:
+            (success: bool, status_code: int|None, body_or_error: str)
+        """
+        await self.initialize_session()
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        payload = dict(signal_payload)
+        payload["dispatched_at"] = time.time()
+        try:
+            async with self.session.post(
+                target_url,
+                json=payload,
+                headers=headers or {},
+                timeout=client_timeout,
+            ) as response:
+                status = int(response.status)
+                body = await response.text()
+                if status == 200:
+                    logger.info(
+                        "[DISPATCH] Signal acknowledged by execution gateway. URL: %s",
+                        target_url,
+                    )
+                    return True, status, body
+                else:
+                    logger.error(
+                        "[BRIDGE] Target route returned critical error status: %s | %s",
+                        status,
+                        target_url,
+                    )
+                    return False, status, body
+        except aiohttp.ClientConnectorError as ce:
+            logger.error(
+                "[BRIDGE] Transport failure routing signal over local loopback: %s | %s",
+                ce,
+                target_url,
+            )
+            return False, None, f"connection refused: {ce}"
+        except asyncio.TimeoutError:
+            logger.error(
+                "[BRIDGE] Dispatch timeout after %.1fs | %s",
+                timeout,
+                target_url,
+            )
+            return False, None, f"timeout after {timeout:.1f}s"
+        except Exception as e:
+            logger.exception(
+                "[BRIDGE] Unhandled payload translation block inside async pipeline: %s | %s",
+                e,
+                target_url,
+            )
+            return False, None, f"{type(e).__name__}: {e}"

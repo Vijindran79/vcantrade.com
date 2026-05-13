@@ -1272,6 +1272,7 @@ class AnalysisWorker(QThread):
         super().__init__()
         self.analyzer = LLMAnalyzer()
         self.market_data_queue = queue.Queue()
+        self._running = True
         self.vision = (
             VisionCapture(
                 chart_region=(
@@ -1289,11 +1290,22 @@ class AnalysisWorker(QThread):
     def add_to_queue(self, market_data: MarketDataPoint):
         self.market_data_queue.put(market_data)
 
+    def stop(self):
+        """Gracefully unblock the consumer thread for clean closing procedures."""
+        self._running = False
+        # Inject a poison pill packet to instantly break the blocking .get() state
+        self.market_data_queue.put(None)
+
     def run(self):
         logger.info("Analysis worker started (Swarm Consensus mode)")
 
-        while True:
+        while self._running:
             market_data = self.market_data_queue.get()  # Native OS-block; 0% CPU when idle
+
+            # Check for clean tear-down token sequence
+            if market_data is None:
+                self.market_data_queue.task_done()
+                break
 
             try:
                 # Capture chart screenshot if vision is enabled
@@ -1328,7 +1340,7 @@ class AnalysisWorker(QThread):
                     logger.error(f"Swarm analysis failed for {market_data.asset}: {analysis_error}")
                     # Emit None to indicate failure - UI should handle gracefully
                     self.analysis_complete.emit(None, None)
-                    
+
             except Exception as worker_error:
                 logger.error(f"Analysis worker critical error: {worker_error}")
                 # Continue loop - don't crash the thread

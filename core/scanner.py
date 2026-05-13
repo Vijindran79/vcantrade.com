@@ -47,6 +47,7 @@ from core.market_sessions import MarketSessionDetector, is_crypto_ticker, is_wee
 from core.liquidity_engine import LiquidityEngine
 from core.multi_timeframe_structure import MultiTimeframeStructureAnalyzer
 from core.symbol_mapper import normalize_yfinance_symbol, translate_chart_symbol
+from services.signal_dispatcher import AsyncSignalDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ class CloudScanner:
         self.last_dispatch_status_code: Optional[int] = None
         self.last_dispatch_target = ""
         self.public_dispatch_retry_after_ts = 0.0
-        self._session: Optional[aiohttp.ClientSession] = None
+        self.dispatcher = AsyncSignalDispatcher()
 
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
@@ -2322,18 +2323,6 @@ class CloudScanner:
         )
         return round(final_confidence, 2)
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Lazy-init shared aiohttp session for signal dispatch."""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
-
-    async def close_session(self):
-        """Close the shared aiohttp session."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
-
     async def dispatch_to_local(self, signal_data: dict) -> bool:
         """
         Dispatch trade signal to local laptop executor via HTTP.
@@ -2367,9 +2356,6 @@ class CloudScanner:
             30.0, float(getattr(config, "SCAN_INTERVAL", 10)) * 12.0
         )
 
-        session = await self._get_session()
-        client_timeout = aiohttp.ClientTimeout(total=timeout)
-
         for target_name, target_url in targets:
             try:
                 logger.info(
@@ -2381,17 +2367,15 @@ class CloudScanner:
                     float(signal_data.get("confidence", 0.0) or 0.0),
                 )
 
-                async with session.post(
+                ok, status_code, body_text = await self.dispatcher.dispatch(
+                    payload,
                     target_url,
-                    json=payload,
                     headers=headers,
-                    timeout=client_timeout,
-                ) as response:
-                    status_code = int(response.status)
-                    body_text = await response.text()
-                    body_preview = body_text.strip().replace("\n", " ")[:240]
+                    timeout=timeout,
+                )
+                body_preview = body_text.strip().replace("\n", " ")[:240]
 
-                if status_code == 200:
+                if ok:
                     self.dispatch_failure_streak = 0
                     self.dispatch_alert_emitted = False
                     self.last_dispatch_status_code = status_code
@@ -2419,54 +2403,6 @@ class CloudScanner:
                     logger.warning(
                         "[EMOJI] Bridge dispatch unavailable (%s). Falling back to localhost for %.0fs.",
                         f"HTTP {status_code}",
-                        bridge_retry_seconds,
-                    )
-                    continue
-
-                self.dispatch_failure_streak += 1
-                self.last_dispatch_error_message = failure_message
-                logger.error("[FAIL] %s", failure_message)
-                return False
-
-            except aiohttp.ClientConnectorError:
-                failure_message = (
-                    f"Signal dispatch failed via {target_name}: connection refused"
-                )
-                self.last_dispatch_status_code = None
-                self.last_dispatch_target = target_name
-
-                if target_name == "bridge" and any(
-                    name == "local" for name, _ in targets
-                ):
-                    bridge_failure = failure_message
-                    self.public_dispatch_retry_after_ts = (
-                        time.time() + bridge_retry_seconds
-                    )
-                    logger.info(
-                        "[EMOJI] Bridge offline. Falling back to localhost for %.0fs.",
-                        bridge_retry_seconds,
-                    )
-                    continue
-
-                self.dispatch_failure_streak += 1
-                self.last_dispatch_error_message = failure_message
-                logger.error("[FAIL] %s", failure_message)
-                return False
-
-            except asyncio.TimeoutError:
-                failure_message = f"Signal dispatch failed via {target_name}: timeout after {timeout:.1f}s"
-                self.last_dispatch_status_code = None
-                self.last_dispatch_target = target_name
-
-                if target_name == "bridge" and any(
-                    name == "local" for name, _ in targets
-                ):
-                    bridge_failure = failure_message
-                    self.public_dispatch_retry_after_ts = (
-                        time.time() + bridge_retry_seconds
-                    )
-                    logger.warning(
-                        "[EMOJI] Bridge timed out. Falling back to localhost for %.0fs.",
                         bridge_retry_seconds,
                     )
                     continue

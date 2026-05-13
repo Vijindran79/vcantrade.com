@@ -13,6 +13,7 @@ Confidence Ladder:
 import json
 import logging
 import socket
+import threading
 import time
 from typing import Optional
 
@@ -41,6 +42,9 @@ class ExecutionSocketClient:
         self.reconnect_delay = max(0.5, float(reconnect_delay or 2.0))
         self.last_handshake_ok = False
         self.last_error = ""
+        self.sock = None
+        self.lock = threading.Lock()
+        self._connected = False
 
     def handshake(self, timeout: float = 1.0) -> bool:
         """Send a lightweight startup ping to confirm the Ghost-Hand bridge is alive."""
@@ -55,6 +59,7 @@ class ExecutionSocketClient:
         ack = str(response.get("type", "")).upper() if isinstance(response, dict) else ""
         self.last_handshake_ok = ok and status in {"ACK", "SUCCESS"} and ack == "HANDSHAKE_ACK"
         if self.last_handshake_ok:
+            self._connected = True
             logger.info("[SUCCESS] Ghost-Hand Socket Connection established on port %s!", self.port)
         return self.last_handshake_ok
 
@@ -92,18 +97,57 @@ class ExecutionSocketClient:
             self.port,
             self.last_error or "no ACK",
         )
+        self._connected = False
         return False
+
+    def _close_socket_unsafe(self):
+        """Close persistent socket WITHOUT acquiring lock. Caller must hold self.lock."""
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+        self._connected = False
+
+    def close(self):
+        """Thread-safe close of persistent socket."""
+        with self.lock:
+            self._close_socket_unsafe()
 
     def _send_packet(self, packet_data: dict, timeout: float, expect_success: bool = True) -> tuple[bool, dict]:
         packet = json.dumps(packet_data)
         logger.info("[EXEC_SOCKET] Sending to %s:%s -> %s", self.host, self.port, packet)
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(timeout)
-                sock.connect((self.host, self.port))
-                sock.sendall(packet.encode("utf-8"))
-                sock.shutdown(socket.SHUT_WR)
-                response_raw = sock.recv(4096).decode("utf-8", errors="replace")
+
+        with self.lock:
+            # Attempt 1: reuse persistent socket if connected
+            if self._connected and self.sock:
+                try:
+                    self.sock.settimeout(timeout)
+                    self.sock.sendall(packet.encode("utf-8"))
+                    response_raw = self.sock.recv(4096).decode("utf-8", errors="replace")
+                    logger.info("[EXEC_SOCKET] ACK from %s:%s -> %s", self.host, self.port, response_raw)
+                    try:
+                        response = json.loads(response_raw) if response_raw else {}
+                    except json.JSONDecodeError:
+                        response = {}
+                    status = str(response.get("status", "")).upper()
+                    ok = status == "SUCCESS" if expect_success else bool(response)
+                    self.last_error = "" if ok else str(response or response_raw or "empty response")
+                    return ok, response
+                except (socket.error, TimeoutError) as exc:
+                    logger.warning("[EXEC_SOCKET] Persistent socket failed: %s. Recreating...", exc)
+                    self._close_socket_unsafe()
+                    # Fall through to create fresh socket
+
+            # Attempt 2: create fresh socket
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.settimeout(timeout)
+                self.sock.connect((self.host, self.port))
+                self.sock.sendall(packet.encode("utf-8"))
+                self.sock.shutdown(socket.SHUT_WR)
+                response_raw = self.sock.recv(4096).decode("utf-8", errors="replace")
                 logger.info("[EXEC_SOCKET] ACK from %s:%s -> %s", self.host, self.port, response_raw)
                 try:
                     response = json.loads(response_raw) if response_raw else {}
@@ -112,23 +156,27 @@ class ExecutionSocketClient:
                 status = str(response.get("status", "")).upper()
                 ok = status == "SUCCESS" if expect_success else bool(response)
                 self.last_error = "" if ok else str(response or response_raw or "empty response")
+                self._connected = True
                 return ok, response
-        except ConnectionRefusedError as exc:
-            self.last_error = f"connection refused: {exc}"
-            logger.warning(
-                "[EXEC_SOCKET] Connection refused to %s:%s. Ensure the execution server is running.",
-                self.host,
-                self.port,
-            )
-            return False, {}
-        except socket.timeout as exc:
-            self.last_error = f"timeout: {exc}"
-            logger.error("[EXEC_SOCKET] Timeout connecting to %s:%s", self.host, self.port)
-            return False, {}
-        except Exception as exc:
-            self.last_error = str(exc)
-            logger.error("[EXEC_SOCKET] Socket packet failed: %s", exc)
-            return False, {}
+            except ConnectionRefusedError as exc:
+                self.last_error = f"connection refused: {exc}"
+                logger.warning(
+                    "[EXEC_SOCKET] Connection refused to %s:%s. Ensure the execution server is running.",
+                    self.host,
+                    self.port,
+                )
+                self._close_socket_unsafe()
+                return False, {}
+            except socket.timeout as exc:
+                self.last_error = f"timeout: {exc}"
+                logger.error("[EXEC_SOCKET] Timeout connecting to %s:%s", self.host, self.port)
+                self._close_socket_unsafe()
+                return False, {}
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                logger.exception("[EXEC_SOCKET] Error sending to %s:%s", self.host, self.port)
+                self._close_socket_unsafe()
+                return False, {}
 
     def send_command(self, action: str, timeout: float = 5.0,
                      entry_price: float = 0.0, stop_loss: float = 0.0,
