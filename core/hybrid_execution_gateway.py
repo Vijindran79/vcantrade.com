@@ -128,6 +128,11 @@ class HybridExecutionGateway:
         action: str,
         confidence: float,
         quantity: float = 0.0,
+        entry_price: float = 0.0,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+        target: Optional[dict] = None,
+        selectors: Optional[dict] = None,
         browser_loop=None,
     ) -> GatewayResult:
         action = str(action or "").upper()
@@ -141,11 +146,21 @@ class HybridExecutionGateway:
                 return result
             logger.warning("[HYBRID] broker_ws failed for %s %s: %s", action, symbol, result.message)
 
-        socket_result = self._execute_socket(action, confidence)
+        socket_result = self._execute_socket(
+            symbol=symbol,
+            action=action,
+            confidence=confidence,
+            quantity=quantity,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            target=target,
+            selectors=selectors,
+        )
         if socket_result.success:
             return socket_result
 
-        mt5_result = self._execute_mt5(symbol, action, quantity)
+        mt5_result = self._execute_mt5(symbol, action, quantity, stop_loss, take_profit)
         if mt5_result.success:
             return mt5_result
 
@@ -168,25 +183,60 @@ class HybridExecutionGateway:
             ),
         )
 
-    def _execute_socket(self, action: str, confidence: float) -> GatewayResult:
+    def _execute_socket(
+        self,
+        symbol: str,
+        action: str,
+        confidence: float,
+        quantity: float = 0.0,
+        entry_price: float = 0.0,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+        target: Optional[dict] = None,
+        selectors: Optional[dict] = None,
+    ) -> GatewayResult:
         started = time.perf_counter()
         try:
             if action in {"CLOSE", "FLATTEN"}:
-                ok = self.socket_client.send_flatten(confidence)
+                command = self.socket_client._get_flatten_action(confidence)
             else:
-                ok = self.socket_client.send_trade_action(action, confidence)
+                command = self.socket_client._get_trade_action(action, confidence)
+            ok = self.socket_client.send_command(
+                command,
+                ticker=symbol,
+                quantity=quantity,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                target=target,
+                selectors=selectors,
+                source="hybrid_gateway",
+            )
             latency_ms = (time.perf_counter() - started) * 1000.0
             return GatewayResult(ok, "local_socket", latency_ms, "sent" if ok else "socket unavailable")
         except Exception as exc:
             return GatewayResult(False, "local_socket", (time.perf_counter() - started) * 1000.0, str(exc))
 
-    def _execute_mt5(self, symbol: str, action: str, quantity: float) -> GatewayResult:
+    def _execute_mt5(
+        self,
+        symbol: str,
+        action: str,
+        quantity: float,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+    ) -> GatewayResult:
         started = time.perf_counter()
         executor = self.mt5_executor
         if executor is None:
             return GatewayResult(False, "mt5", 0.0, "MT5 executor unavailable")
         try:
-            ok = executor.execute_trade(symbol, action, volume=quantity or None)
+            ok = executor.execute_trade(
+                symbol,
+                action,
+                volume=quantity or None,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
             latency_ms = (time.perf_counter() - started) * 1000.0
             return GatewayResult(ok, "mt5", latency_ms, "order_send" if ok else "MT5 rejected")
         except Exception as exc:

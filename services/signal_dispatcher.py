@@ -19,6 +19,7 @@ from secrets import compare_digest
 from aiohttp import web
 
 import config
+from services.swarm_incubation import SwarmIncubationTracker
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +41,22 @@ class SignalDispatcher:
         self.signal_count = 0
         self.last_signal_time: Optional[datetime] = None
         self.last_handshake_time: Optional[datetime] = None
+        self.incubation = SwarmIncubationTracker()
         
         # Callback for when signal is received
         self.on_signal_received: Optional[Callable] = None
         self.on_handshake_received: Optional[Callable] = None
         
         logger.info(f"Signal Dispatcher initialized on port {config.LOCAL_LISTENER_PORT}")
+
+    def _confidence_score(self, confidence) -> float:
+        try:
+            value = float(confidence or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if value <= 1.0:
+            value *= 100.0
+        return max(0.0, min(100.0, value))
 
     def _extract_api_key(self, request: web.Request, data: dict) -> str:
         header_name = config.SIGNAL_API_HEADER
@@ -93,11 +104,16 @@ class SignalDispatcher:
                     status=400
                 )
             
-            # Validate confidence threshold
+            # Validate confidence threshold.
             confidence = data.get("confidence", 0.0)
-            if confidence < config.SWARM_CONFIDENCE_THRESHOLD:
+            confidence_score = self._confidence_score(confidence)
+            incubation_floor = float(getattr(config, "SWARM_INCUBATION_FLOOR", 60.0))
+            high_priority_threshold = float(getattr(config, "SWARM_HIGH_PRIORITY_THRESHOLD", 85.0))
+            if confidence_score < incubation_floor:
                 logger.warning(
-                    f"Signal below confidence threshold: {confidence} < {config.SWARM_CONFIDENCE_THRESHOLD}"
+                    "Signal below incubation floor: %.1f%% < %.1f%%",
+                    confidence_score,
+                    incubation_floor,
                 )
                 return web.json_response(
                     {"status": "rejected", "message": "Below confidence threshold"},
@@ -114,15 +130,49 @@ class SignalDispatcher:
             self.latest_signal = data
             self.signal_count += 1
             self.last_signal_time = datetime.utcnow()
-            
+
             logger.info(
                 f"[SAT] Signal received: {data['action']} {data['ticker']} "
-                f"(confidence: {confidence:.2f}, source: {data['source_ip']})"
+                f"(confidence: {confidence_score:.1f}%, source: {data['source_ip']})"
             )
-            
+
+            route, incubation_meta = self.incubation.process_signal(data, confidence_score)
+            data["incubation_route"] = route
+            data["incubation_meta"] = incubation_meta
+
+            if route == "incubating":
+                logger.info(
+                    "[INCUBATION] Muted %s %s at %.1f%%. Paper simulation opened; no UI alert or execution callback.",
+                    data["action"],
+                    data["ticker"],
+                    confidence_score,
+                )
+                return web.json_response({
+                    "status": "incubating",
+                    "message": "Signal muted into swarm incubation; no desktop alert or execution triggered.",
+                    "signal_id": self.signal_count,
+                    "threshold": high_priority_threshold,
+                    "incubation": incubation_meta,
+                })
+
+            if route == "promoted":
+                logger.info(
+                    "[INCUBATION] Promoted %s %s after positive local expectancy: %s",
+                    data["action"],
+                    data["ticker"],
+                    incubation_meta.get("expectancy"),
+                )
+
             # Trigger callback (connected to main app)
             if self.on_signal_received:
                 try:
+                    logger.info(
+                        "[DISPATCHER] Forwarding %s %s to main execution callback (route=%s, confidence=%.1f%%)",
+                        data["action"],
+                        data["ticker"],
+                        route,
+                        confidence_score,
+                    )
                     self.on_signal_received(data)
                 except Exception as e:
                     logger.error(f"Signal callback failed: {e}")
@@ -130,7 +180,8 @@ class SignalDispatcher:
             return web.json_response({
                 "status": "accepted",
                 "message": f"Signal queued for execution: {data['action']} {data['ticker']}",
-                "signal_id": self.signal_count
+                "signal_id": self.signal_count,
+                "incubation_route": route,
             })
             
         except json.JSONDecodeError:
@@ -207,6 +258,9 @@ class SignalDispatcher:
             "last_signal_time": self.last_signal_time.isoformat() if self.last_signal_time else None,
             "last_handshake_time": self.last_handshake_time.isoformat() if self.last_handshake_time else None,
             "confidence_threshold": config.SWARM_CONFIDENCE_THRESHOLD,
+            "incubation_floor": getattr(config, "SWARM_INCUBATION_FLOOR", 60.0),
+            "high_priority_threshold": getattr(config, "SWARM_HIGH_PRIORITY_THRESHOLD", 85.0),
+            "incubation_open_count": len(self.incubation.state.get("open", [])),
             "listener_host": config.LOCAL_LISTENER_HOST,
             "listener_port": config.LOCAL_LISTENER_PORT,
             "auth_enabled": bool(config.SIGNAL_API_KEY),

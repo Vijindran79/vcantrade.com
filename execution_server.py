@@ -50,10 +50,14 @@ def calibrate_trading_interface():
     global RESOLVED_COORDS
     RESOLVED_COORDS = {}
 
+    # Generic button templates — rename your screenshots to match:
+    #   button_buy.png   = screenshot of your broker's BUY button
+    #   button_sell.png  = screenshot of your broker's SELL button
+    #   button_flatten.png = screenshot of your broker's CLOSE/FLATTEN button
     templates = {
-        "BUTTON_BUY": ("rithmic_buy.png", "Buy"),
-        "BUTTON_SELL": ("rithmic_sell.png", "Sell"),
-        "BUTTON_FLATTEN": ("rithmic_exit.png", "Flatten"),
+        "BUTTON_BUY": ("button_buy.png", "Buy"),
+        "BUTTON_SELL": ("button_sell.png", "Sell"),
+        "BUTTON_FLATTEN": ("button_flatten.png", "Flatten"),
     }
 
     script_dir = os.path.dirname(os.path.abspath(__file__))

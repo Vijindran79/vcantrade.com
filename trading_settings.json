@@ -1,8 +1,9 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "BTC-USD",
-    "ETH-USD"
+    "CME_MINI:MNQ1!",
+    "CME_MINI:MES1!",
+    "CL=F"
   ],
   "investment_amount": 1000.0,
   "lot_size": 2.0,

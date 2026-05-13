@@ -13,6 +13,8 @@ Confidence Ladder:
 import json
 import logging
 import socket
+import time
+from typing import Optional
 
 import config
 
@@ -26,44 +28,149 @@ EXECUTION_HOST = str(getattr(config, "EXECUTION_HOST", "127.0.0.1") or "127.0.0.
 class ExecutionSocketClient:
     """Raw socket client for sending execution commands to port 5555."""
 
-    def __init__(self, host: str = EXECUTION_HOST, port: int = EXECUTION_PORT):
+    def __init__(
+        self,
+        host: str = EXECUTION_HOST,
+        port: int = EXECUTION_PORT,
+        reconnect_attempts: int = 5,
+        reconnect_delay: float = 0.35,
+    ):
         self.host = host
         self.port = port
+        self.reconnect_attempts = max(1, int(reconnect_attempts or 1))
+        self.reconnect_delay = max(0.05, float(reconnect_delay or 0.35))
+        self.last_handshake_ok = False
+        self.last_error = ""
 
-    def send_command(self, action: str, timeout: float = 5.0) -> bool:
-        """
-        Send a clean JSON packet {"action": "COMMAND_NAME"} over raw socket.
+    def handshake(self, timeout: float = 1.0) -> bool:
+        """Send a lightweight startup ping to confirm the Ghost-Hand bridge is alive."""
+        payload = {
+            "type": "HANDSHAKE",
+            "source": "main.py",
+            "packet_id": f"handshake:{int(time.time() * 1000)}",
+            "sent_at": time.time(),
+        }
+        ok, response = self._send_packet(payload, timeout=timeout, expect_success=False)
+        status = str(response.get("status", "")).upper() if isinstance(response, dict) else ""
+        ack = str(response.get("type", "")).upper() if isinstance(response, dict) else ""
+        self.last_handshake_ok = ok and status in {"ACK", "SUCCESS"} and ack == "HANDSHAKE_ACK"
+        if self.last_handshake_ok:
+            logger.info("[SUCCESS] Ghost-Hand Socket Connection established on port %s!", self.port)
+        return self.last_handshake_ok
 
-        Args:
-            action: Command to send (BUY_SIM, SELL_SIM, FLATTEN_SIM, BUY_REAL, etc.)
-            timeout: Socket timeout in seconds.
+    def reconnect(self, attempts: Optional[int] = None, timeout: float = 1.0) -> bool:
+        """Actively retry the local socket until the execution server acknowledges."""
+        max_attempts = max(1, int(attempts or self.reconnect_attempts))
+        for attempt in range(1, max_attempts + 1):
+            logger.info(
+                "[EXEC_SOCKET] Handshake attempt %d/%d to %s:%s",
+                attempt,
+                max_attempts,
+                self.host,
+                self.port,
+            )
+            if self.handshake(timeout=timeout):
+                return True
+            if attempt < max_attempts:
+                time.sleep(self.reconnect_delay * attempt)
+        logger.error(
+            "[EXEC_SOCKET] Ghost-Hand socket unavailable after %d attempts to %s:%s. Last error: %s",
+            max_attempts,
+            self.host,
+            self.port,
+            self.last_error or "no ACK",
+        )
+        return False
 
-        Returns:
-            True if command was sent successfully, False otherwise.
-        """
-        packet = json.dumps({"action": action})
+    def _send_packet(self, packet_data: dict, timeout: float, expect_success: bool = True) -> tuple[bool, dict]:
+        packet = json.dumps(packet_data)
         logger.info("[EXEC_SOCKET] Sending to %s:%s -> %s", self.host, self.port, packet)
-
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(timeout)
                 sock.connect((self.host, self.port))
                 sock.sendall(packet.encode("utf-8"))
-                logger.info("[EXEC_SOCKET] Successfully sent command: %s", action)
-                return True
-        except ConnectionRefusedError:
+                sock.shutdown(socket.SHUT_WR)
+                response_raw = sock.recv(4096).decode("utf-8", errors="replace")
+                logger.info("[EXEC_SOCKET] ACK from %s:%s -> %s", self.host, self.port, response_raw)
+                try:
+                    response = json.loads(response_raw) if response_raw else {}
+                except json.JSONDecodeError:
+                    response = {}
+                status = str(response.get("status", "")).upper()
+                ok = status == "SUCCESS" if expect_success else bool(response)
+                self.last_error = "" if ok else str(response or response_raw or "empty response")
+                return ok, response
+        except ConnectionRefusedError as exc:
+            self.last_error = f"connection refused: {exc}"
             logger.warning(
                 "[EXEC_SOCKET] Connection refused to %s:%s. Ensure the execution server is running.",
                 self.host,
                 self.port,
             )
-            return False
-        except socket.timeout:
+            return False, {}
+        except socket.timeout as exc:
+            self.last_error = f"timeout: {exc}"
             logger.error("[EXEC_SOCKET] Timeout connecting to %s:%s", self.host, self.port)
-            return False
+            return False, {}
         except Exception as exc:
-            logger.error("[EXEC_SOCKET] Failed to send command %s: %s", action, exc)
-            return False
+            self.last_error = str(exc)
+            logger.error("[EXEC_SOCKET] Socket packet failed: %s", exc)
+            return False, {}
+
+    def send_command(self, action: str, timeout: float = 5.0,
+                     entry_price: float = 0.0, stop_loss: float = 0.0,
+                     take_profit: float = 0.0,
+                     ticker: str = "",
+                     quantity: float = 0.0,
+                     target: Optional[dict] = None,
+                     selectors: Optional[dict] = None,
+                     source: str = "main.py") -> bool:
+        """
+        Send a clean JSON packet over raw socket.
+
+        =====================================================================
+        FIX 3: FEED REAL MARKET DATA INTO socket payload
+        =====================================================================
+        The packet now includes live market prices so the receiving execution
+        server can pass them to escalator.trigger_probe() instead of (0,0,0).
+
+        Args:
+            action: Command to send (BUY_SIM, SELL_SIM, FLATTEN_SIM, BUY_REAL, etc.)
+            timeout: Socket timeout in seconds.
+            entry_price: Live market entry price (0.0 = not provided).
+            stop_loss: Calculated stop-loss price (0.0 = not provided).
+            take_profit: Calculated take-profit price (0.0 = not provided).
+
+        Returns:
+            True if command was sent successfully, False otherwise.
+        """
+        packet_data = {
+            "action": action,
+            "ticker": ticker,
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "target": target or {},
+            "selectors": selectors or {},
+            "source": source,
+            "packet_id": f"{source}:{action}:{int(time.time() * 1000)}",
+            "sent_at": time.time(),
+        }
+        ok, response = self._send_packet(packet_data, timeout=timeout, expect_success=True)
+        if not ok:
+            logger.warning("[EXEC_SOCKET] Command %s failed; attempting active reconnect.", action)
+            if self.reconnect(timeout=min(timeout, 1.5)):
+                ok, response = self._send_packet(packet_data, timeout=timeout, expect_success=True)
+        logger.info(
+            "[EXEC_SOCKET] Command %s delivery confirmed=%s packet_id=%s response=%s",
+            action,
+            ok,
+            packet_data["packet_id"],
+            response,
+        )
+        return ok
 
     def send_flatten(self, confidence: float) -> bool:
         """Send FLATTEN command based on confidence level."""

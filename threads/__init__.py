@@ -1,0 +1,1 @@
+"""VcanTrade AI — Background QThreads."""

@@ -45,6 +45,7 @@ from core.models import MarketDataPoint, SignalAction, ConfidenceLevel
 from core.brain_swarm import OllamaSwarmConsensus as SwarmConsensus
 from core.market_sessions import MarketSessionDetector, is_crypto_ticker, is_weekend_closed
 from core.liquidity_engine import LiquidityEngine
+from core.multi_timeframe_structure import MultiTimeframeStructureAnalyzer
 from core.symbol_mapper import normalize_yfinance_symbol, translate_chart_symbol
 
 logger = logging.getLogger(__name__)
@@ -83,8 +84,9 @@ class CloudScanner:
         self.brain = GeminiBrain()
         self.code_architect = CodeArchitect()
         self.liquidity_engine = LiquidityEngine()
-        self.recent_signals: Dict[str, datetime] = {}  # Prevent duplicate signals
-        self.signal_cooldown = 300  # 5 minutes between signals for same ticker
+        self.recent_signals: Dict[str, datetime] = {}  # Legacy signal-type cooldown state
+        self.last_signal_timestamps: Dict[str, datetime] = {}
+        self.signal_cooldown = int(getattr(config, "SIGNAL_COOLDOWN_SECONDS", 300) or 300)
         self.status_callback = None
         self.market_data_cache: Dict[Tuple[str, str, str], pd.DataFrame] = {}
         self.last_close_cache: Dict[str, float] = {}
@@ -103,6 +105,10 @@ class CloudScanner:
 
         # Market Session Awareness
         self.session_detector = MarketSessionDetector()
+        self.structure_analyzer = MultiTimeframeStructureAnalyzer(
+            zone_atr_multiplier=float(getattr(config, "MTF_STRUCTURE_ZONE_ATR_MULTIPLIER", 0.65)),
+            proximity_pct=float(getattr(config, "MTF_STRUCTURE_PROXIMITY_PCT", 0.0025)),
+        )
 
         # Dynamic Eye Sync — tracks what the Browser Agent is currently viewing
         self.eye_symbol: Optional[str] = None
@@ -1422,6 +1428,81 @@ class CloudScanner:
             aligned = all(votes.get(tf) == action for tf in ["5m", "3m", "1m"])
         return aligned, votes
 
+    async def _evaluate_level2_structure(
+        self,
+        ticker: str,
+        action: str,
+        entry_price: float,
+    ) -> Tuple[bool, dict]:
+        """Reject low-timeframe signals that fight 1h/4h trend or major zones."""
+        if not bool(getattr(config, "MTF_STRUCTURE_FILTER_ENABLED", True)):
+            return True, {"enabled": False, "allowed": True, "reason": "disabled"}
+
+        def _resample_ohlcv(df: pd.DataFrame, rule: str) -> Optional[pd.DataFrame]:
+            if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
+                return None
+            try:
+                out = pd.DataFrame()
+                out["Open"] = df["Open"].resample(rule).first()
+                out["High"] = df["High"].resample(rule).max()
+                out["Low"] = df["Low"].resample(rule).min()
+                out["Close"] = df["Close"].resample(rule).last()
+                out["Volume"] = df["Volume"].resample(rule).sum()
+                return out.dropna()
+            except Exception:
+                return None
+
+        frames: Dict[str, pd.DataFrame] = {}
+        for label, period, interval in (
+            ("15m", "7d", "15m"),
+            ("1h", "7d", "1h"),
+            ("4h", "7d", "4h"),
+        ):
+            df = await self._fetch_market_data(ticker, period=period, interval=interval)
+            if (df is None or df.empty) and label == "4h":
+                hourly = frames.get("1h")
+                if hourly is None or hourly.empty:
+                    hourly = await self._fetch_market_data(ticker, period="30d", interval="1h")
+                df = _resample_ohlcv(hourly, "4h")
+            if df is not None and not df.empty:
+                frames[label] = df
+
+        if len(frames) < 2:
+            logger.warning(
+                "[LEVEL2] %s %s structure data incomplete (%s). Blocking by default.",
+                action,
+                ticker,
+                sorted(frames.keys()),
+            )
+            return False, {
+                "enabled": True,
+                "allowed": False,
+                "reason": "Insufficient 15m/1h/4h structure data.",
+                "frames": sorted(frames.keys()),
+            }
+
+        current_price = float(entry_price or 0.0)
+        if current_price <= 0:
+            for df in frames.values():
+                if "Close" in df and not df["Close"].dropna().empty:
+                    current_price = float(df["Close"].dropna().iloc[-1])
+                    break
+
+        verdict = self.structure_analyzer.evaluate(action, current_price, frames)
+        logger.info(
+            "[LEVEL2] %s %s allowed=%s bias=%s reason=%s timeframes=%s",
+            action,
+            ticker,
+            verdict.allowed,
+            verdict.bias,
+            verdict.reason,
+            verdict.timeframe_biases,
+        )
+        payload = verdict.as_dict()
+        payload["enabled"] = True
+        payload["current_price"] = current_price
+        return verdict.allowed, payload
+
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators (RSI, SMA, etc.)."""
         # RSI (14-period)
@@ -1654,18 +1735,33 @@ class CloudScanner:
 
         return None
 
-    def _is_signal_cooldown(self, ticker: str, signal_type: str) -> bool:
-        """Check if signal is within cooldown period."""
-        key = f"{ticker}:{signal_type}"
-        if key in self.recent_signals:
-            elapsed = (datetime.utcnow() - self.recent_signals[key]).total_seconds()
-            return elapsed < self.signal_cooldown
-        return False
+    def _is_signal_cooldown(self, ticker: str, signal_type: str = "") -> bool:
+        """Check if this ticker is still inside the post-dispatch debounce window."""
+        remaining = self._ticker_cooldown_remaining(ticker)
+        return remaining > 0
 
     def _record_signal(self, ticker: str, signal_type: str):
-        """Record signal timestamp for cooldown tracking."""
+        """Record legacy signal timestamp for diagnostics."""
         key = f"{ticker}:{signal_type}"
         self.recent_signals[key] = datetime.utcnow()
+
+    def _ticker_cooldown_remaining(self, ticker: str) -> int:
+        """Return seconds left before this ticker can dispatch another signal."""
+        key = str(ticker or "").upper().strip()
+        if not key:
+            return 0
+        last_seen = self.last_signal_timestamps.get(key)
+        if not last_seen:
+            return 0
+        elapsed = (datetime.utcnow() - last_seen).total_seconds()
+        remaining = int(max(0.0, float(self.signal_cooldown) - elapsed))
+        return remaining
+
+    def _mark_ticker_dispatched(self, ticker: str) -> None:
+        """Start ticker-level debounce after a signal has been approved for dispatch."""
+        key = str(ticker or "").upper().strip()
+        if key:
+            self.last_signal_timestamps[key] = datetime.utcnow()
 
     def _technical_action_from_signal(self, signal: TechnicalSignal) -> str:
         """Infer BUY/SELL from deterministic scanner signal metadata."""
@@ -1794,7 +1890,12 @@ class CloudScanner:
         for signal in signals:
             # Check cooldown
             if self._is_signal_cooldown(signal.ticker, signal.signal_type):
-                logger.debug(f"Signal cooldown: {signal.ticker} - {signal.signal_type}")
+                remaining = self._ticker_cooldown_remaining(signal.ticker)
+                logger.info(
+                    "[DEBOUNCE] Signal blocked for Ticker: %s (Cooldown active for another %d seconds)",
+                    signal.ticker,
+                    remaining,
+                )
                 continue
 
             logger.info(
@@ -1836,9 +1937,6 @@ class CloudScanner:
                 )
 
                 logger.info(f"Swarm consensus: {confidence_score:.2f} confidence")
-
-                # ALWAYS return signal - let user decide, not the AI
-                self._record_signal(signal.ticker, signal.signal_type)
 
                 technical_action = self._technical_action_from_signal(signal)
                 runtime_mode = str(
@@ -1891,6 +1989,22 @@ class CloudScanner:
                         analysis.action.value,
                         signal.ticker,
                         mtf_votes,
+                    )
+                    self._emit_status(signal.ticker, "trade_rejected")
+                    continue
+
+                signal_price = float(signal.metadata.get("price", market_data.price) or 0.0)
+                level2_ok, level2_structure = await self._evaluate_level2_structure(
+                    signal.ticker,
+                    analysis.action.value,
+                    signal_price,
+                )
+                if not level2_ok:
+                    logger.info(
+                        "[LEVEL2] Structure block: %s %s rejected | %s",
+                        analysis.action.value,
+                        signal.ticker,
+                        level2_structure.get("reason"),
                     )
                     self._emit_status(signal.ticker, "trade_rejected")
                     continue
@@ -1958,7 +2072,6 @@ class CloudScanner:
                         self._emit_status(signal.ticker, "trade_rejected")
                         continue
                 # [FIRE] FIX: Ensure entry/stop/tp are set (use signal price if LLM returned 0)
-                signal_price = signal.metadata.get("price", market_data.price)
                 if analysis.entry_price == 0.0 or analysis.entry_price is None:
                     analysis.entry_price = signal_price
                 liquidity_zone = signal.metadata.get("liquidity_zone")
@@ -1972,6 +2085,8 @@ class CloudScanner:
                     analysis.take_profit = 0.0
 
                 # Build clean signal data - NO datetime objects!
+                self._record_signal(signal.ticker, signal.signal_type)
+                self._mark_ticker_dispatched(signal.ticker)
                 return {
                     "ticker": signal.ticker,
                     "action": analysis.action.value,
@@ -1982,6 +2097,7 @@ class CloudScanner:
                     "reason": str(analysis.reason),
                     "signal_type": signal.signal_type,
                     "mtf_check": mtf_votes,
+                    "level2_structure": level2_structure,
                     "brain_verdict": brain_verdict,
                     "brain_reasoning": str(brain_decision.get("reasoning", "") or ""),
                     "brain_model": str(

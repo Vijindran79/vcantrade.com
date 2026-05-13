@@ -69,30 +69,34 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 # ===== OPTIONAL SYMBOL SAFETY LISTS =====
 # These are only used by legacy broker-specific paths. TradingView and MT5 route
 # through their own execution handlers and should not be blocked by an Apex list.
-FUTURES_WHITELIST = ["CLM26", "NQM6", "ESM6", "MGC"]
+FUTURES_WHITELIST = ["CL=F", "CL1!", "NQM6", "ESM6", "MGC"]
 # Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
 # ===== SYMBOL BRIDGE (TradingView → MT5 Broker) =====
 # TradingView chart symbols can differ from broker-specific MT5 names.
 # Override any value with an environment variable if your broker labels differ.
-TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "CLM26", "MGC")
+TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "CL1!", "MGC")
 # Backward-compatible alias for old modules while the repo is being cleaned.
 WEALTHCHARTS_TICKERS = TRADINGVIEW_TICKERS
 
-# Muted tickers: scanner will NEVER scan these — Unmuted for CLM26.NYMEX targeting
+# Muted tickers: scanner will NEVER scan these.
 MUTED_TICKERS = set()
 
 SYMBOL_MAP = {
     "NQM6": os.getenv("MT5_NQM6_SYMBOL", "NQM6"),
     "ESM6": os.getenv("MT5_ESM6_SYMBOL", "ESM6"),
-    "CLM26": os.getenv("MT5_CLM26_SYMBOL", "WTI_SB"),  # Updated to CLM26
+    "CL=F": os.getenv("MT5_CL_SYMBOL", "WTI_SB"),
+    "CL1!": os.getenv("MT5_CL_SYMBOL", "WTI_SB"),
+    "CLM26": os.getenv("MT5_CLM26_SYMBOL", "WTI_SB"),  # Legacy alias only
     "MGC": os.getenv("MT5_MGC_SYMBOL", "XAUUSD"),
 }
 
 # Extra exact candidates to try before fuzzy searching the MT5 symbol list.
 SYMBOL_BRIDGE_CANDIDATES = {
-    "CLM26": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),  # Updated to CLM26
+    "CL=F": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),
+    "CL1!": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),
+    "CLM26": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),  # Legacy alias only
     "MGC": ("XAUUSD", "GOLD_SB", "Gold_SB", "Gold", "XAU", "MGC"),
     "NQM6": ("NQM6", "NAS100_SB", "NAS100", "MNQ"),
     "ESM6": ("ESM6", "US500_SB", "US500", "MES"),
@@ -100,7 +104,9 @@ SYMBOL_BRIDGE_CANDIDATES = {
 
 # Terms used for fuzzy MarketWatch fallback after exact candidates fail.
 SYMBOL_FUZZY_TERMS = {
-    "CLM26": ("CL", "WTI", "Crude", "Oil"),  # Updated to CLM26
+    "CL=F": ("CL", "WTI", "Crude", "Oil"),
+    "CL1!": ("CL", "WTI", "Crude", "Oil"),
+    "CLM26": ("CL", "WTI", "Crude", "Oil"),  # Legacy alias only
     "MGC": ("MGC", "XAU", "GOLD", "Gold"),
     "NQM6": ("NQ", "NAS", "Nasdaq"),
     "ESM6": ("ES", "SP500", "S&P"),
@@ -200,7 +206,7 @@ CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
 SCAN_INTERVAL = 15  # Reduced from 5 — less DOM polling = less detection
 WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "3.0"))
-CLOUD_TICKERS = ["BTC-USD"]  # BTC-USD kept as 24/7 fallback; futures are watchlist-driven
+CLOUD_TICKERS = ["CME_MINI:MNQ1!", "CME_MINI:MES1!", "CL=F"]
 
 # yfinance requires dashed crypto symbols. Keep chart/broker symbols separate.
 YFINANCE_SYMBOL_MAP = {
@@ -222,47 +228,58 @@ YFINANCE_SYMBOL_MAP = {
     "XRPUSD": "XRP-USD",
     "XRPUSDT": "XRP-USD",
     "XRP-USD": "XRP-USD",
+    "CL=F": "CL=F",
+    "CL1!": "CL=F",
+    "NYMEX:CL1!": "CL=F",
+    "NYMEX:CLM26!": "CL=F",
+    "CLM26": "CL=F",
+    "CLM26!": "CL=F",
 }
 
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
-MULTI_ASSET_TICKERS = ["NYMEX:CLM26!", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"]  # Updated to CLM26
+MULTI_ASSET_TICKERS = ["CL=F", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
 SYMBOL_MAP = {
     "CME_MINI:MNQ1!": "MNQ=F",
     "CME_MINI:MES1!": "MES=F",
-    "NYMEX:CLM26!": "CLM26.NYMEX",  # Updated to CLM26
+    "CL=F": "CL=F",
+    "CL1!": "CL=F",
+    "NYMEX:CL1!": "CL=F",
+    "NYMEX:CLM26!": "CL=F",  # Legacy alias only
     "COMEX:MGC1!": "GC=F",
 }
 # Symbol mapping: Yahoo / internal ticker -> TradingView chart symbol.
 # Used by browser_agent/rpa_executor when a chart symbol needs to be resolved.
-# NQ=F/ES=F/CL=F map to the current working futures contract codes.
+# NQ=F/ES=F/CL=F map to the current working TradingView chart codes.
 TRADINGVIEW_SYMBOL_MAP = {
     # Yahoo futures -> CME_MINI / NYMEX contract names
     "NQ=F":  "NQM6",
     "MNQ=F": "NQM6",
     "ES=F":  "ESM6",
     "MES=F": "ESM6",
-    "CL=F":  "CLM26.NYMEX",  # Updated to CLM26
-    "MCL=F": "CLM26.NYMEX",  # Updated to CLM26
+    "CL=F":  "CL1!",
+    "MCL=F": "MCL1!",
     # Canonical short forms (F stripped by candidate generator)
     "NQ":  "NQM6",
     "MNQ": "NQM6",
     "ES":  "ESM6",
     "MES": "ESM6",
-    "CL":  "CLM26.NYMEX",  # Updated to CLM26
-    "MCL": "CLM26.NYMEX",  # Updated to CLM26
+    "CL":  "CL1!",
+    "MCL": "MCL1!",
     # TradingView futures contract codes.
     "CME_MINI:MNQ1!": "NQM6",
     "CME_MINI:MES1!": "ESM6",
-    "NYMEX:CLM26!": "CLM26.NYMEX",  # Updated to CLM26
+    "NYMEX:CL1!": "CL1!",
+    "NYMEX:CLM26!": "CL1!",  # Legacy alias only
     # Bare TradingView contract codes (user-specified analysis tickers)
     "MNQ1!": "NQM6",
     "MES1!": "ESM6",
-    "CLM26!": "CLM26.NYMEX",  # Updated to CLM26
+    "CL1!": "CL1!",
+    "CLM26!": "CL1!",  # Legacy alias only
     # Gold (COMEX Micro Gold)
     "COMEX:MGC1!": "MGC",
     "GC=F": "MGC",
@@ -277,19 +294,22 @@ TRADINGVIEW_SYMBOL_MAP = {
 MT5_SYMBOL_MAP = {
     # ===== TradingView futures aliases -> Pepperstone broker symbols =====
     # These are the symbols the scanner receives - map them FIRST.
-    "CLM26": "Crude_SB",  # Updated to CLM26
+    "CL=F": "Crude_SB",
+    "CL1!": "Crude_SB",
+    "CLM26": "Crude_SB",  # Legacy alias only
     "NQM6": "NAS100_SB",
     "ESM6": "US500_SB",
     "MGC": "Gold_SB",
     # CME / NYMEX prefixes -> Pepperstone exact terminal name
     "CME_MINI:MNQ1!": "NAS100_SB",
     "CME_MINI:MES1!": "US500_SB",
-    "NYMEX:CLM26!": "Crude_SB",  # Updated to CLM26
-    "CLM26!": "Crude_SB",  # Updated to CLM26
+    "NYMEX:CL1!": "Crude_SB",
+    "NYMEX:CLM26!": "Crude_SB",  # Legacy alias only
+    "CLM26!": "Crude_SB",  # Legacy alias only
     # Yahoo-style aliases -> Pepperstone
     "MNQ=F": "NAS100_SB",
     "MES=F": "US500_SB",
-    "CL=F": "Crude_SB",  # Updated to CLM26
+    "CL=F": "Crude_SB",
     "NQ=F": "NAS100_SB",
     "ES=F": "US500_SB",
     "GC=F": "Gold_SB",
@@ -300,10 +320,10 @@ MT5_SYMBOL_MAP = {
     # Canonical short forms (F stripped) -> Pepperstone
     "ES": "US500_SB",
     "NQ": "NAS100_SB",
-    "CL": "Crude_SB",  # Updated to CLM26
+    "CL": "Crude_SB",
     "MES": "US500_SB",
     "MNQ": "NAS100_SB",
-    "MCL": "Crude_SB",  # Updated to CLM26
+    "MCL": "Crude_SB",
     "GC": "Gold_SB",
     "SI": "XAGUSD",
     "YM": "YM1!",
@@ -339,11 +359,18 @@ MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 # TEACHER/AUTONOMOUS is controlled separately by DRY_RUN and TEACHER_MODE.
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "TV_DESKTOP").upper().strip()
 TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_DESKTOP")
+
+# ACTIVE EXECUTION SURFACE — runtime switchable between TradingView RPA and MT5
+# "TRADINGVIEW" = Physical mouse clicks on TradingView web/paper interface
+# "MT5" = Native MetaTrader 5 order execution
+ACTIVE_EXECUTION_SURFACE = os.getenv("ACTIVE_EXECUTION_SURFACE", "TRADINGVIEW").upper().strip()
+
+# TradingView account label to verify before clicking (e.g., "Paper Trading", "Live")
+TRADINGVIEW_ACCOUNT_LABEL = os.getenv("TRADINGVIEW_ACCOUNT_LABEL", "Paper Trading").strip()
 MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.1"))
 
-# Side-by-Side Execution: Desktop IP for Rithmic/NinjaTrader
-# Your desktop IP (where R|Trader Pro runs): 192.168.0.39
-EXECUTION_HOST = os.getenv("EXECUTION_HOST", "192.168.0.39").strip()
+# Side-by-Side Execution: local Ghost-Hand socket for TradingView/MT5 workflows.
+EXECUTION_HOST = os.getenv("EXECUTION_HOST", "127.0.0.1").strip()
 
 # SYNCHRONIZED CDP URL — all modules use this for port 9222
 # Legacy modules (browser_agent) and new modules (ghost_executor) both read this.
@@ -378,17 +405,17 @@ BROWSER_WINDOW_HINTS = [
     value.strip()
     for value in os.getenv(
         "BROWSER_WINDOW_HINTS",
-        "WealthCharts,TradingView,R|Trader Pro,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
+        "WealthCharts,TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge",
     ).split(",")
     if value.strip()
 ]
 
-# R|Trader Pro specific window hints
-RTRADER_WINDOW_HINTS = [
+# TradingView / browser window hints.
+TRADING_WINDOW_HINTS = [
     value.strip()
     for value in os.getenv(
-        "RTRADER_WINDOW_HINTS",
-        "Rithmic Trader Pro,Rithmic Trader,R|Trader Pro,R|Trader,RTrader Pro,RTrader",
+        "TRADING_WINDOW_HINTS",
+        "TradingView,Google Chrome,Chrome,Brave,Microsoft Edge,Edge,MetaTrader 5,MetaTrader",
     ).split(",")
     if value.strip()
 ]
@@ -413,9 +440,18 @@ RSI_OVERBOUGHT = 85
 RSI_OVERSOLD = 30
 SMA_FAST = 20
 SMA_SLOW = 50
-SWARM_CONFIDENCE_THRESHOLD = 0.60  # TEMPORARY TEST: lowered from 0.50 for Sunday signal testing
-MIN_CONFIDENCE_THRESHOLD = 60.0    # TEMPORARY TEST: lowered from 50.0 for Sunday signal testing
-VISUAL_ALERT_MIN_CONFIDENCE = SWARM_CONFIDENCE_THRESHOLD
+SWARM_INCUBATION_FLOOR = float(os.getenv("SWARM_INCUBATION_FLOOR", "60.0"))
+SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "85.0"))
+SWARM_CONFIDENCE_THRESHOLD = SWARM_INCUBATION_FLOOR / 100.0
+MIN_CONFIDENCE_THRESHOLD = SWARM_INCUBATION_FLOOR
+VISUAL_ALERT_MIN_CONFIDENCE = SWARM_HIGH_PRIORITY_THRESHOLD / 100.0
+MTF_STRUCTURE_FILTER_ENABLED = os.getenv("MTF_STRUCTURE_FILTER_ENABLED", "True").lower() == "true"
+MTF_STRUCTURE_ZONE_ATR_MULTIPLIER = float(os.getenv("MTF_STRUCTURE_ZONE_ATR_MULTIPLIER", "0.65"))
+MTF_STRUCTURE_PROXIMITY_PCT = float(os.getenv("MTF_STRUCTURE_PROXIMITY_PCT", "0.0025"))
+SIGNAL_COOLDOWN_SECONDS = int(os.getenv("SIGNAL_COOLDOWN_SECONDS", "300"))
+MT5_REQUIRE_PROTECTIVE_STOP = os.getenv("MT5_REQUIRE_PROTECTIVE_STOP", "true").lower() == "true"
+AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED = os.getenv("AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED", "false").lower() == "true"
+AI_OVERLAY_START_PINNED = os.getenv("AI_OVERLAY_START_PINNED", "false").lower() == "true"
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_ENABLED = True
@@ -435,13 +471,22 @@ HOTKEY_SELL = "<ctrl>+s"
 HOTKEY_CLOSE = "<ctrl>+x"
 HUMAN_LATENCY = os.getenv("HUMAN_LATENCY", "True").lower() == "true"
 
-# Safe fallback coordinates for RPA button clicks when color detection fails.
-# Update these to match your R|Trader Pro layout and monitor setup.
-RTRADER_FALLBACK_COORDS = {
-    "buy_button": (int(os.getenv("RTRADER_BUY_X", "960")), int(os.getenv("RTRADER_BUY_Y", "540"))),
-    "sell_button": (int(os.getenv("RTRADER_SELL_X", "960")), int(os.getenv("RTRADER_SELL_Y", "580"))),
-    "flatten_button": (int(os.getenv("RTRADER_FLATTEN_X", "960")), int(os.getenv("RTRADER_FLATTEN_Y", "620"))),
+# Safe fallback coordinates for TradingView RPA button clicks when DOM targeting fails.
+TRADINGVIEW_FALLBACK_COORDS = {
+    "buy_button": (
+        int(os.getenv("TRADINGVIEW_BUY_X", "960")),
+        int(os.getenv("TRADINGVIEW_BUY_Y", "540")),
+    ),
+    "sell_button": (
+        int(os.getenv("TRADINGVIEW_SELL_X", "960")),
+        int(os.getenv("TRADINGVIEW_SELL_Y", "580")),
+    ),
+    "flatten_button": (
+        int(os.getenv("TRADINGVIEW_FLATTEN_X", "960")),
+        int(os.getenv("TRADINGVIEW_FLATTEN_Y", "620")),
+    ),
 }
+FALLBACK_COORDS = TRADINGVIEW_FALLBACK_COORDS
 
 # Multi-monitor support
 MULTI_MONITOR_ENABLED = os.getenv("MULTI_MONITOR_ENABLED", "True").lower() == "true"
@@ -454,11 +499,13 @@ MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 
 # ===== NINJATRADER ATI CONFIGURATION =====
 ATI_ORDER_DIR = os.getenv("ATI_ORDER_DIR", "C:\\NinjaTrader 8\\ATI\\Orders")
-# Ticker mapping for NinjaTrader/Topstep (usually same as Rithmic)
+# Ticker mapping for legacy desktop adapters.
 NINJATRADER_TICKER_MAP = {
     "NQM6": "NQ 06-26",
     "ESM6": "ES 06-26",
-    "CLM26": "CL 06-26",  # Updated to CLM26
+    "CL=F": "CL 1!",
+    "CL1!": "CL 1!",
+    "CLM26": "CL 06-26",  # Legacy alias only
     "MGC": "MGC 06-26",
     "XAUUSD": "MGC 06-26",
 }

@@ -73,15 +73,22 @@ class MT5Executor:
                 self.initialized = False
 
     def execute_trade(
-        self, symbol: str, action: str, volume: Optional[float] = None
+        self,
+        symbol: str,
+        action: str,
+        volume: Optional[float] = None,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
     ) -> bool:
         """
-        Send a market order to MT5.
+        Send a protected market order to MT5.
 
         Args:
             symbol: TradingView-format symbol (e.g. CME_MINI:MNQ1!)
             action: "BUY" or "SELL"
             volume: Lot size (defaults to config.MT5_VOLUME)
+            stop_loss: Broker price for the protective stop.
+            take_profit: Optional broker price for the profit target.
         """
         if not self.initialized:
             if not self.initialize():
@@ -100,14 +107,38 @@ class MT5Executor:
             logger.error("[MT5] Failed to get tick for %s", mt5_symbol)
             return False
 
+        symbol_info = mt5.symbol_info(mt5_symbol)
+        digits = int(getattr(symbol_info, "digits", 5) or 5) if symbol_info else 5
+
         lot = volume or float(getattr(config, "MT5_VOLUME", 0.1))
+        sl = round(float(stop_loss or 0.0), digits)
+        tp = round(float(take_profit or 0.0), digits)
+        require_stop = bool(getattr(config, "MT5_REQUIRE_PROTECTIVE_STOP", True))
 
         if action.upper() == "BUY":
             order_type = mt5.ORDER_TYPE_BUY
             price = tick.ask
+            if require_stop and sl <= 0:
+                logger.error("[MT5] Rejected BUY %s: protective stop_loss is required", mt5_symbol)
+                return False
+            if sl > 0 and sl >= price:
+                logger.error("[MT5] Rejected BUY %s: stop_loss %.5f must be below ask %.5f", mt5_symbol, sl, price)
+                return False
+            if tp > 0 and tp <= price:
+                logger.error("[MT5] Rejected BUY %s: take_profit %.5f must be above ask %.5f", mt5_symbol, tp, price)
+                return False
         else:
             order_type = mt5.ORDER_TYPE_SELL
             price = tick.bid
+            if require_stop and sl <= 0:
+                logger.error("[MT5] Rejected SELL %s: protective stop_loss is required", mt5_symbol)
+                return False
+            if sl > 0 and sl <= price:
+                logger.error("[MT5] Rejected SELL %s: stop_loss %.5f must be above bid %.5f", mt5_symbol, sl, price)
+                return False
+            if tp > 0 and tp >= price:
+                logger.error("[MT5] Rejected SELL %s: take_profit %.5f must be below bid %.5f", mt5_symbol, tp, price)
+                return False
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -121,6 +152,10 @@ class MT5Executor:
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
+        if sl > 0:
+            request["sl"] = sl
+        if tp > 0:
+            request["tp"] = tp
 
         result = mt5.order_send(request)
         if result is None:
@@ -129,11 +164,13 @@ class MT5Executor:
 
         if result.retcode == mt5.TRADE_RETCODE_DONE:
             logger.info(
-                "[MT5] %s %s %.2f lots @ %.2f | Ticket: %s",
+                "[MT5] %s %s %.2f lots @ %.2f | SL=%s TP=%s | Ticket: %s",
                 action.upper(),
                 mt5_symbol,
                 lot,
                 price,
+                sl or "none",
+                tp or "none",
                 result.order,
             )
             return True

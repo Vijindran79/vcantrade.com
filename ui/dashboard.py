@@ -652,6 +652,37 @@ class CommandCenter(QWidget):
         
         layout.addLayout(mode_row)
 
+        # Row 1b: Execution Surface Toggle (TradingView vs MT5)
+        surface_row = QHBoxLayout()
+        surface_row.setSpacing(8)
+        surface_label = QLabel("Surface:")
+        surface_label.setStyleSheet(f"color: {GRAY}; font-size: 12px; font-weight: bold; font-family: 'Consolas';")
+        surface_row.addWidget(surface_label)
+
+        self.btn_surface_tv = QPushButton("[CHART] TradingView")
+        self.btn_surface_tv.setCheckable(True)
+        self.btn_surface_tv.setChecked(True)
+        self.btn_surface_tv.setMinimumHeight(32)
+        self.btn_surface_tv.setStyleSheet(f"""
+            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
+        """)
+        self.btn_surface_tv.clicked.connect(self._set_surface_tradingview)
+        surface_row.addWidget(self.btn_surface_tv)
+
+        self.btn_surface_mt5 = QPushButton("[MT5] MetaTrader 5")
+        self.btn_surface_mt5.setCheckable(True)
+        self.btn_surface_mt5.setChecked(False)
+        self.btn_surface_mt5.setMinimumHeight(32)
+        self.btn_surface_mt5.setStyleSheet(f"""
+            QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
+        """)
+        self.btn_surface_mt5.clicked.connect(self._set_surface_mt5)
+        surface_row.addWidget(self.btn_surface_mt5)
+        surface_row.addStretch()
+        layout.addLayout(surface_row)
+
         # Row 2: Default Investment Amount
         invest_row = QHBoxLayout()
         invest_row.setSpacing(10)
@@ -2036,6 +2067,36 @@ class CommandCenter(QWidget):
         )
         self.mode_changed.emit("AUTONOMOUS")
         self.log("[ROBOT] Switched to AUTONOMOUS MODE - Auto-execution enabled")
+
+    def _set_surface_tradingview(self):
+        """Switch execution surface to TradingView (active RPA clicking)."""
+        config.ACTIVE_EXECUTION_SURFACE = "TRADINGVIEW"
+        self.btn_surface_tv.setChecked(True)
+        self.btn_surface_mt5.setChecked(False)
+        self.btn_surface_tv.setStyleSheet(f"""
+            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
+        """)
+        self.btn_surface_mt5.setStyleSheet(f"""
+            QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
+        """)
+        self.log("[SURFACE] Execution surface switched to TRADINGVIEW — active RPA clicking enabled")
+
+    def _set_surface_mt5(self):
+        """Switch execution surface to MetaTrader 5 (native order routing)."""
+        config.ACTIVE_EXECUTION_SURFACE = "MT5"
+        self.btn_surface_mt5.setChecked(True)
+        self.btn_surface_tv.setChecked(False)
+        self.btn_surface_mt5.setStyleSheet(f"""
+            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
+        """)
+        self.btn_surface_tv.setStyleSheet(f"""
+            QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
+                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
+        """)
+        self.log("[SURFACE] Execution surface switched to MT5 — native order routing enabled")
 
     def _add_ticker(self):
         ticker = settings_manager.normalize_ticker(self.ticker_input.text())

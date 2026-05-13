@@ -155,6 +155,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _teacher_mode_forced_by_config() -> bool:
+    """Return True when env/config explicitly pins the app to Teacher mode."""
+    execution_mode = str(getattr(config, "EXECUTION_MODE", "") or "").strip().upper()
+    trading_surface = str(getattr(config, "TRADING_SURFACE", "") or "").strip().upper()
+    runtime_mode = str(os.getenv("RUNTIME_MODE", os.getenv("TRADING_MODE", "")) or "").strip().upper()
+    return bool(getattr(config, "TEACHER_MODE", False)) or execution_mode == "TEACHER" or trading_surface == "TEACHER" or runtime_mode == "TEACHER"
+
+
 def _is_passive_visual_mode() -> bool:
     """Return True when the bot must not capture browser/desktop screenshots."""
     execution_mode = str(getattr(config, "EXECUTION_MODE", "")).upper().strip()
@@ -1427,6 +1435,7 @@ class VcaniTradeApp:
         # Initialize before HybridExecutionGateway so all execution paths share it.
         self.execution_socket_client = ExecutionSocketClient()
         self.side_by_side_enabled = True  # Set to False to disable socket commands
+        self._verify_ghost_hand_socket_async()
         exchange_provider = os.getenv("EXCHANGE_PROVIDER", "binance")
         exchange_api_key = os.getenv("EXCHANGE_API_KEY") or os.getenv("BINANCE_API_KEY") or os.getenv("BYBIT_API_KEY")
         exchange_api_secret = os.getenv("EXCHANGE_API_SECRET") or os.getenv("BINANCE_API_SECRET") or os.getenv("BYBIT_API_SECRET")
@@ -1553,7 +1562,9 @@ class VcaniTradeApp:
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
 
         # State
-        self.current_mode = "TEACHER" if config.TEACHER_MODE or config.DRY_RUN else "AUTONOMOUS"
+        self._manual_mode_override = False
+        self._settings_mode_cache = "TEACHER" if self._teacher_mode_forced_by_config() else "AUTONOMOUS"
+        self.current_mode = "TEACHER" if self._teacher_mode_forced_by_config() or config.DRY_RUN else "AUTONOMOUS"
         self.analysis_mode = False
         self.latest_signals = {}
         self.ticker_selector = self.current_watchlist[0] if self.current_watchlist else "BTC-USD"
@@ -1598,8 +1609,16 @@ class VcaniTradeApp:
     def _log_ui(self, message: str):
         self._run_on_ui_thread(lambda: self.cmd.log(message))
 
+    def _activity_ui(self, icon: str, message: str):
+        """Thread-safe narrator activity update."""
+        self._run_on_ui_thread(lambda: self.ai_narrator.add_activity(icon, message))
+
     def _is_mt5_mode(self) -> bool:
-        return str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper() == "MT5"
+        """Return True when MT5 should handle execution.
+        Checks both legacy EXECUTION_MODE and the new ACTIVE_EXECUTION_SURFACE toggle."""
+        exec_mode = str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper()
+        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper()
+        return exec_mode == "MT5" or surface == "MT5"
 
     def _get_mt5_executor(self):
         if not self._is_mt5_mode():
@@ -2053,10 +2072,51 @@ class VcaniTradeApp:
 
     def _apply_initial_mode_ui(self):
         """Align the dashboard controls with the backend's initial runtime mode."""
-        if self.current_mode == "AUTONOMOUS":
-            self.cmd._set_autonomous_mode()
-        else:
-            self.cmd._set_teacher_mode()
+        self._apply_mode_to_dashboard(self.current_mode)
+
+    def _teacher_mode_forced_by_config(self) -> bool:
+        """Return True when env/config explicitly pins the app to Teacher mode."""
+        return _teacher_mode_forced_by_config()
+
+    def _normalize_runtime_mode(self, mode: str, source: str = "runtime") -> str:
+        requested = str(mode or "").strip().upper()
+        if requested not in {"TEACHER", "AUTONOMOUS"}:
+            requested = self.current_mode if hasattr(self, "current_mode") else "TEACHER"
+        if requested == "AUTONOMOUS" and self._teacher_mode_forced_by_config():
+            logger.info("[MODE] Ignoring AUTONOMOUS request from %s because Teacher mode is config-forced", source)
+            return "TEACHER"
+        if requested == "AUTONOMOUS" and bool(getattr(config, "DRY_RUN", False)):
+            logger.info("[MODE] Ignoring AUTONOMOUS request from %s while DRY_RUN is enabled", source)
+            return "TEACHER"
+        return requested
+
+    def _set_runtime_mode(self, mode: str, source: str = "runtime", manual: bool = False) -> str:
+        """Single authority for runtime mode changes.
+
+        Settings sync can follow this state, but it must not override it.
+        """
+        normalized = self._normalize_runtime_mode(mode, source=source)
+        self.current_mode = normalized
+        self._settings_mode_cache = normalized
+        if manual:
+            self._manual_mode_override = True
+        self._sync_runtime_session_context()
+        logger.info("Mode changed to %s", normalized)
+        return normalized
+
+    def _apply_mode_to_dashboard(self, mode: str):
+        """Update dashboard button state without re-emitting mode_changed."""
+        from PyQt6.QtCore import QSignalBlocker
+
+        normalized = self._normalize_runtime_mode(mode, source="dashboard_sync")
+        blocker = QSignalBlocker(self.cmd)
+        try:
+            if normalized == "AUTONOMOUS":
+                self.cmd._set_autonomous_mode()
+            else:
+                self.cmd._set_teacher_mode()
+        finally:
+            del blocker
 
     def _sync_runtime_session_context(self):
         """Keep session-awareness aligned with the active dashboard watchlist and operator mode."""
@@ -2157,13 +2217,22 @@ class VcaniTradeApp:
         """Debounced audible announcement for actionable opportunities."""
         ticker = str(ticker or "UNKNOWN").upper()
         action = str(action or "SIGNAL").upper()
+        confidence_score = self._confidence_to_score(confidence)
+        if not self._is_loud_signal(confidence_score, {}):
+            logger.info(
+                "[INCUBATION] Muting audible alert for %s %s at %.1f%% from %s",
+                action,
+                ticker,
+                confidence_score,
+                source,
+            )
+            return
         key = f"{source}:{ticker}:{action}"
         now = time.monotonic()
         last = float(getattr(self, "_last_audio_alerts", {}).get(key, 0.0) or 0.0)
         if now - last < 3.0:
             return
         self._last_audio_alerts[key] = now
-        confidence_score = self._confidence_to_score(confidence)
         _play_ui_alert("signal", action, confidence_score)
         _speak_alert(f"{action} signal on {ticker}. Confidence {confidence_score:.0f} percent.")
 
@@ -2231,8 +2300,28 @@ class VcaniTradeApp:
 
     def _on_settings_changed(self, settings: dict):
         """Handle trading settings update from dashboard."""
+        settings = dict(settings or {})
+        incoming_mode = str(
+            settings.pop("runtime_mode", settings.pop("current_mode", settings.pop("mode", "")))
+            or ""
+        ).upper()
+        if incoming_mode:
+            normalized_incoming = self._normalize_runtime_mode(incoming_mode, source="settings_sync")
+            if normalized_incoming != self.current_mode:
+                logger.info(
+                    "[MODE] Ignoring stale settings mode %s while live mode is %s",
+                    incoming_mode,
+                    self.current_mode,
+                )
+            self._settings_mode_cache = self.current_mode
+
         # Update persistent settings
         self.settings.update(settings)
+        if self._normalize_runtime_mode(self.current_mode, source="post_settings_sync") != self.current_mode:
+            corrected = self._set_runtime_mode(self.current_mode, source="post_settings_sync")
+            self._apply_mode_to_dashboard(corrected)
+        elif self._settings_mode_cache != self.current_mode:
+            self._settings_mode_cache = self.current_mode
 
         # Update local variables
         self.default_investment = settings.get("investment_amount", settings.get("investment", 1000.0))
@@ -2959,6 +3048,21 @@ class VcaniTradeApp:
 
         return 0.0
 
+    def _is_loud_signal(self, confidence_score: float, signal_data: dict | None = None) -> bool:
+        """True only for 85%+ signals or signals promoted by swarm incubation."""
+        signal_data = signal_data or {}
+        if bool(signal_data.get("swarm_incubated")) or str(signal_data.get("incubation_route", "")).lower() == "promoted":
+            return True
+        threshold = float(getattr(config, "SWARM_HIGH_PRIORITY_THRESHOLD", 85.0))
+        return float(confidence_score or 0.0) >= threshold
+
+    def _is_incubation_signal(self, confidence_score: float, signal_data: dict | None = None) -> bool:
+        """True for muted 60-84% signals that have not earned incubation promotion."""
+        if self._is_loud_signal(confidence_score, signal_data):
+            return False
+        floor = float(getattr(config, "SWARM_INCUBATION_FLOOR", 60.0))
+        return floor <= float(confidence_score or 0.0) < float(getattr(config, "SWARM_HIGH_PRIORITY_THRESHOLD", 85.0))
+
     def _extract_signal_tag(self, *parts) -> str:
         """Extract explicit [SIGNAL] BUY/SELL/WAIT output, falling back to standard action words."""
         import re
@@ -3471,27 +3575,88 @@ class VcaniTradeApp:
     def _on_force_test_trade(self):
         """Handle manual force-hand request through the local execution socket."""
         import threading
+        import yfinance as yf
 
         ticker_hint = self.current_watchlist[0] if self.current_watchlist else self.ticker_selector
         self.cmd.log(f"[BOLT] FORCE HAND TEST: Sending BUY_REAL to local execution socket for {ticker_hint}")
         self.ai_narrator.add_activity("[MOUSE]", f"Force hand test: sending to local execution socket for {ticker_hint}")
 
+        # FIX 3: Fetch live price data for the ticker before sending command
+        entry_price = 0.0
+        stop_loss = 0.0
+        take_profit = 0.0
+        try:
+            market_ticker = self._canonical_market_ticker(ticker_hint)
+            sym = yf.Ticker(market_ticker)
+            hist = sym.history(period="1d", interval="1m")
+            if not hist.empty and "Close" in hist.columns:
+                entry_price = float(hist["Close"].dropna().iloc[-1])
+                # Estimate SL/TP as 1% below/above current price
+                stop_loss = entry_price * 0.99
+                take_profit = entry_price * 1.015
+                self.cmd.log(f"[CHART] Force test live price for {ticker_hint}: ${entry_price:.2f}")
+        except Exception as price_err:
+            self.cmd.log(f"[WARN] Could not fetch live price for {ticker_hint}: {price_err}")
+
+        target_info = self.rpa_hand.describe_entry_target("BUY", ticker_hint=ticker_hint)
+        tradingview_selectors = {
+            "buy_market": "button[data-type=\"buy-mkt\"]",
+            "sell_market": "button[data-type=\"sell-mkt\"]",
+            "generic_button_query": "button, div[role=\"button\"], span[role=\"button\"]",
+        }
+        if target_info:
+            abs_x, abs_y = target_info.get("absolute", (None, None))
+            self.cmd.log(f"[TARGET] Force hand target resolved: BUY {ticker_hint} abs=({abs_x}, {abs_y})")
+        else:
+            self.cmd.log("[WARN] Force hand target not resolved; socket server will reject if no coordinate override exists")
+
         def run_force_test_in_thread():
             try:
                 # Send test command to the local execution socket (port 5555).
-                success = self.execution_socket_client.send_command("BUY_REAL")
+                # FIX 3: Pass real market data alongside the command.
+                success = self.execution_socket_client.send_command(
+                    "BUY_REAL",
+                    entry_price=entry_price,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    ticker=ticker_hint,
+                    target=target_info or {},
+                    selectors=tradingview_selectors,
+                    source="main.py.force_hand_test",
+                )
                 if success:
-                    self.cmd.log(f'<span style="color:#3FB950;font-weight:bold">[MOUSE] FORCE HAND TEST PASSED</span>: BUY_REAL sent to local execution socket for {ticker_hint}')
-                    self.ai_narrator.add_activity("[OK]", f"Force hand test passed - local execution socket received command for {ticker_hint}")
+                    self._log_ui(f'<span style="color:#3FB950;font-weight:bold">[MOUSE] FORCE HAND TEST PASSED</span>: BUY_REAL sent to local execution socket for {ticker_hint}')
+                    self._activity_ui("[OK]", f"Force hand test passed - local execution socket received command for {ticker_hint}")
                 else:
-                    self.cmd.log(f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE HAND TEST FAILED</span>: Could not reach local execution socket on port 5555 for {ticker_hint}')
-                    self.ai_narrator.add_activity("[WARN]", f"Force hand test failed - local execution socket not responding for {ticker_hint}")
+                    self._log_ui(f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE HAND TEST FAILED</span>: Could not reach local execution socket on port 5555 for {ticker_hint}')
+                    self._activity_ui("[WARN]", f"Force hand test failed - local execution socket not responding for {ticker_hint}")
             except Exception as e:
-                self.cmd.log(f'<span style="color:#F85149">[FAIL] FORCE HAND TEST ERROR</span>: {e}')
+                self._log_ui(f'<span style="color:#F85149">[FAIL] FORCE HAND TEST ERROR</span>: {e}')
 
         hand_test_thread = threading.Thread(target=run_force_test_in_thread, daemon=True)
         hand_test_thread.start()
         self.cmd.log("[BOLT] Force hand test dispatched to local execution socket (port 5555)")
+
+    def _verify_ghost_hand_socket_async(self):
+        """Confirm the local execution socket is online without blocking UI startup."""
+        def run_handshake():
+            try:
+                if self.execution_socket_client.reconnect():
+                    message = "[SUCCESS] Ghost-Hand Socket Connection established on port 5555!"
+                    logger.info(message)
+                    self._log_ui(f'<span style="color:#3FB950;font-weight:bold">{message}</span>')
+                    if hasattr(self.ai_narrator, "add_activity"):
+                        self._activity_ui("[OK]", "Ghost-Hand socket online on port 5555")
+                else:
+                    warning = "[WARN] Ghost-Hand Socket Connection unavailable on port 5555"
+                    logger.warning(warning)
+                    self._log_ui(f'<span style="color:#D29922;font-weight:bold">{warning}</span>')
+                    if hasattr(self.ai_narrator, "add_activity"):
+                        self._activity_ui("[WARN]", "Ghost-Hand socket not responding on port 5555")
+            except Exception as exc:
+                logger.warning("[EXEC_SOCKET] Startup handshake failed: %s", exc)
+
+        threading.Thread(target=run_handshake, daemon=True).start()
 
     def _on_rpa_blind(self, reason: Optional[str] = None):
         """
@@ -4423,6 +4588,8 @@ class VcaniTradeApp:
             f'<span style="color:#8B949E">[MAIL] CLOUD ROUTE</span>: '
             f'{signal_data["action"]} {signal_data["ticker"]} delivered to local listener'
         )
+        if self.current_mode == "AUTONOMOUS":
+            QTimer.singleShot(750, lambda payload=dict(signal_data): self._cloud_signal_listener_watchdog(payload))
 
     def _on_technical_signal_detected(self, signal_data: dict):
         """Light up the UI as soon as the scanner finds an opportunity."""
@@ -4451,7 +4618,7 @@ class VcaniTradeApp:
             confidence=confidence,
             last_signal=action if action in {"BUY", "SELL"} else signal_type,
         )
-        if hasattr(self.ai_narrator, "notify_signal_detected"):
+        if self._is_loud_signal(confidence_score, signal_data) and hasattr(self.ai_narrator, "notify_signal_detected"):
             self.ai_narrator.notify_signal_detected(ticker, action, confidence)
         elif hasattr(self.ai_narrator, "update_confidence_meter"):
             self.ai_narrator.update_confidence_meter(ticker, action, confidence, status=signal_type)
@@ -4516,10 +4683,12 @@ class VcaniTradeApp:
     def _on_signal_received_inner(self, signal_data: dict):
         """Inner signal handler — UI-safe implementation."""
         self._mark_bridge_alive()
+        self._mark_signal_listener_seen(signal_data)
         brain_override_action = self._brain_override_action(signal_data)
         resolved_action = self._resolve_directional_action(signal_data)
         action = brain_override_action if brain_override_action in {"BUY", "SELL"} else resolved_action
         signal_data["action"] = action
+        self._mark_signal_listener_seen(signal_data)
         signal_data["force_execute"] = bool(signal_data.get("force_execute"))
         ticker = signal_data.get("ticker", "UNKNOWN")
         confidence = signal_data.get("confidence", 0.0)
@@ -4588,6 +4757,20 @@ class VcaniTradeApp:
 
         confidence_score = self._confidence_to_score(confidence)
         required_confidence_score = self._confidence_to_score(config.SWARM_CONFIDENCE_THRESHOLD)
+        if self._is_incubation_signal(confidence_score, signal_data):
+            logger.info(
+                "[INCUBATION] Main listener muted %s %s at %.1f%%. No popup, narrator alert, sound, or execution.",
+                action,
+                ticker,
+                confidence_score,
+            )
+            self.cmd.update_watchlist_status(
+                ticker,
+                "incubating",
+                confidence=confidence_score / 100.0,
+                last_signal=action,
+            )
+            return
         if confidence_score < required_confidence_score and not brain_override:
             logger.info(
                 "APP_SIGNAL_HANDLER: rejected by confidence gate (%s%% < %s%%) for %s %s",
@@ -4634,7 +4817,7 @@ class VcaniTradeApp:
                 confidence_display,
                 status="SIGNAL RECEIVED",
             )
-        if action in {"BUY", "SELL"}:
+        if action in {"BUY", "SELL"} and self._is_loud_signal(confidence_score, signal_data):
             self.ai_narrator.notify_signal_detected(
                 ticker,
                 action,
@@ -4676,7 +4859,7 @@ class VcaniTradeApp:
             self._execute_cloud_signal(signal_data)
             return
 
-        if self.current_mode == "AUTONOMOUS":
+        if self.current_mode == "AUTONOMOUS" and self._is_loud_signal(confidence_score, signal_data):
             approval_color = "#F85149" if action == "SELL" else "#3FB950"
             self.cmd.log(
                 f'<span style="color:{approval_color};font-weight:bold">[BOLT] HIGH CONFIDENCE {action}</span>: '
@@ -4693,6 +4876,21 @@ class VcaniTradeApp:
                 self.cmd.log(f'<span style="color:#F85149">[FAIL] Execution failed: {e}</span>')
                 import traceback
                 self.cmd.log(f'<span style="color:#F85149">[NOTE] {traceback.format_exc()}</span>')
+            return
+
+        if self.current_mode == "AUTONOMOUS":
+            logger.info(
+                "[INCUBATION] AUTONOMOUS execution blocked for %s %s at %.1f%% pending 85%%/promotion.",
+                action,
+                ticker,
+                confidence_score,
+            )
+            self.cmd.update_watchlist_status(
+                ticker,
+                "incubating",
+                confidence=confidence_score / 100.0,
+                last_signal=action,
+            )
             return
 
         self.cmd.log(
@@ -4770,7 +4968,9 @@ class VcaniTradeApp:
         self.ai_narrator.set_status("standby", "External Brain Connected")
         self.ai_narrator.add_activity("[BRIDGE]", "External Brain handshake confirmed")
 
-    def _send_side_by_side_command(self, action: str, confidence: float) -> bool:
+    def _send_side_by_side_command(self, action: str, confidence: float,
+                                    entry_price: float = 0.0, stop_loss: float = 0.0,
+                                    take_profit: float = 0.0) -> bool:
         """
         Send Side-by-Side Execution command via raw socket to port 5555.
         
@@ -4778,9 +4978,17 @@ class VcaniTradeApp:
         - 50% - 84%: Send _SIM actions
         - 85%+: Send _REAL actions
         
+        =====================================================================
+        FIX 3: Live market prices are now forwarded to the socket server so
+        escalator.trigger_probe() receives real data instead of (0,0,0).
+        =====================================================================
+        
         Args:
             action: Base action ("BUY" or "SELL" or "FLATTEN")
             confidence: Confidence score (0-100)
+            entry_price: Live market entry price (0.0 = not provided).
+            stop_loss: Calculated stop-loss price (0.0 = not provided).
+            take_profit: Calculated take-profit price (0.0 = not provided).
             
         Returns:
             True if command was sent successfully
@@ -4800,8 +5008,9 @@ class VcaniTradeApp:
             command = ExecutionSocketClient._get_trade_action(action, confidence)
         
         logger.info(
-            "[SIDE-BY-SIDE] Sending command: %s (action=%s, confidence=%.1f%%)",
-            command, action, confidence
+            "[SIDE-BY-SIDE] Sending command: %s (action=%s, confidence=%.1f%%, "
+            "entry=%.4f, sl=%.4f, tp=%.4f)",
+            command, action, confidence, entry_price, stop_loss, take_profit
         )
         
         self.cmd.log(
@@ -4809,7 +5018,132 @@ class VcaniTradeApp:
             f'Sending {command} (confidence={confidence:.1f}%%)'
         )
         
-        return self.execution_socket_client.send_command(command)
+        # FIX 3: Pass real market data to the socket server
+        return self.execution_socket_client.send_command(
+            command,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            target={
+                "point_name": "buy_button" if action.upper() == "BUY" else "sell_button" if action.upper() == "SELL" else "flatten_button",
+                "absolute": list(config.FALLBACK_COORDS.get(
+                    "buy_button" if action.upper() == "BUY" else "sell_button" if action.upper() == "SELL" else "flatten_button",
+                    (0, 0),
+                )),
+            },
+            selectors={
+                "buy_market": "button[data-type=\"buy-mkt\"]",
+                "sell_market": "button[data-type=\"sell-mkt\"]",
+            },
+            source="main.py.side_by_side",
+        )
+
+    def _signal_dispatch_key(self, signal_data: dict) -> str:
+        """Stable key used to confirm the HTTP listener saw a scanner signal."""
+        ticker = str(signal_data.get("ticker", "UNKNOWN") or "UNKNOWN").upper()
+        action = str(signal_data.get("action", signal_data.get("signal_type", "UNKNOWN")) or "UNKNOWN").upper()
+        confidence = self._confidence_to_score(signal_data.get("confidence", 0.0))
+        entry_price = float(signal_data.get("entry_price", 0.0) or 0.0)
+        reason = str(signal_data.get("reason", signal_data.get("signal_type", "")) or "")[:80]
+        return f"{ticker}|{action}|{confidence:.1f}|{entry_price:.4f}|{reason}"
+
+    def _mark_signal_listener_seen(self, signal_data: dict) -> None:
+        """Record that the local HTTP dispatcher delivered this signal into main.py."""
+        if not hasattr(self, "_listener_signal_seen"):
+            self._listener_signal_seen = {}
+        now = time.time()
+        self._listener_signal_seen = {
+            key: ts for key, ts in self._listener_signal_seen.items()
+            if now - ts < 30.0
+        }
+        self._listener_signal_seen[self._signal_dispatch_key(signal_data)] = now
+
+    def _cloud_signal_listener_watchdog(self, signal_data: dict) -> None:
+        """
+        Autonomous fail-safe: CloudScannerThread emits after posting to the local
+        dispatcher. If the Qt callback from that dispatcher is not observed,
+        route the same payload directly into the normal execution pipeline.
+        """
+        if self.current_mode != "AUTONOMOUS":
+            return
+
+        action = str(signal_data.get("action", "") or "").upper()
+        if action not in {"BUY", "SELL"}:
+            return
+
+        confidence_score = self._confidence_to_score(signal_data.get("confidence", 0.0))
+        if not self._is_loud_signal(confidence_score, signal_data):
+            return
+
+        key = self._signal_dispatch_key(signal_data)
+        seen = getattr(self, "_listener_signal_seen", {})
+        if key in seen and time.time() - seen[key] < 10.0:
+            logger.info("[BRIDGE] Listener callback confirmed for autonomous signal %s", key)
+            return
+
+        ticker = signal_data.get("ticker", "UNKNOWN")
+        self.cmd.log(
+            f'<span style="color:#D29922;font-weight:bold">[BRIDGE]</span>: '
+            f'HTTP listener callback was not observed for {action} {ticker}; routing directly to execution pipeline'
+        )
+        logger.warning("[BRIDGE] Listener callback missing; direct autonomous routing for %s", key)
+        self._on_signal_received(dict(signal_data))
+
+    def _tradingview_execution_selectors(self) -> dict:
+        """Selectors used by the browser-native fallback when screen coords fail."""
+        return {
+            "buy_market": "button[data-type=\"buy-mkt\"]",
+            "sell_market": "button[data-type=\"sell-mkt\"]",
+            "close_popup": (
+                "[class*=\"popup\"] [class*=\"close\"], "
+                "[class*=\"modal\"] [class*=\"close\"], "
+                "[role=\"dialog\"] [class*=\"close\"], "
+                "[class*=\"modal\"] button"
+            ),
+            "generic_button_query": "button, div[role=\"button\"], span[role=\"button\"]",
+        }
+
+    def _resolve_autonomous_entry_target(self, action: str, ticker: str) -> dict | None:
+        """
+        Resolve the exact TradingView click target for autonomous execution.
+
+        This mirrors the working Force Hand Test payload: ask RPA for active
+        viewport/window adjusted coordinates, then fall back to calibrated
+        TradingView coordinates from config so the socket gets a concrete target.
+        """
+        normalized_action = str(action or "").upper()
+        target_key = (
+            "buy_button" if normalized_action == "BUY"
+            else "sell_button" if normalized_action == "SELL"
+            else "flatten_button"
+        )
+
+        try:
+            target_info = self.rpa_hand.describe_entry_target(normalized_action, ticker_hint=ticker)
+            if target_info and target_info.get("absolute"):
+                target_info["source"] = target_info.get("source", "rpa_executor")
+                return target_info
+        except Exception as exc:
+            logger.warning("[TARGET] RPA target resolution failed for %s %s: %s", normalized_action, ticker, exc)
+
+        fallback = getattr(config, "FALLBACK_COORDS", {}).get(target_key)
+        if fallback:
+            abs_x, abs_y = fallback
+            logger.warning(
+                "[TARGET] Using configured TradingView fallback for %s %s: abs=(%s,%s)",
+                normalized_action,
+                ticker,
+                abs_x,
+                abs_y,
+            )
+            return {
+                "point_name": target_key,
+                "absolute": (int(abs_x), int(abs_y)),
+                "relative": (int(abs_x), int(abs_y)),
+                "source": "config_fallback",
+            }
+
+        return None
 
     def _execute_cloud_signal(self, signal_data: dict):
         """Execute a cloud-generated signal locally with Professor Mode controls."""
@@ -4924,6 +5258,25 @@ class VcaniTradeApp:
                 f'<span style="color:#F85149;font-weight:bold">[DICE] FORCE EXECUTE</span>: '
                 f'bypassing confidence gate for {action} {ticker} at {confidence_score:.0f}%'
             )
+
+        if self._is_incubation_signal(confidence_score, signal_data) and not force_execute:
+            logger.info(
+                "EXEC_CLOUD: blocked by swarm incubation gate for %s %s at %.1f%%",
+                action,
+                ticker,
+                confidence_score,
+            )
+            self.cmd.update_watchlist_status(
+                ticker,
+                "incubating",
+                confidence=confidence_score / 100.0,
+                last_signal=action,
+            )
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[INCUBATION]</span>: '
+                f'{action} {ticker} held silently at {confidence_score:.0f}% pending 85% or positive paper-trade validation'
+            )
+            return
 
         if action not in ["BUY", "SELL"]:
             logger.info("EXEC_CLOUD: unsupported action %s for %s", action, ticker)
@@ -5265,9 +5618,11 @@ class VcaniTradeApp:
         if liquidity_zone:
             zone_drawn = self.rpa_hand.draw_liquidity_zone(ticker, liquidity_zone)
             logger.info("EXEC_CLOUD: liquidity zone draw for %s -> %s", ticker, zone_drawn)
-        target_info = self.rpa_hand.describe_entry_target(action, ticker_hint=ticker)
+        target_info = self._resolve_autonomous_entry_target(action, ticker)
+        tradingview_selectors = self._tradingview_execution_selectors()
         if target_info:
             signal_data["rpa_target"] = target_info
+            signal_data["tradingview_selectors"] = tradingview_selectors
             rel_x, rel_y = target_info["relative"]
             abs_x, abs_y = target_info["absolute"]
             logger.info(
@@ -5284,11 +5639,15 @@ class VcaniTradeApp:
                 f'<span style="color:#58A6FF;font-weight:bold">[TARGET] RPA TARGET</span>: '
                 f'{action} {ticker} -> {target_info["point_name"]} rel=({rel_x}, {rel_y}) abs=({abs_x}, {abs_y})'
             )
+            self.cmd.log(
+                f'<span style="color:#58A6FF;font-weight:bold">[SOCKET] AUTONOMOUS STRIKE PACKET</span>: '
+                f'{action} {ticker} target={target_info["point_name"]} abs=({abs_x}, {abs_y}) source={target_info.get("source", "unknown")}'
+            )
         else:
             logger.warning("EXEC_CLOUD: no entry target resolved for %s %s", action, ticker)
             self.cmd.log(
                 f'<span style="color:#D29922;font-weight:bold">[WARN] RPA TARGET</span>: '
-                f'no calibrated {action} button coordinates resolved for {ticker}'
+                f'no calibrated {action} button coordinates resolved for {ticker}; socket will fall back to TradingView selectors'
             )
         if not self.rpa_execution_enabled:
             self.cmd.log(f"[NO_ENTRY] Manual stealth toggle blocked execution for {action} {ticker}")
@@ -5323,6 +5682,11 @@ class VcaniTradeApp:
                                 action=action,
                                 confidence=confidence_score,
                                 quantity=float(quantity or config.MT5_VOLUME),
+                                entry_price=entry_price,
+                                stop_loss=sl_price,
+                                take_profit=tp_price,
+                                target=target_info or {},
+                                selectors=tradingview_selectors,
                                 browser_loop=getattr(self, "_browser_loop", None),
                             )
                         )
@@ -5680,21 +6044,22 @@ class VcaniTradeApp:
         self.latest_signals[analysis.asset] = analysis
 
     def _on_mode_changed(self, mode: str):
-        self.current_mode = mode
-        self._sync_runtime_session_context()
-        logger.info(f"Mode changed to {mode}")
-        self.cmd.log(f"[REFRESH] Mode changed to: {mode}")
-        self.ai_narrator.set_status("idle", f"Mode: {mode}")
+        requested = str(mode or "").strip().upper()
+        normalized = self._set_runtime_mode(requested, source="gui", manual=True)
+        if normalized != requested:
+            self._apply_mode_to_dashboard(normalized)
+            self.cmd.log(f"[LOCK] {requested} blocked by config; staying in {normalized}")
+        self.cmd.log(f"[REFRESH] Mode changed to: {normalized}")
+        self.ai_narrator.set_status("idle", f"Mode: {normalized}")
 
     def _on_dry_run_changed(self, is_dry_run: bool):
         """Keep the runtime engine aligned with the dashboard dry-run toggle."""
         config.DRY_RUN = bool(is_dry_run)
         if is_dry_run and self.current_mode == "AUTONOMOUS":
-            self.current_mode = "TEACHER"
-            self._sync_runtime_session_context()
-            self.cmd._set_teacher_mode()
+            self._set_runtime_mode("TEACHER", source="dry_run")
+            self._apply_mode_to_dashboard("TEACHER")
         else:
-            self._sync_runtime_session_context()
+            self._set_runtime_mode(self.current_mode, source="dry_run")
         logger.info("Dry run changed to %s", config.DRY_RUN)
 
     def _on_ticker_changed(self, ticker: str):
@@ -5759,6 +6124,23 @@ class VcaniTradeApp:
             if pos.get("asset") == ticker:
                 current_side = str(pos.get("side", "")).upper()
                 if current_side and current_side != action and not is_closing:
+                    if not bool(getattr(config, "AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED", False)):
+                        logger.info(
+                            "[POSITION] %s already %s | Opposite %s blocked by close-and-reverse safety",
+                            ticker,
+                            current_side,
+                            action,
+                        )
+                        self.cmd.log(
+                            f'<span style="color:#D29922;font-weight:bold">[POSITION LOCK]</span> '
+                            f'{ticker} already has a {current_side} position; opposite {action} signal blocked'
+                        )
+                        self.ai_narrator.add_activity(
+                            "[LOCK]",
+                            f"{ticker} opposite {action} blocked while {current_side} is open"
+                        )
+                        return False, "opposite_position_locked"
+
                     # Opposing position exists — Close-and-Reverse
                     close_action = "SELL" if current_side == "BUY" else "BUY"
                     logger.info(
@@ -5903,39 +6285,26 @@ class VcaniTradeApp:
             self._on_ticker_status_update(ticker, "mt5_unavailable")
             return
 
-        # Side-by-Side Execution: Send command to port 5555 before MT5 execution
-        socket_sent = False
-        if self.side_by_side_enabled:
-            socket_sent = self._send_side_by_side_command(action, confidence_score)
-            if socket_sent:
-                self.cmd.log(
-                    f'<span style="color:#58A6FF;font-weight:bold">[SOCKET] SIDE-BY-SIDE</span>: '
-                    f'Command sent to port 5555 for {action} {ticker} (MT5 path)'
-                )
-
-        # PRIMARY: Socket command sent successfully - skip MT5 execution
-        if socket_sent:
+        if bool(getattr(config, "MT5_REQUIRE_PROTECTIVE_STOP", True)) and sl_price <= 0:
             self.cmd.log(
-                f'<span style="color:#3FB950;font-weight:bold">[OK] SIDE-BY-SIDE EXECUTION</span>: '
-                f'{action} {ticker} executed via socket command (MT5 skipped)'
+                f'<span style="color:#F85149;font-weight:bold">[MT5 FAIL]</span> '
+                f'{action} {ticker} blocked: no protective stop-loss was calculated'
             )
-            # Save to journal for tracking
-            journal_id = self.sql_journal.save_trade(
-                coin=ticker,
-                entry=entry_price,
-                stop_loss=sl_price,
-                ai_confidence=confidence_score,
-                ai_reasoning=signal_data.get("reason", "Side-by-Side Execution"),
-                brain_used=brain_used,
-                outcome="OPEN",
-            )
+            self._on_ticker_status_update(ticker, "mt5_missing_stop")
             return
 
-        # BACKUP: MT5 execution if socket command failed
+        # PRIMARY: MT5 native order_send with protective SL/TP attached.
         self.cmd.log(
-            f'<span style="color:#D29922">[BACKUP] Falling back to MT5 execution for {action} {ticker}</span>'
+            f'<span style="color:#00D4FF;font-weight:bold">[MT5 PROTECTED]</span> '
+            f'Sending {action} {execution_ticker} with SL={sl_price:.4f} TP={tp_price:.4f}'
         )
-        success = mt5_executor.execute_trade(execution_ticker, action)
+        success = mt5_executor.execute_trade(
+            execution_ticker,
+            action,
+            volume=quantity,
+            stop_loss=sl_price,
+            take_profit=tp_price,
+        )
         order_status = "mt5_executed" if success else "mt5_failed"
         # ALERT SOUND: Play distinctive tone on every trade execution
         _play_trade_alert(action, success)
@@ -6475,7 +6844,7 @@ def main():
         print("Another VcaniTrade dashboard instance is already running. Exiting.")
         return
 
-    initial_mode = "TEACHER" if config.TEACHER_MODE or config.DRY_RUN else "AUTONOMOUS"
+    initial_mode = "TEACHER" if _teacher_mode_forced_by_config() or config.DRY_RUN else "AUTONOMOUS"
     trading_mode = "PAPER (dry run)" if config.DRY_RUN else "LIVE"
 
     print("=" * 60)

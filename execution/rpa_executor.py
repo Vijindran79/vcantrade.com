@@ -999,6 +999,110 @@ class RPAExecutor:
         logger.error("[RPA] All 3 attempts failed for %s %s", action, trade.asset)
         return False
 
+    def _execute_trade_tradingview(self, trade):
+        """Active TradingView execution: physically click the Buy/Sell buttons.
+        Uses color-based auto-detection (blue Buy / red Sell) with FALLBACK_COORDS fallback."""
+        action = self._normalize_action(trade.action)
+        target_key = "buy_button" if action == "BUY" else "sell_button" if action == "SELL" else None
+        if not target_key:
+            logger.error("[TV-RPA] Invalid trade action: %s", action)
+            return False
+
+        # ISOLATED ACCOUNT LOCK: verify BEFORE any mouse movement.
+        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
+        if surface == "TRADINGVIEW":
+            logger.info("[CHAIN-LOCK] Pre-strike TV account verification for %s", trade.asset)
+            account_ok = self._micro_verify_account()
+            if not account_ok:
+                logger.error("[ALARM] TRADE ABORTED: TV account chain-lock failed BEFORE strike for %s", trade.asset)
+                return False
+            logger.info("[CHAIN-LOCK] TV account verified — proceeding to physical strike")
+
+        for attempt in range(1, 4):
+            logger.info("[TV-RPA] Attempt %s/3 for %s %s", attempt, action, trade.asset)
+            success = self._tradingview_strike_sequence(target_key, trade.asset)
+            if success:
+                verified = self.verify_position_opened(trade.asset)
+                if verified:
+                    logger.info("[TV-RPA] %s %s executed and verified", action, trade.asset)
+                    return True
+                logger.warning("[TV-RPA] Click succeeded but verification failed for %s", trade.asset)
+            if attempt < 3:
+                backoff = 2 ** (attempt - 1)
+                logger.info("[TV-RPA] Retrying in %ss...", backoff)
+                time.sleep(backoff)
+
+        logger.error("[TV-RPA] All 3 attempts failed for %s %s", action, trade.asset)
+        return False
+
+    def _tradingview_strike_sequence(self, target_key, ticker):
+        """The 'Lion Strike' adapted for TradingView: find blue Buy or red Sell button and click it."""
+        if time.time() < self.trading_stalled_until:
+            remaining = int(self.trading_stalled_until - time.time())
+            logger.critical("[SYSTEM ALARM] TRADING STALLED FOR %s MORE SECONDS", remaining)
+            return False
+
+        window = self._get_browser_window(ticker)
+        if not window:
+            logger.error("[FAIL] Could not find TradingView window for %s", ticker)
+            return False
+
+        try:
+            window.activate()
+            if self.human_latency_enabled:
+                time.sleep(random.uniform(0.5, 1.2))
+
+            # AUTO-DETECT: scan left portion of window for TradingView button colors
+            screenshot = pyautogui.screenshot(
+                region=(window.left, window.top, window.width, window.height)
+            )
+            img_data = np.array(screenshot)
+
+            # TradingView button colors (approximate — configurable via config)
+            tv_colors = {
+                "buy_button":  {"rgb": getattr(config, "TV_BUY_RGB",  (41, 98, 255)),  "tol": 40},  # #2962FF
+                "sell_button": {"rgb": getattr(config, "TV_SELL_RGB", (247, 82, 95)),  "tol": 40},  # #F7525F
+            }
+
+            target_rgb = tv_colors.get(target_key, {}).get("rgb", (0, 255, 0))
+            tol = tv_colors.get(target_key, {}).get("tol", 40)
+
+            # Scan left 35% of window where TradingView order panel lives
+            scan_width = max(1, int(img_data.shape[1] * 0.35))
+            candidates = []
+            for y in range(0, img_data.shape[0], 3):
+                for x in range(0, scan_width, 3):
+                    pixel = img_data[y, x]
+                    if all(abs(int(p) - int(t)) <= tol for p, t in zip(pixel[:3], target_rgb)):
+                        candidates.append((x, y))
+
+            if candidates:
+                center_x = int(np.median([c[0] for c in candidates]))
+                center_y = int(np.median([c[1] for c in candidates]))
+                target_x = window.left + center_x
+                target_y = window.top + center_y
+                logger.info("[TV-STRIKE] %s auto-detected at (%d, %d) via color scan", target_key, target_x, target_y)
+            else:
+                # Fallback to configured coordinates
+                fallback = config.FALLBACK_COORDS.get(target_key, (960, 540))
+                target_x, target_y = fallback
+                logger.warning("[TV-STRIKE] Color auto-detect failed — using fallback (%d, %d)", target_x, target_y)
+
+            # Bezier mouse movement
+            move_duration = random.uniform(0.4, 0.9) if self.human_latency_enabled else 0.1
+            pyautogui.moveTo(target_x, target_y, duration=move_duration, tween=pyautogui.easeOutQuad)
+            time.sleep(0.5)
+            if self.human_latency_enabled:
+                time.sleep(random.uniform(0.1, 0.3))
+
+            pyautogui.click()
+            logger.info("[TV-STRIKE] %s clicked on TradingView for %s", target_key.upper(), ticker)
+            return True
+
+        except Exception as e:
+            logger.error("[TV-STRIKE] Strike failed: %s", e)
+            return False
+
     def set_human_latency(self, enabled: bool):
         """Toggle human-like reaction delays for RPA clicks."""
         self.human_latency_enabled = bool(enabled)
@@ -1018,7 +1122,7 @@ class RPAExecutor:
 
     def _get_browser_window(self, ticker_hint=None):
         """Find the active broker/browser window using config hints and ticker titles."""
-        default_hints = ["WealthCharts", "Google Chrome", "Chrome", "Brave", "Microsoft Edge", "Edge"]
+        default_hints = ["TradingView", "WealthCharts", "Google Chrome", "Chrome", "Brave", "Microsoft Edge", "Edge"]
         hints = list(getattr(config, "BROWSER_WINDOW_HINTS", default_hints)) or default_hints
         hint_terms = {str(hint).lower() for hint in hints if str(hint).strip()}
         ticker_terms = self._ticker_window_terms(ticker_hint)
@@ -1091,9 +1195,19 @@ class RPAExecutor:
     def _detect_platform(self):
         """
         Chameleon Interface: Detect active trading platform.
-        TradingView is analysis-only (strategy map), WealthCharts is execution (trigger).
-        Returns 'wealthcharts', 'mt5', or 'unknown'.
+        ACTIVE_EXECUTION_SURFACE overrides auto-detection when explicitly set.
+        Returns 'tradingview', 'mt5', 'wealthcharts', 'tradingview_tradovate', or 'unknown'.
         """
+        # 0. Config override — respect the user's explicit execution surface choice
+        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
+        if surface == "TRADINGVIEW":
+            logger.info("[CHAMELEON] ACTIVE_EXECUTION_SURFACE=TRADINGVIEW — routing to TV RPA")
+            return "tradingview"
+        if surface == "MT5":
+            logger.info("[CHAMELEON] ACTIVE_EXECUTION_SURFACE=MT5 — routing to MT5")
+            return "mt5"
+
+        # Legacy passive mode detection (kept for backward compatibility)
         if _is_tradingview_tradovate_mode():
             logger.debug("[CHAMELEON] Passive TradingView/Tradovate mode detected")
             return "tradingview_tradovate"
@@ -1120,13 +1234,48 @@ class RPAExecutor:
                     title = windows[0].title.lower()
                     if "wealthcharts" in title:
                         return "wealthcharts"
+                    if "tradingview" in title:
+                        logger.info("[CHAMELEON] Detected TradingView window")
+                        return "tradingview"
         except Exception as e:
             logger.debug("[CHAMELEON] Platform detection error: %s", e)
         return "unknown"
 
     def _micro_verify_account(self):
-        """CHAIN-LOCK: Re-verify account label 50ms before final click.
-        Returns True if account is still locked target, False if Paper/Demo."""
+        """CHAIN-LOCK: Re-verify account label before final click.
+        For TradingView: checks the configured TV account label (e.g., 'Paper Trading').
+        For WealthCharts: checks the locked Apex account.
+        Returns True if account matches target, False if mismatch."""
+        # TradingView active mode: verify TV account label (Paper Trading, Live, etc.)
+        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
+        if surface == "TRADINGVIEW":
+            try:
+                page = self._get_playwright_page()
+                if not page:
+                    return True  # fail-open if no page
+                target_label = getattr(config, "TRADINGVIEW_ACCOUNT_LABEL", "Paper Trading")
+                current = page.evaluate("""() => {
+                    const all = document.querySelectorAll('div, span, button, a');
+                    for (const el of all) {
+                        const text = el.textContent.trim();
+                        if (/Paper Trading|Live|Demo|Broker/i.test(text) && text.length < 80) {
+                            return text;
+                        }
+                    }
+                    return '';
+                }""")
+                if current and target_label.lower() in current.lower():
+                    logger.info("[CHAIN-LOCK] TradingView account verified: %s", current)
+                    return True
+                if current:
+                    logger.error("[CHAIN-LOCK] ABORT: TradingView account is '%s' but expected '%s'", current, target_label)
+                    return False
+                logger.warning("[CHAIN-LOCK] Could not read TradingView account label — proceeding with caution")
+                return True
+            except Exception as e:
+                logger.warning("[CHAIN-LOCK] TV micro-verify error: %s — proceeding", e)
+                return True
+
         if _is_tradingview_tradovate_mode():
             logger.debug("[CHAIN-LOCK] Account micro-verify bypassed in passive mode")
             return True
@@ -1298,10 +1447,10 @@ class RPAExecutor:
         """INSTITUTIONAL VERIFY: Strict screenshot confirmation. NO weak pass fallbacks.
         Returns True only if OCR or template match confirms the position row.
         If verification fails, logs [EXECUTION_MISSED] so the caller can retry."""
-        time.sleep(4)  # Wait for broker fill (extended for WealthCharts delay)
+        time.sleep(4)  # Wait for broker fill
         window = self._get_browser_window()
         if not window:
-            logger.warning("[VERIFY] Cannot verify %s: WealthCharts window not found", ticker)
+            logger.warning("[VERIFY] Cannot verify %s: TradingView/WealthCharts window not found", ticker)
             return False
 
         try:
@@ -1373,6 +1522,26 @@ class RPAExecutor:
         except Exception as e:
             logger.warning("[FOCUS] Failed to activate WealthCharts window: %s", e)
             return False
+
+    def update_stop_loss(self, new_stop: float, ticker_hint=None) -> bool:
+        """Update stop loss for an open position.
+        TradingView: Logs alert — Paper Trading stops must be adjusted manually
+                     or use the order panel (not one-click buttons) for bracket orders.
+        MT5: Routes to MT5 position modification (future enhancement).
+        Returns True if update was applied, False if manual action required."""
+        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
+        if surface == "TRADINGVIEW":
+            logger.warning(
+                "[STOP-TV] TradingView Paper stop update to %.4f requires manual adjustment. "
+                "Recommended: open position panel, edit SL to %.4f, or switch to MT5 mode for auto-stops.",
+                new_stop, new_stop
+            )
+            return False
+        if surface == "MT5":
+            logger.info("[STOP-MT5] MT5 stop update to %.4f would be sent here (integration pending).", new_stop)
+            return False
+        logger.warning("[STOP] Unknown execution surface — stop update to %.4f not applied.", new_stop)
+        return False
 
     def describe_entry_target(self, action, ticker_hint=None):
         """Return target coordinates for the specified trade action.
@@ -1450,6 +1619,12 @@ class RPAExecutor:
                 logger.info("[EXEC] WealthCharts — using PyAutoGUI mouse for %s %s", action, asset)
                 return self._execute_trade_pyautogui(trade)
 
+            # TradingView ACTIVE path: physical mouse clicks on TV Buy/Sell buttons
+            if platform == "tradingview":
+                logger.info("[EXEC] TradingView — using active PyAutoGUI RPA for %s %s", action, asset)
+                return self._execute_trade_tradingview(trade)
+
+            # Legacy passive mode — only triggers when ACTIVE_EXECUTION_SURFACE is not set
             if platform == "tradingview_tradovate":
                 self.last_failure_reason = (
                     "TradingView passive mode requires GhostExecutor JS execution; "

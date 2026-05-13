@@ -294,7 +294,8 @@ class AINarratorOverlay(GlassmorphicPanel):
         super().__init__(parent)
         self.activity_count = 0
         self._font_scale = 1.0
-        self._pinned = True
+        # Start movable by default. Pinned means "locked on top", not mouse-dead.
+        self._pinned = bool(getattr(config, "AI_OVERLAY_START_PINNED", False))
         self._analysis_mode = False
         self._aggression_mode = False
         self._rpa_enabled = True
@@ -610,11 +611,11 @@ class AINarratorOverlay(GlassmorphicPanel):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self.pin_btn = QPushButton("Toggle Pin")
+        self.pin_btn = QPushButton("Move")
         self.pin_btn.setCheckable(True)
-        self.pin_btn.setChecked(True)
-        self.pin_btn.setToolTip("Pinned: transparent overlay. Unpinned: movable window.")
-        self.pin_btn.setFixedSize(88, 24)
+        self.pin_btn.setChecked(self._pinned)
+        self.pin_btn.setToolTip("Move: drag the assistant. Lock: keep it fixed on top.")
+        self.pin_btn.setFixedSize(72, 24)
         self.pin_btn.clicked.connect(self._toggle_pin)
 
         self.font_minus_btn = QPushButton("A-")
@@ -750,12 +751,12 @@ class AINarratorOverlay(GlassmorphicPanel):
             flags = (
                 Qt.WindowType.FramelessWindowHint |
                 Qt.WindowType.WindowStaysOnTopHint |
-                Qt.WindowType.Tool |
-                Qt.WindowType.WindowTransparentForInput
+                Qt.WindowType.Tool
             )
-            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         else:
-            flags = Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint
+            # Normal tool window: movable, resizable, and allowed to go behind the chart.
+            flags = Qt.WindowType.Window
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
 
         self.setWindowFlags(flags)
@@ -765,16 +766,20 @@ class AINarratorOverlay(GlassmorphicPanel):
 
     def _refresh_pin_state(self, announce: bool = True):
         state_text = "Pinned" if self._pinned else "Unpinned"
+        self.pin_btn.blockSignals(True)
+        self.pin_btn.setChecked(self._pinned)
+        self.pin_btn.setText("Pinned" if self._pinned else "Move")
+        self.pin_btn.blockSignals(False)
         self.pin_btn.setToolTip(
-            "Pinned: transparent, click-through, non-movable mirror"
+            "Locked: assistant stays on top and ignores drag movement"
             if self._pinned
-            else "Unpinned: standard movable mirror window"
+            else "Move mode: drag the assistant left, right, or onto another monitor"
         )
         if hasattr(self, "help_label"):
             self.help_label.setText(
-                "Mirror pinned [BULLET] Click-through overlay active"
+                "Assistant locked [BULLET] Press Lock to unlock and move"
                 if self._pinned
-                else "Mirror unpinned [BULLET] Drag the title bar or frame to reposition"
+                else "Assistant movable [BULLET] Drag anywhere on the panel to reposition"
             )
         self._refresh_mode_label()
         if announce:
