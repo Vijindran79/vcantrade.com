@@ -20,7 +20,7 @@ PROJECT_DIR="/root/vcantrade"
 LOG_DIR="/root/vcantrade/logs"
 VENV_DIR="/root/vcantrade/venv"
 TMUX_SESSION="vcantrade"
-CHROME_DEBUG_PORT=9223
+CHROME_DEBUG_PORT=9222
 DASHBOARD_PORT=8765
 
 # ---------------------------------------------------------------------------

@@ -46,11 +46,11 @@ def _check_cloud_brain() -> PreflightResult:
 
 
 def _check_browser_cdp() -> PreflightResult:
-    cdp_url = str(getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9223") or "").strip()
+    cdp_url = str(getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222") or "").strip()
     try:
         parsed = urlsplit(cdp_url)
         host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 9223
+        port = parsed.port or 9222
         with socket.create_connection((host, port), timeout=3):
             return PreflightResult(True, "Browser Port", f"Chrome CDP is reachable at {host}:{port}")
     except Exception as exc:
@@ -58,7 +58,7 @@ def _check_browser_cdp() -> PreflightResult:
             False,
             "Browser Port",
             f"Cannot reach Chrome CDP at {cdp_url}: {exc}",
-            'Launch Chrome with `--remote-debugging-port=9223` or update `BROWSER_CDP_URL` to the right port.',
+            'Launch Chrome with `--remote-debugging-port=9222` or update `BROWSER_CDP_URL` to the right port.',
         )
 
 

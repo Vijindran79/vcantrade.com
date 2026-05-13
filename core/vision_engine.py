@@ -25,9 +25,21 @@ import requests
 from PIL import Image
 
 import config
+from core.fast_vision import build_fast_capture
 from core.ollama_utils import build_ollama_url, normalize_ollama_base_url
 
 logger = logging.getLogger(__name__)
+
+
+def _is_passive_visual_mode() -> bool:
+    """Return True when screenshot capture should be bypassed entirely."""
+    if bool(getattr(config, "FAST_VISION_ENABLED", False)):
+        return False
+    return str(getattr(config, "EXECUTION_MODE", "")).upper().strip() in {
+        "TV_DESKTOP",
+        "TRADOVATE",
+    }
+
 
 # ---------------------------------------------------------------------------
 # Hardware-optimized image settings for RTX 4050 6GB VRAM
@@ -158,6 +170,7 @@ class VisionCapture:
         self.save_debug_screenshots = save_debug
         self._mss = None
         self._pyautogui = None
+        self._fast_capture = build_fast_capture()
 
         # Try mss first (C-based, much faster than pyautogui)
         try:
@@ -189,12 +202,22 @@ class VisionCapture:
 
         Returns ChartScreenshot or None if capture failed.
         """
+        if _is_passive_visual_mode():
+            logger.debug("[VISION] Skipping visual screenshot in passive mode.")
+            return None
+
         target_region = region or self.chart_region
 
-        if self._mss:
+        if self._fast_capture:
+            frame = self._fast_capture.capture(target_region)
+            img = frame.image if frame else None
+            source = f"fast:{frame.backend}:{frame.latency_ms:.2f}ms" if frame else "fast"
+        elif self._mss:
             img = self._capture_mss(target_region)
+            source = "screenshot:mss"
         elif self._pyautogui:
             img = self._capture_pyautogui(target_region)
+            source = "screenshot:pyautogui"
         else:
             logger.error("VisionCapture: no screenshot library available")
             return None
@@ -205,7 +228,7 @@ class VisionCapture:
         screenshot = ChartScreenshot(
             image=img,
             asset=asset,
-            source="screenshot",
+            source=source,
             region=target_region,
         )
 
@@ -216,6 +239,10 @@ class VisionCapture:
 
     def capture_full_desktop(self, asset: str = "UNKNOWN") -> Optional[ChartScreenshot]:
         """Capture the entire desktop."""
+        if _is_passive_visual_mode():
+            logger.debug("[VISION] Skipping visual screenshot in passive mode.")
+            return None
+
         if self._mss:
             img = self._capture_mss_full()
         elif self._pyautogui:
@@ -326,6 +353,10 @@ class VisionCapture:
         crop: Optional[Tuple[float, float, float, float]] = None,
     ) -> Optional[ChartScreenshot]:
         """Capture a cropped chart region from a detected application window."""
+        if _is_passive_visual_mode():
+            logger.debug("[VISION] Skipping visual screenshot in passive mode.")
+            return None
+
         window = self.find_best_window(title_candidates, blacklist=blacklist)
         if not window:
             logger.warning("VisionCapture: no matching window found for %s", title_candidates)
@@ -365,6 +396,10 @@ class VisionCapture:
         MT5 mode uses Smart Eye window detection and MT5 chart cropping.
         UI/browser mode keeps the existing fixed-region capture behavior.
         """
+        if _is_passive_visual_mode():
+            logger.debug("[VISION] Skipping visual screenshot in passive mode.")
+            return None
+
         execution_mode = str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper()
         trading_surface = str(
             getattr(config, "TRADING_SURFACE", "TRADINGVIEW_TRADOVATE") or "TRADINGVIEW_TRADOVATE"
@@ -386,6 +421,10 @@ class VisionCapture:
         return self.capture_chart(asset=asset)
 
     def _capture_region(self, region: Tuple[int, int, int, int]) -> Optional[Image.Image]:
+        if self._fast_capture:
+            frame = self._fast_capture.capture(region)
+            if frame:
+                return frame.image
         if self._mss:
             return self._capture_mss(region)
         if self._pyautogui:

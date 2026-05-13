@@ -58,6 +58,15 @@ class BrowserAgent:
         logger.info(f"[GLOBE] Browser Agent initialized (headless={headless})")
 
     @staticmethod
+    def _is_passive_observer_mode() -> bool:
+        """The browser agent is permanently eyes-only for the local CDP workflow."""
+        return True
+
+    def _observer_log(self, symbol: str = "") -> None:
+        label = str(symbol or "active tab").strip()
+        logger.info("[OBSERVER] Monitoring active tab natively for symbol: %s", label)
+
+    @staticmethod
     def _is_missing_dialog_error(exc: Exception) -> bool:
         """Return True for harmless browser errors raised after a dialog already disappeared."""
         text = str(exc).lower()
@@ -65,32 +74,9 @@ class BrowserAgent:
 
     # EPIPE RECOVERY: Pipe Watchdog
     async def _safe_navigate(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 30000) -> bool:
-        """Navigate with EPIPE/Socket error recovery. If connection fails, wait 5s and retry."""
-        if not self.page:
-            logger.error("[PIPE] No page available for navigation")
-            return False
-        try:
-            await self.page.goto(url, wait_until=wait_until, timeout=timeout)
-            return True
-        except Exception as nav_err:
-            err_str = str(nav_err).lower()
-            # EPIPE or Socket error detected
-            if any(x in err_str for x in ["epipe", "socket", "connection", "playwright", "protocol error", "404", "not found"]):
-                logger.warning("[PIPE WATCHDOG] Error detected: %s — waiting 5s and refreshing connection", nav_err)
-                await asyncio.sleep(5)
-                try:
-                    # Stay on current WealthCharts page - don't navigate away
-                    if "wealthcharts" in self.page.url.lower():
-                        logger.info("[PIPE WATCHDOG] Staying on WealthCharts page: %s", self.page.url[:80])
-                        return False
-                    # Try to reload current page
-                    await self.page.reload(wait_until="domcontentloaded", timeout=15000)
-                    logger.info("[PIPE WATCHDOG] Connection refreshed successfully")
-                    return False
-                except Exception as refresh_err:
-                    logger.error("[PIPE WATCHDOG] Failed to refresh connection: %s", refresh_err)
-                    return False
-            raise  # Re-raise if not a handled error
+        """Passive observer no-op: never call page.goto or reload."""
+        self._observer_log(url)
+        return True
 
     def is_browser_busy(self) -> bool:
         """STURDY BRIDGE: Check if the browser is currently busy (navigating or loading).
@@ -218,110 +204,16 @@ class BrowserAgent:
         }
 
     async def navigate_to_chart(self, ticker: str) -> bool:
-        """
-        Navigate to WealthCharts chart for specific ticker.
-        Uses fast load strategy or 'Warm Start' if already on TV.
-        RETRY: Will attempt navigation up to 3 times with 3s delay.
-
-        Args:
-            ticker: Symbol like BTC-USD, TSLA, EURUSD=X
-
-        Returns:
-            True if navigation successful
-        """
-        if not self.is_running:
-            await self.start()
-
-        # Convert ticker to TradingView format
-        tv_symbol = ticker.replace("-USD", "").replace("=X", "").replace(".", "")
-
-        # Map common formats
-        if "BTC" in tv_symbol:
-            tv_symbol = "BTCUSD"
-        elif "ETH" in tv_symbol:
-            tv_symbol = "ETHUSD"
-        elif "SOL" in tv_symbol:
-            tv_symbol = "SOLUSD"
-        elif "BNB" in tv_symbol:
-            tv_symbol = "BNBUSD"
-        elif "XRP" in tv_symbol:
-            tv_symbol = "XRPUSD"
-        elif "ADA" in tv_symbol:
-            tv_symbol = "ADAUSD"
-        # ALIEN ABDUCTION FIX: Translate Yahoo futures to CME contract names
-        # NQ=F -> CME_MINI:MNQ1!, ES=F -> CME_MINI:MES1!, CL=F -> NYMEX:MCL1!
-        tv_map = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {})
-        if tv_symbol in tv_map:
-            tv_symbol = tv_map[tv_symbol]
-        elif ticker in tv_map:
-            tv_symbol = tv_map[ticker]
-
-        # Give the browser a moment to breathe between symbol switches
-        await asyncio.sleep(2)
-
-        max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = await self._navigate_once(ticker, tv_symbol)
-                if result:
-                    return True
-            except Exception as e:
-                logger.warning(f"[WARN] Navigation attempt {attempt}/{max_retries} failed for {ticker}: {e}")
-            
-            if attempt < max_retries:
-                logger.info(f"[RETRY] Waiting 3s before navigation retry {attempt + 1}...")
-                await asyncio.sleep(3)
-        
-        logger.error(f"[FAIL] Navigation failed for {ticker} after {max_retries} attempts")
-        return False
+        """Passive observer no-op: never navigate or switch the active chart."""
+        self._observer_log(ticker)
+        return True
 
     async def _navigate_once(self, ticker: str, tv_symbol: str) -> bool:
-        """Single navigation attempt (Warm Start or Cold Start)."""
-        current_url = await self.get_current_url()
-        
-        # WARM START LOGIC: If already on a WealthCharts chart, use keyboard RPA to flip symbol
-        # This is much faster than a full page reload and prevents 24/7 session timeouts
-        if "wealthcharts.com" in current_url or "tradingview.com/chart" in current_url or "tradingview.com/symbols" in current_url:
-            try:
-                logger.info(f"[BOLT] Warm Start: Flipping symbol to {tv_symbol} via keyboard...")
-                # 1. Focus the page
-                await self.page.bring_to_front()
-                # 2. Press '/' to open symbol search if needed, or just type
-                # In TV, typing directly usually triggers symbol search
-                await self.page.keyboard.type(tv_symbol, delay=50)
-                await asyncio.sleep(0.5)
-                await self.page.keyboard.press("Enter")
-                
-                # Give it a moment to flip
-                await asyncio.sleep(2)
-                logger.info(f"[OK] Warm Start complete for {tv_symbol}")
-                return True
-            except Exception as e:
-                logger.warning(f"[WARN] Warm Start failed, falling back to full load: {e}")
-
-        # COLD START / FALLBACK: Full page navigation
-        url = f"{getattr(config, 'WEALTHCHARTS_URL', 'https://app.wealthcharts.com')}/?symbol={tv_symbol}"
-
-        logger.info(f"[GLOBE] Navigating to WealthCharts: {ticker} ({tv_symbol})")
-        
-        # Use 'commit' instead of 'domcontentloaded' - much faster, doesn't wait for WS
-        try:
-            await asyncio.wait_for(
-                self._safe_navigate(url, wait_until="commit", timeout=8000),
-                timeout=10.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"[WARN] Navigation timeout for {ticker}, proceeding anyway")
-            return True  # Return True - page may still be usable
-        except Exception as e:
-            logger.error(f"[FAIL] Failed to navigate to chart for {ticker}: {e}")
-            return False
-
-        # Give page a moment to stabilize
-        await asyncio.sleep(1)
-        
-        logger.info(f"[OK] Chart loaded for {ticker}")
+        """Passive observer no-op kept for old internal callers."""
+        self._observer_log(ticker)
         return True
+
+    async def get_live_price(self) -> float:
         """
         Read the current live price from the WealthCharts chart.
         Uses multiple selector strategies for reliability including aria-label and JS fallback.
@@ -331,6 +223,9 @@ class BrowserAgent:
         """
         try:
             import asyncio
+
+            if not self.page:
+                return 0.0
             
             # ROBUST SELECTORS: Try aria-label, class, and data-attribute based selectors
             selectors_to_try = [
@@ -482,35 +377,61 @@ class BrowserAgent:
             try:
                 self.playwright = await async_playwright().start()
 
-                # CDP ONLY: Connect to existing Chrome on Vast.ai Linux server
-                self.browser = await self.playwright.chromium.connect_over_cdp(config.BROWSER_CDP_URL)
+                # CDP ONLY: Connect to Chrome/TradingView Desktop — safe fallback to port 9222
+                cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222")
+                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
                 contexts = self.browser.contexts
                 if not contexts:
-                    logger.error("[FAIL] No contexts found in Chrome CDP connection")
-                    raise RuntimeError(f"No contexts in Chrome CDP connection: {config.BROWSER_CDP_URL}")
+                    logger.error("[FAIL] No contexts found in Chrome CDP connection at %s", cdp_url)
+                    raise RuntimeError(f"No contexts in Chrome CDP connection: {cdp_url}")
 
-                # Search for existing WealthCharts tab (or legacy TradingView)
+                if self._is_passive_observer_mode():
+                    for ctx in reversed(contexts):
+                        pages = ctx.pages
+                        if pages:
+                            self.context = ctx
+                            self.page = pages[-1]
+                            self._install_safe_dialog_handler()
+                            self.is_running = True
+                            self._observer_log("active tab")
+                            logger.info("[OK] Browser agent attached passively to tab: %s", self.page.url[:80])
+                            return
+                    raise RuntimeError(
+                        "Passive observer mode requires an existing open Chrome tab. "
+                        "Open TradingView/Tradovate first."
+                    )
+
+                # Search for an existing TradingView tab.
+                selected_page = None
+                selected_context = None
                 for ctx in contexts:
                     for pg in ctx.pages:
                         url_lower = (pg.url or "").lower()
-                        if "wealthcharts" in url_lower or "tradingview" in url_lower:
-                            self.page = pg
-                            self.context = ctx
-                            self._install_safe_dialog_handler()
-                            self.is_running = True
-                            logger.info("[OK] Browser agent connected to chart tab: %s", pg.url[:80])
-                            return
+                        if "tradingview" in url_lower:
+                            selected_page = pg
+                            selected_context = ctx
+                            break
+                    if selected_page:
+                        break
 
-                # No chart tab found — create one via CDP context
+                if selected_page:
+                    self.page = selected_page
+                    self.context = selected_context
+                    self._install_safe_dialog_handler()
+                    self.is_running = True
+                    logger.info("[OK] Browser agent connected to tab: %s", selected_page.url[:80])
+                    return
+
+                # No chart tab found - create TradingView, not WealthCharts.
                 self.context = contexts[0]
-                wc_url = getattr(config, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
-                logger.info("[AUTO] No chart tab found. Creating new tab via CDP context -> %s ...", wc_url)
+                chart_url = getattr(config, "TRADINGVIEW_URL", "https://www.tradingview.com/chart/")
+                logger.info("[AUTO] No TradingView tab found. Creating new tab via CDP context -> %s ...", chart_url)
                 self.page = await self.context.new_page()
                 self._install_safe_dialog_handler()
-                success = await self._safe_navigate(wc_url, wait_until="domcontentloaded", timeout=30000)
+                success = await self._safe_navigate(chart_url, wait_until="domcontentloaded", timeout=30000)
                 if not success:
-                    raise Exception(f"Failed to navigate to {wc_url}")
-                logger.info("[AUTO] Navigated to WealthCharts: %s", self.page.url[:80])
+                    raise Exception(f"Failed to navigate to {chart_url}")
+                logger.info("[AUTO] Navigated to TradingView: %s", self.page.url[:80])
 
                 # Login detection
                 await self._handle_login_wait()
@@ -652,100 +573,66 @@ class BrowserAgent:
             logger.warning("[ORDER ENTRY] Error checking Order Entry panel: %s", e)
             return False
 
-    async def navigate_to_wealthcharts(self):
-        """Navigate to WealthCharts using first configured ticker."""
-        import config
-        tickers = getattr(config, "MULTI_ASSET_TICKERS", ["CME_MINI:MNQ1!"])
-        first_ticker = tickers[0] if tickers else "CME_MINI:MNQ1!"
-        logger.info("[NAV] Startup navigating WealthCharts to %s (from MULTI_ASSET_TICKERS)", first_ticker)
-        return await self.navigate_to_symbol(first_ticker)
+    async def navigate_to_tradingview(self):
+        """Passive observer no-op for the current TradingView tab."""
+        self._observer_log("TradingView")
+        return True
 
     async def navigate_to_symbol(self, symbol: str):
-        """Navigate to any WealthCharts symbol chart.
-        STURDY BRIDGE: Sets navigation lock during transit so other cycles skip.
-        Ensures Order Entry panel is visible after navigation."""
-        if not self.is_running or not self.page:
-            logger.warning("[NAV] Browser agent not running, starting...")
-            await self.start()
+        """Passive observer no-op: never switch tabs, URLs, or symbols."""
+        self._observer_log(symbol)
+        return True
 
-        self._navigating = True  # Lock: other cycles will see busy and skip
-        try:
-            # WEALTHCHARTS M6 CONTRACT LOOKUP: translate CME names to June 2026 codes
-            import config as _cfg
+    async def switch_to_symbol(self, symbol: str, *args, **kwargs) -> bool:
+        """Passive observer alias: never switch tabs, URLs, or symbols."""
+        self._observer_log(symbol)
+        return True
 
-            # CACHE SKIP: if this symbol failed with ERR_ABORTED within last 5 min, skip
-            import time as _time
-            _now = _time.time()
-            _last_fail = self._failed_symbols.get(symbol, 0)
-            if _last_fail and (_now - _last_fail) < 300:
-                logger.debug("[NAV] Skipping %s — failed %ds ago (cached ERR_ABORTED)", symbol, int(_now - _last_fail))
-                return False
+    async def maps_to_symbol(self, symbol: str, *args, **kwargs) -> bool:
+        """Passive observer alias: never switch tabs, URLs, or symbols."""
+        self._observer_log(symbol)
+        return True
 
-            tv_map = getattr(_cfg, "TRADINGVIEW_SYMBOL_MAP", {})
-            tv_symbol = tv_map.get(symbol, symbol)
-            wc_url_base = getattr(_cfg, "WEALTHCHARTS_URL", "https://app.wealthcharts.com")
+    async def Maps_to_symbol(self, symbol: str, *args, **kwargs) -> bool:
+        """Passive observer alias kept for legacy mixed-case callers."""
+        self._observer_log(symbol)
+        return True
 
-            # MCLM6 CACHE FIX: MCLM6 is valid — the URL parameter was wrong, not the symbol
-            self._failed_symbols.pop(symbol, None)
-            self._failed_symbols.pop("MCLM6", None)
-            self._failed_symbols.pop("NYMEX:MCL1!", None)
+    async def maps_to_chart(self, symbol: str = "active tab", *args, **kwargs) -> bool:
+        """Passive observer alias: never switch tabs, URLs, or symbols."""
+        self._observer_log(symbol)
+        return True
 
-            # WEALTHCHARTS STABILITY: Use keyboard search instead of ?symbol= URL.
-            # WealthCharts rejects URL query params; we must use the in-app search box.
-            current_url = await self.get_current_url()
-            already_on_wc = "wealthcharts.com" in current_url.lower()
+    async def Maps_to_chart(self, symbol: str = "active tab", *args, **kwargs) -> bool:
+        """Passive observer alias kept for legacy mixed-case callers."""
+        self._observer_log(symbol)
+        return True
 
-            if not already_on_wc:
-                logger.info("[NAV] Loading base WealthCharts page...")
-                success = await self._safe_navigate(wc_url_base, wait_until="domcontentloaded", timeout=30000)
-                if not success:
-                    logger.warning("[NAV] Failed to load %s, staying on current page", wc_url_base)
-                    return False
-                await asyncio.sleep(3)  # Let the chart app initialise
-            else:
-                logger.info("[NAV] Already on WealthCharts — reusing tab")
+    async def maps_to(self, symbol: str = "active tab", *args, **kwargs) -> bool:
+        """Passive observer alias: never switch tabs, URLs, or symbols."""
+        self._observer_log(symbol)
+        return True
 
-            # KEYBOARD SEARCH: focus + type symbol + Enter (avoids URL parameter rejection)
-            logger.info("[NAV] Searching WealthCharts for %s (mapped from %s)", tv_symbol, symbol)
-            await self.page.bring_to_front()
-            await asyncio.sleep(0.5)
-            # Clear any existing search text (Ctrl+A then type)
-            await self.page.keyboard.press("Control+a")
-            await asyncio.sleep(0.1)
-            await self.page.keyboard.type(tv_symbol, delay=50)
-            await asyncio.sleep(0.5)
-            await self.page.keyboard.press("Enter")
-            await asyncio.sleep(3)  # Wait for chart to load
-            logger.info("[NAV] Searched %s chart: %s", tv_symbol, self.page.url[:80])
-
-            # Login check after navigation
-            await self._handle_login_wait()
-
-            # Give chart widgets time to render
-            await asyncio.sleep(2)
-
-            # DOM-ONLY MODE: strip clutter so only chart + Order Entry remain
-            await self._apply_dom_only_mode()
-
-            # Ensure Order Entry panel is open and unobstructed
-            await self._ensure_order_entry_visible()
-
-            return True
-        except Exception as e:
-            err_text = str(e)
-            # ERR_ABORTED means WealthCharts rejected the URL — NOT a browser crash.
-            # With keyboard search this shouldn't happen, but keep guard for safety.
-            if "ERR_ABORTED" in err_text or "net::ERR_ABORTED" in err_text:
-                self._failed_symbols[symbol] = _time.time()
-                logger.warning("[NAV] Symbol %s rejected by WealthCharts — cached skip (5 min)", symbol)
-            else:
-                logger.error("[NAV] Failed to navigate to WealthCharts %s: %s", symbol, e)
-            return False
-        finally:
-            self._navigating = False  # Unlock: navigation complete
+    async def Maps_to(self, symbol: str = "active tab", *args, **kwargs) -> bool:
+        """Passive observer alias kept for legacy mixed-case callers."""
+        self._observer_log(symbol)
+        return True
 
     async def stop(self):
         """Close the browser agent and cleanup all resources."""
+        if self._is_passive_observer_mode():
+            try:
+                if hasattr(self, 'playwright') and self.playwright:
+                    await self.playwright.stop()
+            except Exception:
+                pass
+            self.is_running = False
+            self.page = None
+            self.context = None
+            self.browser = None
+            logger.info("[OBSERVER] Browser agent detached without closing the active tab")
+            return
+
         if self.browser and self.is_running:
             try:
                 # Close page first
@@ -794,19 +681,9 @@ class BrowserAgent:
                 self.browser = None
 
     async def navigate_to(self, url: str, wait_until: str = "domcontentloaded", timeout: int = 30000):
-        """Navigate to a URL."""
-        if not self.is_running:
-            await self.start()
-
-        try:
-            logger.info(f"[GLOBE] Navigating to: {url}")
-            success = await self._safe_navigate(url, wait_until=wait_until, timeout=timeout)
-            if success:
-                logger.info(f"[OK] Page loaded: {url}")
-            return success
-        except Exception as e:
-            logger.error(f"[FAIL] Failed to navigate to {url}: {e}")
-            return False
+        """Passive observer no-op: never navigate away from the active tab."""
+        self._observer_log(url)
+        return True
 
     async def get_tradingview_price(self, symbol: str) -> Dict[str, Any]:
         """
@@ -820,8 +697,11 @@ class BrowserAgent:
             current_url = await self.get_current_url()
             # Only navigate if we're not already on a TradingView chart
             if "tradingview.com" not in current_url:
-                url = f"https://www.tradingview.com/symbols/{symbol.replace('-', '')}/"
-                await self.navigate_to(url)
+                if self._is_passive_observer_mode():
+                    self._observer_log(symbol)
+                else:
+                    url = f"https://www.tradingview.com/symbols/{symbol.replace('-', '')}/"
+                    await self.navigate_to(url)
             else:
                 logger.info("[CHART] Already on TradingView - scraping current tab for %s", symbol)
 
@@ -879,7 +759,8 @@ class BrowserAgent:
                     pass
 
             if price <= 0:
-                raise ValueError("Price element not found")
+                logger.debug("[OBSERVER] Price element not found on active tab for %s", symbol)
+                return {"symbol": symbol, "error": "Price element not found", "source": "TradingView", "price": None}
 
             logger.info("[CHART] TradingView data for %s: $%.2f", symbol, price)
             return {
@@ -890,14 +771,18 @@ class BrowserAgent:
             }
 
         except Exception as e:
-            logger.error("[FAIL] Failed to get TradingView price for %s: %s", symbol, e)
-            return {"symbol": symbol, "error": str(e), "source": "TradingView"}
+            logger.debug("[FAIL] Failed to get TradingView price for %s: %s", symbol, e)
+            return {"symbol": symbol, "error": str(e), "source": "TradingView", "price": None}
 
     async def get_yahoo_finance_price(self, symbol: str) -> Dict[str, Any]:
         """Get current price from Yahoo Finance. Opens a new tab so user's TradingView tab stays intact.
         TOTAL YAHOO BAN: M6 futures and Gold/XAUUSD are NOT on Yahoo Finance — return error immediately."""
         if not self.is_running:
             await self.start()
+
+        if self._is_passive_observer_mode():
+            self._observer_log(symbol)
+            return {"symbol": symbol, "error": "Passive observer mode does not open Yahoo Finance", "source": "OBSERVER", "price": None}
 
         # Hard bypass: never open Yahoo Finance for futures or Gold
         # HARD BYPASS: Never open Yahoo Finance for M6 futures or XAUUSD
@@ -1143,6 +1028,10 @@ class BrowserAgent:
 
     async def take_screenshot(self, save_path: str = None) -> Optional[str]:
         """Take a screenshot and return as base64. Waits for chart to be fully loaded first."""
+        if self._is_passive_observer_mode():
+            logger.debug("[VISION] Skipping visual screenshot in passive mode.")
+            return None
+
         if not self.page:
             return None
 
@@ -1181,6 +1070,10 @@ class BrowserAgent:
         try:
             if not self.is_running or not self.page:
                 logger.error("Browser not running")
+                return False
+
+            if self._is_passive_observer_mode():
+                self._observer_log("Pine Editor")
                 return False
             
             # Check if we're on TradingView

@@ -11,6 +11,48 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def _is_tradingview_tradovate_mode() -> bool:
+    """Return True when execution is managed outside WealthCharts browser automation."""
+    execution_mode = str(getattr(config, "EXECUTION_MODE", "") or "").upper().strip()
+    trading_surface = str(getattr(config, "TRADING_SURFACE", "") or "").upper().strip()
+    passive_values = {
+        "TV",
+        "TV_DESKTOP",
+        "TRADINGVIEW",
+        "TRADINGVIEW_DESKTOP",
+        "TRADINGVIEW_TRADOVATE",
+        "TRADOVATE",
+        "TRADOVATE_DESKTOP",
+    }
+    return execution_mode in passive_values or trading_surface in passive_values
+
+
+def _passive_balance_snapshot() -> dict:
+    """Synthetic account snapshot used when WealthCharts scraping is disabled."""
+    balance = float(
+        getattr(
+            config,
+            "PASSIVE_ACCOUNT_BALANCE",
+            getattr(
+                config,
+                "CURRENT_BALANCE",
+                getattr(config, "HARDCODED_EQUITY_FALLBACK", 100000.0),
+            ),
+        )
+        or 100000.0
+    )
+    return {
+        "balance": balance,
+        "equity": balance,
+        "net_liq": balance,
+        "pnl": 0.0,
+        "day_pl": 0.0,
+        "currency": "USD",
+        "fallback": True,
+        "passive_mode": True,
+    }
+
+
 class RPAExecutor:
     # LOCKED: Only this Apex account is allowed to trade
     TARGET_ACCOUNT_NAME = "APEX-314327-18"
@@ -32,7 +74,7 @@ class RPAExecutor:
         self._playwright = None
         self._browser = None
         self._page = None
-        self._playwright_available = self._check_playwright()
+        self._playwright_available = False  # Disabled: moving to MT5/Tradovate APIs, no browser scraping needed
         logger.info("[LION] RPA Hand: Clean Lion-Mode initialized (Playwright=%s)", self._playwright_available)
 
     def _check_playwright(self):
@@ -60,54 +102,26 @@ class RPAExecutor:
         return "no dialog is showing" in text or "handlejavascriptdialog" in text
 
     def _get_playwright_page(self):
-        """Get or create a Playwright page. PRIORITIZES connecting to user's existing Chrome."""
+        """Get or create a Playwright page. Uses async Playwright only (no CDP/9222)."""
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[PASSIVE] Playwright page access skipped in TradingView/Tradovate mode")
+            return None
         if self._page and not self._page.is_closed():
             return self._page
         if not self._playwright_available:
             return None
 
-        from playwright.sync_api import sync_playwright
-
-        self._playwright = sync_playwright().start()
-
-        # PRIMARY: Connect to existing Chrome via CDP ( user's logged-in browser )
-        cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9223").strip()
-        try:
-            self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
-            contexts = self._browser.contexts
-            if contexts:
-                # Scan all contexts and pages for a WealthCharts tab (or legacy TradingView)
-                for ctx in contexts:
-                    for pg in ctx.pages:
-                        url_lower = (pg.url or "").lower()
-                        if "wealthcharts" in url_lower or "tradingview" in url_lower:
-                            self._page = pg
-                            logger.info("[STEALTH] Connected to user's live chart tab: %s", pg.url[:80])
-                            return self._page
-                # Connected but no chart tab found
-                logger.warning(
-                    "[SYSTEM] WealthCharts tab not found in active Chrome window. Please open https://app.wealthcharts.com"
-                )
-                # Still return the first available page so Playwright operations don't crash,
-                # but log clearly that WealthCharts is missing.
-                self._page = contexts[0].pages[0] if contexts[0].pages else None
-                if self._page:
-                    logger.info("[STEALTH] Fallback to first tab: %s", self._page.url[:80])
-                return self._page
-        except Exception:
-            logger.warning(
-                "[STEALTH] Could not connect to Chrome on %s. "
-                "Ensure Chrome is running with: --remote-debugging-port=9223",
-                cdp_url,
-            )
-
-        # NO FALLBACK: CDP-only. No ghost browsers on headless Linux.
-        logger.error(
-            "[PLAYWRIGHT] No Chrome debug connection on %s. "
-            "Start Chrome: google-chrome --remote-debugging-port=9223 --user-data-dir=/root/ChromeDebug",
-            cdp_url,
+        # CDP port dependency handled via config.BROWSER_CDP_URL (default 9222). Use GhostExecutor for JS injection.
+        # This method should not be called directly - use GhostExecutor for JS injection.
+        logger.warning(
+            "[PLAYWRIGHT] Sync Playwright page access requested. "
+            "Use GhostExecutor (core/ghost_executor.py) for async JS-injection execution instead."
         )
         return None
+
+    def _is_passive_observer_mode(self) -> bool:
+        """True when TV/Tradovate owns the browser and RPA must not scrape or click."""
+        return _is_tradingview_tradovate_mode()
 
     def _map_ticker_to_tv(self, ticker):
         """Map internal ticker to WealthCharts chart symbol.
@@ -426,10 +440,22 @@ class RPAExecutor:
             logger.warning("[VERIFY] WealthCharts DOM verification error for %s: %s", ticker, e)
             return True  # Don't block on verification errors
 
-    def scrape_live_balance(self):
+    async def scrape_live_balance(self, *args, **kwargs):
         """Scrape Net Liq and Day P/L from WealthCharts account dashboard.
         Uses strict nearby-label reads only; never guesses from page-wide amounts.
-        Returns a dict: {"net_liq": float, "day_pl": float} or None."""
+        Returns a dict: {"net_liq": float, "day_pl": float} or None.
+
+        This is async because the main balance sync loop awaits it. Passive
+        TradingView/Tradovate mode returns immediately with a synthetic snapshot.
+        """
+        if self._is_passive_observer_mode():
+            snapshot = _passive_balance_snapshot()
+            logger.debug(
+                "[BALANCE] WealthCharts scrape bypassed in passive mode: $%.2f",
+                snapshot["net_liq"],
+            )
+            return snapshot
+
         page = self._get_playwright_page()
         if not page:
             logger.warning("[BALANCE] No Playwright page available for balance scraping")
@@ -555,9 +581,25 @@ class RPAExecutor:
             logger.warning("[BALANCE] Balance scraping error: %s", e)
             return None
 
+    async def scrape_balance(self, *args, **kwargs):
+        """Async compatibility wrapper for callers using the shorter method name."""
+        return await self.scrape_live_balance(*args, **kwargs)
+
+    async def sync_balance(self, *args, **kwargs):
+        """Async compatibility wrapper for older balance-sync callers."""
+        return await self.scrape_live_balance(*args, **kwargs)
+
+    async def get_balance(self, *args, **kwargs):
+        """Async compatibility wrapper for balance readers."""
+        return await self.scrape_live_balance(*args, **kwargs)
+
     def _verify_account_selected(self, page):
         """Check that the correct prop-firm account is active before trading.
         Returns True if correct account is selected, False otherwise."""
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[ACCOUNT] WealthCharts account verification bypassed in passive mode")
+            return True
+
         try:
             # Ask the page what account name is currently visible
             current_account = page.evaluate("""() => {
@@ -609,6 +651,10 @@ class RPAExecutor:
 
     def _select_apex_account(self, page):
         """Attempt to auto-select the Apex account from the WealthCharts account dropdown."""
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[ACCOUNT] WealthCharts account selection bypassed in passive mode")
+            return True
+
         try:
             logger.info("[ACCOUNT] Attempting to auto-select Apex account...")
 
@@ -911,6 +957,17 @@ class RPAExecutor:
             logger.error("[RPA] Invalid trade action: %s", action)
             return False
 
+        # ISOLATED ACCOUNT LOCK: verify BEFORE any mouse movement.
+        # Playwright page access happens here, outside the rapid click thread.
+        platform = self._detect_platform()
+        if platform == "wealthcharts":
+            logger.info("[CHAIN-LOCK] Pre-strike account verification for %s", trade.asset)
+            account_ok = self._micro_verify_account()
+            if not account_ok:
+                logger.error("[ALARM] TRADE ABORTED: Account chain-lock failed BEFORE strike for %s", trade.asset)
+                return False
+            logger.info("[CHAIN-LOCK] Account verified — proceeding to physical strike")
+
         for attempt in range(1, 4):
             logger.info("[RPA] Attempt %s/3 for %s %s", attempt, action, trade.asset)
             success = self._lightning_strike_sequence(target_key, trade.asset)
@@ -922,7 +979,7 @@ class RPAExecutor:
                 logger.warning("[RPA] Click succeeded but verification failed for %s", trade.asset)
             if attempt < 3:
                 backoff = 2 ** (attempt - 1)
-                logger.info(f"[RPA] Retrying in {backoff}s...")
+                logger.info("[RPA] Retrying in %ss...", backoff)
                 time.sleep(backoff)
 
         # DEBUG: Save screenshot of failure (Linux path)
@@ -1037,6 +1094,10 @@ class RPAExecutor:
         TradingView is analysis-only (strategy map), WealthCharts is execution (trigger).
         Returns 'wealthcharts', 'mt5', or 'unknown'.
         """
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[CHAMELEON] Passive TradingView/Tradovate mode detected")
+            return "tradingview_tradovate"
+
         try:
             # 1. Check for MT5 window (swarm math verification)
             for hint in getattr(config, "MT5_WINDOW_HINTS", ["MetaTrader 5"]):
@@ -1066,6 +1127,10 @@ class RPAExecutor:
     def _micro_verify_account(self):
         """CHAIN-LOCK: Re-verify account label 50ms before final click.
         Returns True if account is still locked target, False if Paper/Demo."""
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[CHAIN-LOCK] Account micro-verify bypassed in passive mode")
+            return True
+
         try:
             page = self._get_playwright_page()
             if not page:
@@ -1093,43 +1158,6 @@ class RPAExecutor:
         except Exception as e:
             logger.warning("[CHAIN-LOCK] Micro-verify error: %s — proceeding", e)
             return True
-
-    def bring_rithmic_to_foreground(self):
-        """Aggressive window sniper: print ALL windows, find exact Rithmic title."""
-        try:
-            import pygetwindow as gw
-            windows = gw.getAllWindows()
-            all_titles = []
-            rithmic_window = None
-            for window in windows:
-                title = getattr(window, "title", "").strip()
-                if title:
-                    all_titles.append(title)
-                    if "trader" in title.lower():
-                        rithmic_window = window
-                        print(f"[DEBUG] RITHMIC WINDOW FOUND: '{title}'")
-                        logger.info("[RITHMIC] Found window with 'Trader': '%s'", title)
-            
-            print(f"[DEBUG] ALL WINDOWS FOUND: {all_titles}")
-            logger.info("[RITHMIC] ALL WINDOWS FOUND: %s", all_titles)
-            
-            if not rithmic_window:
-                print("[RITHMIC] No window containing 'Trader' found.")
-                logger.warning("[RITHMIC] No window containing 'Trader' found.")
-                return False
-            
-            # Try to activate, fallback to alt-tab if fails
-            try:
-                rithmic_window.activate()
-                logger.info("[RITHMIC] Activated window via activate(): '%s'", rithmic_window.title)
-                return True
-            except Exception as e:
-                logger.warning("[RITHMIC] activate() failed: %s. Trying ALT-TAB...", e)
-                return self._alt_tab_to_window(rithmic_window)
-        except Exception as e:
-            print(f"[RITHMIC] Error searching for 'Trader' windows: {e}")
-            logger.error("[RITHMIC] Error searching for 'Trader' windows: %s", e)
-            return False
 
     def _alt_tab_to_window(self, target_window):
         """Use ALT-TAB to cycle through windows until target is found."""
@@ -1209,13 +1237,8 @@ class RPAExecutor:
             if self.human_latency_enabled:
                 time.sleep(random.uniform(0.1, 0.3))
 
-            # CHAIN-LOCK: Micro-verify account 50ms BEFORE final click
-            time.sleep(0.05)
-            account_ok = self._micro_verify_account()
-            if not account_ok:
-                logger.error("[ALARM] TRADE ABORTED: Account chain-lock failed for %s", ticker)
-                return False
-
+            # PURE PHYSICAL STRIKE: account already verified upstream.
+            # Zero browser/Playwright interaction inside this block.
             pyautogui.click()
 
             logger.info(
@@ -1272,11 +1295,13 @@ class RPAExecutor:
             return False
 
     def verify_position_opened(self, ticker):
-        """Screenshot-based confirmation that the position appears in WealthCharts."""
+        """INSTITUTIONAL VERIFY: Strict screenshot confirmation. NO weak pass fallbacks.
+        Returns True only if OCR or template match confirms the position row.
+        If verification fails, logs [EXECUTION_MISSED] so the caller can retry."""
         time.sleep(4)  # Wait for broker fill (extended for WealthCharts delay)
         window = self._get_browser_window()
         if not window:
-            logger.warning(f"[VERIFY] Cannot verify {ticker}: WealthCharts window not found")
+            logger.warning("[VERIFY] Cannot verify %s: WealthCharts window not found", ticker)
             return False
 
         try:
@@ -1284,39 +1309,44 @@ class RPAExecutor:
                 region=(window.left, window.top, window.width, window.height)
             )
 
-            # Try OCR verification if pytesseract is available
+            # STRICT OCR: look for ticker symbol in positions panel
+            ocr_confirmed = False
             try:
                 import pytesseract
                 text = pytesseract.image_to_string(screenshot)
                 normalized_text = text.upper().replace("-", "").replace("/", "")
                 normalized_ticker = ticker.upper().replace("-", "").replace("/", "")
                 if normalized_ticker in normalized_text:
-                    logger.info(f"[VERIFY] {ticker} confirmed in WealthCharts positions panel via OCR")
-                    return True
+                    logger.info("[VERIFY] %s confirmed in WealthCharts positions panel via OCR", ticker)
+                    ocr_confirmed = True
             except ImportError:
-                pass  # OCR not available, fall through
+                logger.debug("[VERIFY] pytesseract not available — skipping OCR")
 
-            # Fallback: try image template matching if user provided a template
-            try:
-                template_path = getattr(config, "POSITION_OPEN_IMAGE", "")
-                if template_path:
-                    location = pyautogui.locateOnScreen(
-                        template_path, confidence=0.7, region=(window.left, window.top, window.width, window.height)
-                    )
-                    if location:
-                        logger.info(f"[VERIFY] {ticker} confirmed via WealthCharts template match")
-                        return True
-            except Exception:
-                pass  # Template match failed or pyautogui lacks confidence support
+            # STRICT TEMPLATE: look for position-open template if user provided one
+            template_confirmed = False
+            if not ocr_confirmed:
+                try:
+                    template_path = getattr(config, "POSITION_OPEN_IMAGE", "")
+                    if template_path and os.path.exists(template_path):
+                        location = pyautogui.locateOnScreen(
+                            template_path, confidence=0.7, region=(window.left, window.top, window.width, window.height)
+                        )
+                        if location:
+                            logger.info("[VERIFY] %s confirmed via WealthCharts template match", ticker)
+                            template_confirmed = True
+                except Exception:
+                    logger.debug("[VERIFY] Template match failed — likely opencv-python missing")
 
-            # Weak fallback: check if window title still contains WealthCharts (means no crash)
-            if any(name in window.title for name in ["WealthCharts", "wealthcharts"]):
-                logger.warning(f"[VERIFY] {ticker}: weak pass (WealthCharts window active, no OCR/template)")
+            if ocr_confirmed or template_confirmed:
                 return True
 
+            # NO WEAK PASS. If we can't verify, it's a miss.
+            logger.error("[EXECUTION_MISSED] %s position NOT verified after click. "
+                         "OCR and template both failed. Rolling back position state.", ticker)
             return False
+
         except Exception as exc:
-            logger.warning(f"[VERIFY] Exception during WealthCharts verification for {ticker}: {exc}")
+            logger.error("[EXECUTION_MISSED] Exception during WealthCharts verification for %s: %s", ticker, exc)
             return False
 
     def assert_permissions_or_die(self):
@@ -1326,6 +1356,10 @@ class RPAExecutor:
 
     def bring_wealthcharts_to_front(self, ticker_hint=None):
         """Focus the WealthCharts browser window. Returns True if successful."""
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[FOCUS] WealthCharts focus bypassed in passive mode")
+            return True
+
         window = self._get_browser_window(ticker_hint)
         if not window:
             logger.warning("[FOCUS] Could not find WealthCharts window for %s", ticker_hint or "unknown")
@@ -1416,6 +1450,18 @@ class RPAExecutor:
                 logger.info("[EXEC] WealthCharts — using PyAutoGUI mouse for %s %s", action, asset)
                 return self._execute_trade_pyautogui(trade)
 
+            if platform == "tradingview_tradovate":
+                self.last_failure_reason = (
+                    "TradingView passive mode requires GhostExecutor JS execution; "
+                    "legacy WealthCharts RPA is disabled"
+                )
+                logger.info(
+                    "[EXEC] Passive TradingView/Tradovate mode — legacy RPA disabled for %s %s",
+                    action,
+                    asset,
+                )
+                return False
+
             # Default: PyAutoGUI
             return self._execute_trade_pyautogui(trade)
         finally:
@@ -1488,14 +1534,17 @@ class WealthChartsSpecialist:
 
     def __init__(self):
         self._page = None
-        self._cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9223").strip()
+        self._cdp_url = str(getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222")).strip()
         self._connected = False
         self._ready_timer = None
         self._running = False
         self._lock = threading.Lock()
         # Anti-detection: humanization config
         self._human = True  # Enable/disable humanization
-        logger.info("[SPECIALIST] WealthChartsSpecialist initialized — account=%s", self.TARGET_ACCOUNT)
+        if _is_tradingview_tradovate_mode():
+            logger.info("[SPECIALIST] Passive TradingView/Tradovate mode — WealthCharts automation disabled")
+        else:
+            logger.info("[SPECIALIST] WealthChartsSpecialist initialized — account=%s", self.TARGET_ACCOUNT)
 
     # -----------------------------------------------------------------
     # Anti-Detection: Humanization Layer
@@ -1833,56 +1882,134 @@ class WealthChartsSpecialist:
             pass
         logger.warning("[LAMINATE] DOM blocked for %s — will use coordinate laminate", target_key)
         return None
-    def connect(self) -> bool:
-        """Connect to existing Chrome via CDP. Returns True on success."""
-        with self._lock:
-            try:
-                from playwright.sync_api import sync_playwright
 
+    def _connect_passive_tab(self) -> bool:
+        """Attach opportunistically to a TradingView/Tradovate tab without requiring WealthCharts."""
+        self._connected = True
+        try:
+            from playwright.async_api import async_playwright
+            import asyncio
+
+            async def _do_connect():
+                pw = await async_playwright().start()
+                try:
+                    browser = await pw.chromium.connect_over_cdp(self._cdp_url)
+                    selected_page = None
+                    selected_context = None
+                    for ctx in browser.contexts:
+                        for pg in ctx.pages:
+                            url_lower = (pg.url or "").lower()
+                            if "tradingview" in url_lower or "tradovate" in url_lower:
+                                selected_page = pg
+                                selected_context = ctx
+                                break
+                        if selected_page:
+                            break
+                    if not selected_page:
+                        for ctx in reversed(browser.contexts):
+                            if ctx.pages:
+                                selected_page = ctx.pages[-1]
+                                selected_context = ctx
+                                break
+                    self._page = selected_page
+                    self._browser = browser
+                    self._playwright = pw
+                    self._connected = True
+                    if selected_page:
+                        logger.debug("[SPECIALIST] Passive tab attached: %s", selected_page.url[:80])
+                    else:
+                        logger.debug("[SPECIALIST] Passive mode active; no browser tab required")
+                    return True
+                except Exception:
+                    await pw.stop()
+                    raise
+
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                return bool(loop.run_until_complete(_do_connect()))
+            finally:
+                loop.close()
+        except Exception as exc:
+            self._page = None
+            self._connected = True
+            logger.debug("[SPECIALIST] Passive CDP attach skipped: %s", exc)
+            return True
+
+    def connect(self) -> bool:
+        """Connect to existing Chrome via CDP. Uses async Playwright only.
+        Returns True on success. Fails silently with warning if CDP unavailable."""
+        with self._lock:
+            if _is_tradingview_tradovate_mode():
+                return self._connect_passive_tab()
+
+            try:
                 if self._page and not self._page.is_closed():
                     self._connected = True
                     return True
 
-                pw = sync_playwright().start()
-                browser = pw.chromium.connect_over_cdp(self._cdp_url)
-                contexts = browser.contexts
+                # Use async_playwright to avoid "Sync API inside asyncio loop" errors
+                from playwright.async_api import async_playwright
+                import asyncio
 
-                if not contexts:
-                    logger.error("[SPECIALIST] No browser contexts found on %s", self._cdp_url)
-                    pw.stop()
+                async def _do_connect():
+                    pw = await async_playwright().start()
+                    try:
+                        browser = await pw.chromium.connect_over_cdp(self._cdp_url)
+                        contexts = browser.contexts
+                        if not contexts:
+                            logger.warning("[SPECIALIST] No browser contexts found on %s", self._cdp_url)
+                            await pw.stop()
+                            return False
+
+                        for ctx in contexts:
+                            for pg in ctx.pages:
+                                url_lower = (pg.url or "").lower()
+                                if "wealthcharts" in url_lower:
+                                    if "login" in url_lower or "signin" in url_lower or "auth" in url_lower:
+                                        logger.warning("[SPECIALIST] WealthCharts LOGIN PAGE detected")
+                                        self._page = pg
+                                        self._connected = False
+                                        await pw.stop()
+                                        return False
+                                    self._page = pg
+                                    self._connected = True
+                                    # Keep browser reference alive for future use
+                                    self._browser = browser
+                                    self._playwright = pw
+                                    logger.info("[SPECIALIST] Connected to WealthCharts: %s", pg.url[:80])
+                                    return True
+
+                        logger.warning("[GHOST] No WealthCharts tab found. Bot will wait for user's existing session.")
+                        await pw.stop()
+                        return False
+                    except Exception:
+                        await pw.stop()
+                        raise
+
+                # Run the async connect in a new event loop (non-blocking to main thread)
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    result = loop.run_until_complete(_do_connect())
+                    loop.close()
+                    return result
+                except Exception:
+                    self._connected = False
                     return False
 
-                for ctx in contexts:
-                    for pg in ctx.pages:
-                        url_lower = (pg.url or "").lower()
-                        if "wealthcharts" in url_lower:
-                            # Check if logged out (login page detected)
-                            if "login" in url_lower or "signin" in url_lower or "auth" in url_lower:
-                                logger.error("[SPECIALIST] WealthCharts LOGIN PAGE detected — please log in manually and retry")
-                                self._page = pg
-                                self._connected = False
-                                return False
-                            self._page = pg
-                            self._connected = True
-                            self._inject_stealth(pg)
-                            self._apply_sniper_view(pg)
-                            self._inject_session_keepalive(pg)
-                            logger.info("[SPECIALIST] Connected to WealthCharts: %s", pg.url[:80])
-                            return True
-
-                # ZERO-NAVIGATION: Never create tabs or navigate via URL.
-                # WealthCharts detects page.goto() as bot behavior and kills the session.
-                logger.error("[GHOST] No WealthCharts tab found! Please open https://app.wealthcharts.com in Chrome and log in manually.")
-                logger.error("[GHOST] Bot will NOT navigate — it waits for the user's existing logged-in session.")
-                return False
-
             except Exception as conn_err:
-                logger.error("[SPECIALIST] Connect failed: %s", conn_err)
+                logger.warning("[SPECIALIST] Connect failed (non-fatal): %s", conn_err)
                 self._connected = False
                 return False
 
     def _reconnect(self) -> bool:
         """EPIPE Self-Healing: reconnect without restarting the bot."""
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[SPECIALIST] EPIPE self-heal muted in passive TradingView/Tradovate mode")
+            self._connected = True
+            return True
+
         logger.warning("[SPECIALIST] EPIPE DETECTED — self-healing in 5 seconds...")
         time.sleep(5)
         self._page = None
@@ -1896,6 +2023,15 @@ class WealthChartsSpecialist:
 
     def _get_page(self):
         """Get a live page reference, reconnecting if needed."""
+        if _is_tradingview_tradovate_mode():
+            try:
+                if self._page and not self._page.is_closed():
+                    return self._page
+            except Exception:
+                self._page = None
+            self._connected = True
+            return None
+
         try:
             if self._page and not self._page.is_closed() and self._connected:
                 return self._page
@@ -1911,6 +2047,11 @@ class WealthChartsSpecialist:
     # -----------------------------------------------------------------
     def start_always_ready(self):
         """Start the 10-second Combat Ready watchdog."""
+        if _is_tradingview_tradovate_mode():
+            self._running = False
+            logger.debug("[SPECIALIST] Always Ready watchdog disabled in passive TradingView/Tradovate mode")
+            return
+
         if self._running:
             return
         self._running = True
@@ -1927,6 +2068,10 @@ class WealthChartsSpecialist:
 
     def _combat_ready_tick(self):
         """Single Combat Ready check — runs every 10 seconds."""
+        if _is_tradingview_tradovate_mode():
+            self._running = False
+            return
+
         if not self._running:
             return
         try:
@@ -2034,6 +2179,14 @@ class WealthChartsSpecialist:
 
         Returns True on success.
         """
+        if _is_tradingview_tradovate_mode():
+            logger.info(
+                "[SPECIALIST] Passive TradingView/Tradovate mode — no WealthCharts execution needed for %s %s",
+                action,
+                asset,
+            )
+            return True
+
         action_upper = self._normalize(action)
         if action_upper not in ("BUY", "SELL"):
             logger.error("[SPECIALIST] Invalid action: %s", action)
@@ -2166,6 +2319,9 @@ class WealthChartsSpecialist:
 
     def is_connected(self) -> bool:
         """Check if the specialist has a live connection."""
+        if _is_tradingview_tradovate_mode():
+            return True
+
         try:
             return self._connected and self._page is not None and not self._page.is_closed()
         except Exception:
@@ -2191,6 +2347,10 @@ class WealthChartsSpecialist:
         """Read the current live price directly from the WealthCharts DOM.
         Returns the price as a float, or None if unavailable.
         VISUAL PRICE LOCK: This ensures the signal matches what the user sees."""
+        if _is_tradingview_tradovate_mode():
+            logger.debug("[PRICE-LOCK] WealthCharts DOM price read bypassed in passive mode")
+            return None
+
         page = self._get_page()
         if not page:
             return None

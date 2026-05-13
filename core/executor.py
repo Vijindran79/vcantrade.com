@@ -8,6 +8,7 @@ from enum import Enum
 
 import config
 from core.models import TradeRecord, SignalAction, ConfidenceLevel
+from core.symbol_mapper import normalize_yfinance_symbol
 from execution.rpa_executor import RPAExecutor
 
 logger = logging.getLogger(__name__)
@@ -468,12 +469,22 @@ class UnifiedTradeExecutor:
         try:
             import yfinance as yf
             import concurrent.futures
+            import re
             
-            self._log(f"[CHART] Fetching live market price for {ticker}...")
+            yf_map = getattr(config, "YFINANCE_SYMBOL_MAP", {})
+            raw_ticker = str(ticker or "").strip()
+            compact_ticker = re.sub(r"[^A-Z0-9]", "", raw_ticker.upper())
+            market_ticker = (
+                yf_map.get(raw_ticker)
+                or yf_map.get(raw_ticker.upper())
+                or yf_map.get(compact_ticker)
+                or normalize_yfinance_symbol(raw_ticker)
+            )
+            self._log(f"[CHART] Fetching live market price for {ticker} via {market_ticker}...")
             
             def fetch_price():
                 """Fetch price using yfinance with timeout."""
-                sym = yf.Ticker(ticker)
+                sym = yf.Ticker(market_ticker)
                 hist = sym.history(period="1d", interval="1m")
                 if hist.empty:
                     return None

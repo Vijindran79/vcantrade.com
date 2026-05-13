@@ -1,9 +1,8 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "NQM6",
-    "ESM6",
-    "MCLM6"
+    "BTC-USD",
+    "ETH-USD"
   ],
   "investment_amount": 1000.0,
   "lot_size": 2.0,

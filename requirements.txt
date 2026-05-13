@@ -31,6 +31,7 @@ Pillow>=10.0.0
 pyautogui>=0.9.54
 mss>=9.0.0
 pygetwindow>=0.0.9
+dxcam>=0.0.5; platform_system=="Windows"
 
 # --- MetaTrader 5 (optional, for MT5 execution mode) ---
 MetaTrader5>=5.0.45

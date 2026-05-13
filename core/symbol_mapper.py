@@ -66,6 +66,47 @@ _ROOTS = {
     "SI": ("Silver", "SILVER", "COMEX:SI1!", "SI=F"),
 }
 
+_CRYPTO_YAHOO_ALIASES = {
+    "BTC": "BTC-USD",
+    "BTCUSD": "BTC-USD",
+    "BTCUSDT": "BTC-USD",
+    "XBT": "BTC-USD",
+    "XBTUSD": "BTC-USD",
+    "ETH": "ETH-USD",
+    "ETHUSD": "ETH-USD",
+    "ETHUSDT": "ETH-USD",
+    "SOL": "SOL-USD",
+    "SOLUSD": "SOL-USD",
+    "SOLUSDT": "SOL-USD",
+    "XRP": "XRP-USD",
+    "XRPUSD": "XRP-USD",
+    "XRPUSDT": "XRP-USD",
+    "DOGE": "DOGE-USD",
+    "DOGEUSD": "DOGE-USD",
+    "DOGEUSDT": "DOGE-USD",
+    "ADA": "ADA-USD",
+    "ADAUSD": "ADA-USD",
+    "ADAUSDT": "ADA-USD",
+    "BNB": "BNB-USD",
+    "BNBUSD": "BNB-USD",
+    "BNBUSDT": "BNB-USD",
+    "LTC": "LTC-USD",
+    "LTCUSD": "LTC-USD",
+    "LTCUSDT": "LTC-USD",
+    "BCH": "BCH-USD",
+    "BCHUSD": "BCH-USD",
+    "BCHUSDT": "BCH-USD",
+    "DOT": "DOT-USD",
+    "DOTUSD": "DOT-USD",
+    "DOTUSDT": "DOT-USD",
+    "AVAX": "AVAX-USD",
+    "AVAXUSD": "AVAX-USD",
+    "AVAXUSDT": "AVAX-USD",
+    "LINK": "LINK-USD",
+    "LINKUSD": "LINK-USD",
+    "LINKUSDT": "LINK-USD",
+}
+
 _FAMILY_GROUPS = (
     {"MICRO_NASDAQ", "NASDAQ"},
     {"MICRO_SP500", "SP500"},
@@ -123,6 +164,37 @@ def normalize_to_analysis_symbol(raw_symbol: str | None) -> str:
     if translation:
         return translation.tradingview_symbol
     return str(raw_symbol or "").strip().upper()
+
+
+def normalize_yfinance_symbol(raw_symbol: str | None) -> str:
+    """Return the yfinance-compatible symbol for market-data calls.
+
+    This intentionally does not change chart/RPA broker labels. It only fixes
+    market-data lookups such as BTCUSD -> BTC-USD before calling yfinance.
+    """
+    raw = str(raw_symbol or "").strip()
+    if not raw:
+        return ""
+
+    upper = raw.upper()
+    compact = _canonicalize(raw)
+    if upper in _CRYPTO_YAHOO_ALIASES:
+        return _CRYPTO_YAHOO_ALIASES[upper]
+    if compact in _CRYPTO_YAHOO_ALIASES:
+        return _CRYPTO_YAHOO_ALIASES[compact]
+
+    crypto_match = re.fullmatch(r"(BTC|ETH|SOL|XRP|DOGE|ADA|BNB|LTC|BCH|DOT|AVAX|LINK)(?:USD|USDT)?", compact)
+    if crypto_match:
+        return f"{crypto_match.group(1)}-USD"
+
+    if "-" in raw or raw.endswith("=F") or raw.endswith("=X") or raw.startswith("^"):
+        return raw
+
+    translation = translate_chart_symbol(raw)
+    if translation:
+        return translation.yahoo_symbol
+
+    return raw
 
 
 def root_matches(left: str | None, right: str | None) -> bool:

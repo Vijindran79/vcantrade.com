@@ -35,6 +35,39 @@ logger = logging.getLogger(__name__)
 _OLLAMA_MODEL_CACHE: Dict[str, bool] = {}
 
 
+def _is_openrouter_url(url: str) -> bool:
+    """Return True when an Ollama URL has accidentally been pointed at OpenRouter."""
+    return "openrouter.ai" in str(url or "").lower()
+
+
+def _looks_like_local_ollama_model(model_name: str) -> bool:
+    """Ollama model names usually look like qwen2.5:latest, not provider/model."""
+    model_text = str(model_name or "").strip()
+    return ":" in model_text and "/" not in model_text
+
+
+def _response_preview(response: requests.Response, limit: int = 220) -> str:
+    """Small, safe preview for non-JSON/HTTP error diagnostics."""
+    content_type = response.headers.get("content-type", "unknown")
+    text = (response.text or "").strip().replace("\n", " ")
+    if len(text) > limit:
+        text = f"{text[:limit]}..."
+    return f"status={response.status_code}, content_type={content_type}, body={text or '<empty>'}"
+
+
+def _decode_json_response(response: requests.Response, source: str) -> dict:
+    """Decode a model response and raise a clear error for HTML/empty bodies."""
+    if not (response.text or "").strip():
+        raise ValueError(f"{source} returned an empty response body")
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{source} returned non-JSON: {_response_preview(response)}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{source} returned unexpected JSON type: {type(data).__name__}")
+    return data
+
+
 def _validate_vision_model(model_name: str) -> Tuple[bool, str]:
     """
     Check whether the requested vision model exists in the local Ollama registry.
@@ -54,7 +87,7 @@ def _validate_vision_model(model_name: str) -> Tuple[bool, str]:
     try:
         response = requests.get(tags_url, timeout=10)
         response.raise_for_status()
-        data = response.json()
+        data = _decode_json_response(response, "Ollama /api/tags")
         models = {m.get("name", m.get("model", "")) for m in data.get("models", [])}
         # Ollama sometimes reports models as 'llava:7b' and sometimes just 'llava'
         model_stripped = model_name.split(":")[0]
@@ -89,12 +122,21 @@ def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = No
     This is the core "brain" function that runs locally.
     """
     url = build_ollama_url(config.OLLAMA_BASE_URL, "api/generate")
+    chosen_model = model or config.OLLAMA_MODEL
+    if _is_openrouter_url(url) and _looks_like_local_ollama_model(chosen_model):
+        msg = (
+            f"OLLAMA_BASE_URL points to OpenRouter ({normalize_ollama_base_url(config.OLLAMA_BASE_URL)}) "
+            f"but OLLAMA_MODEL is local Ollama model '{chosen_model}'. "
+            "Set OLLAMA_BASE_URL=http://127.0.0.1:11434 or switch to a valid OpenRouter model."
+        )
+        logger.error("[BRAIN] %s", msg)
+        return {"error": msg}
 
     # Simple headers for local connection
     headers = {"Content-Type": "application/json"}
 
     payload = {
-        "model": model or config.OLLAMA_MODEL,
+        "model": chosen_model,
         "prompt": prompt,
         "stream": False,
         "options": {
@@ -107,11 +149,34 @@ def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = No
 
     try:
         request_timeout = max(int(timeout or config.LLM_TIMEOUT), 90)
-        logger.info(f"[BRAIN] Calling local brain: {config.OLLAMA_MODEL} (timeout={request_timeout}s)")
+        logger.info(
+            "[BRAIN] Calling local brain: %s at %s (timeout=%ss)",
+            chosen_model,
+            url,
+            request_timeout,
+        )
         response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as http_err:
+            logger.error("[FAIL] Local AI HTTP error: %s | %s", http_err, _response_preview(response))
+            return {"error": f"Local AI HTTP error: {_response_preview(response)}"}
+        
+        # Check for empty response body
+        if not response.text.strip():
+            logger.warning("[WARN] Ollama returned an empty string. Check if 'ollama run qwen2.5:latest' is active!")
+            return {"error": "Ollama returned empty response. Is Ollama running?"}
+        
+        try:
+            data = _decode_json_response(response, "Ollama /api/generate")
+        except ValueError as json_err:
+            logger.error("[FAIL] Local AI Error: %s", json_err)
+            return {"error": str(json_err)}
+        
         raw_response = data.get('response', '{}')
+        if not str(raw_response or "").strip():
+            logger.warning("[WARN] Ollama returned JSON with an empty response field")
+            return {"error": "Ollama returned empty response text"}
         
         logger.info(f"[OK] Local brain responded successfully")
         return parse_json_response(raw_response)
@@ -455,6 +520,11 @@ class OllamaSwarmConsensus:
         self.timeout = max(int(config.LLM_TIMEOUT), 180)
         self.devils_advocate = DevilsAdvocate()
         logger.info(f"[BRAIN] Local Brain initialized: {self.model} at {self.base_url}")
+        if _is_openrouter_url(self.base_url) and _looks_like_local_ollama_model(self.model):
+            logger.error(
+                "[BRAIN] Misconfigured local brain: %s is an Ollama model, but OLLAMA_BASE_URL points to OpenRouter.",
+                self.model,
+            )
 
     def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
         """Fallback strike gate used when the cloud brain is unavailable."""

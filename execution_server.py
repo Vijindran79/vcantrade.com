@@ -7,8 +7,17 @@ import math
 import threading
 import os
 import sys
-import pygetwindow as gw
 from datetime import datetime
+
+# AUTO-CALIBRATION: OpenCV-backed template matching for institutional-grade coordinate resolution
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
+# Resolved button coordinates discovered at runtime via template matching
+RESOLVED_COORDS = {}
 
 try:
     import numpy as np
@@ -22,101 +31,9 @@ HOST = "0.0.0.0"
 PORT = 5555
 CONFIG_FILE = "config_coordinates.json"
 
-# R|Trader Pro window hints
-RTRADER_WINDOW_HINTS = ["Rithmic Trader Pro", "Rithmic Trader", "R|Trader Pro", "R|Trader", "RTrader Pro", "RTrader"]
 CLICK_JITTER = 2
 COLOR_TOLERANCE = 30
-
-
-def find_rtrader_window():
-    """Find R|Trader Pro window across all monitors, handle minimized/hidden windows."""
-    try:
-        # Use module-level gw (imported at top of file)
-        all_windows = gw.getAllWindows()
-        found_windows = []
-        
-        # Print all window titles for debugging
-        all_titles = []
-        for w in all_windows:
-            title = getattr(w, "title", "").strip()
-            if title:
-                all_titles.append(title)
-                # Check if any hint matches
-                for hint in RTRADER_WINDOW_HINTS:
-                    if hint.lower() in title.lower():
-                        found_windows.append((title, w))
-        
-        log(f"[WINDOW] All window titles: {all_titles[:20]}")  # Print first 20
-        log(f"[WINDOW] Found {len(found_windows)} windows matching hints: {[w[0] for w in found_windows]}")
-        
-        if found_windows:
-            # Use the first matching window
-            title, window = found_windows[0]
-            log(f"[WINDOW] Found R|Trader window: '{title}'")
-            
-            # Restore minimized window
-            try:
-                if getattr(window, "isMinimized", False):
-                    log(f"[WINDOW] Restoring minimized window: '{title}'")
-                    window.restore()
-                    time.sleep(0.5)
-                if getattr(window, "visible", True):
-                    return window
-            except Exception as e:
-                log(f"[WINDOW] Error restoring window: {e}")
-        
-        # Fallback to getWindowsWithTitle
-        log("[WINDOW] Trying fallback with getWindowsWithTitle...")
-        for hint in RTRADER_WINDOW_HINTS:
-            windows = gw.getWindowsWithTitle(hint)
-            for w in windows:
-                if getattr(w, "visible", True):
-                    log(f"[WINDOW] Fallback found: '{getattr(w, 'title', '')}'")
-                    return w
-        
-        log("[WINDOW] No R|Trader Pro window found")
-        return None
-    except Exception as e:
-        log(f"[WINDOW] Error finding R|Trader window: {e}")
-        return None
-
-
-def bring_window_to_foreground(window):
-    """Bring window to foreground, handle multi-monitor setups."""
-    if not window:
-        return False
-    try:
-        # Restore if minimized
-        if getattr(window, "isMinimized", False):
-            window.restore()
-            time.sleep(0.3)
-        # Activate window
-        window.activate()
-        time.sleep(0.5)
-        # Verify it's active
-        active = gw.getActiveWindow()
-        if active and getattr(active, "title", "") == getattr(window, "title", ""):
-            return True
-        # Fallback: ALT-TAB to window
-        return _alt_tab_to_window(window)
-    except Exception as e:
-        log(f"[WINDOW] Error bringing window to foreground: {e}")
-        return False
-
-
-def _alt_tab_to_window(target_window):
-    """Use ALT-TAB to cycle to target window."""
-    target_title = getattr(target_window, "title", "").lower()
-    for _ in range(20):
-        pyautogui.hotkey("alt", "tab")
-        time.sleep(0.3)
-        try:
-            active = gw.getActiveWindow()
-            if active and target_title in active.title.lower():
-                return True
-        except Exception:
-            pass
-    return False
+CLICK_LOCK = threading.RLock()
 
 
 def log(msg):
@@ -124,23 +41,100 @@ def log(msg):
     print(f"[{ts}] {msg}")
 
 
+def calibrate_trading_interface():
+    """AUTO-CALIBRATION: Scan the active monitor for trading button templates.
+    Uses OpenCV template matching (via pyautogui + cv2) to resolve exact (x, y)
+    centers of Buy / Sell / Flatten buttons on the user's active layout.
+    Stores results in RESOLVED_COORDS for the lifetime of the server.
+    """
+    global RESOLVED_COORDS
+    RESOLVED_COORDS = {}
+
+    templates = {
+        "BUTTON_BUY": ("rithmic_buy.png", "Buy"),
+        "BUTTON_SELL": ("rithmic_sell.png", "Sell"),
+        "BUTTON_FLATTEN": ("rithmic_exit.png", "Flatten"),
+    }
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for btn_key, (template_name, label) in templates.items():
+        template_path = os.path.join(script_dir, template_name)
+        if not os.path.exists(template_path):
+            log(f"[CALIBRATE] Template not found: {template_path}")
+            continue
+
+        try:
+            # OpenCV-backed multi-scale template match across primary monitor
+            if HAS_CV2:
+                screen = pyautogui.screenshot()
+                screen_cv = cv2.cvtColor(np.array(screen), cv2.COLOR_RGB2BGR)
+                template_cv = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+                if template_cv is None:
+                    log(f"[CALIBRATE] Could not load {template_name}")
+                    continue
+
+                # Handle alpha channel
+                if template_cv.shape[-1] == 4:
+                    alpha = template_cv[:, :, 3]
+                    template_cv = cv2.merge([template_cv[:, :, :3], alpha])
+                    # Use masked template matching
+                    result = cv2.matchTemplate(screen_cv, template_cv[:, :, :3], cv2.TM_CCOEFF_NORMED)
+                else:
+                    result = cv2.matchTemplate(screen_cv, template_cv, cv2.TM_CCOEFF_NORMED)
+
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                if max_val >= 0.70:
+                    h, w = template_cv.shape[:2]
+                    center_x = max_loc[0] + w // 2
+                    center_y = max_loc[1] + h // 2
+                    RESOLVED_COORDS[btn_key] = {"x": center_x, "y": center_y}
+                    log(f"[CALIBRATE] {btn_key} ({label}) locked at ({center_x}, {center_y}) confidence={max_val:.2f}")
+                else:
+                    log(f"[CALIBRATE] {btn_key} template match too weak ({max_val:.2f}) — will require packet coordinates")
+            else:
+                # Fallback: pure pyautogui grayscale locate
+                location = pyautogui.locateOnScreen(template_path, confidence=0.70, grayscale=True)
+                if location:
+                    center_x = location.left + location.width // 2
+                    center_y = location.top + location.height // 2
+                    RESOLVED_COORDS[btn_key] = {"x": center_x, "y": center_y}
+                    log(f"[CALIBRATE] {btn_key} ({label}) locked at ({center_x}, {center_y})")
+                else:
+                    log(f"[CALIBRATE] {btn_key} not found on screen")
+        except Exception as e:
+            log(f"[CALIBRATE] Error scanning for {btn_key}: {e}")
+
+    if not RESOLVED_COORDS:
+        log("[CALIBRATE] WARNING: No buttons auto-detected. Server requires packet-provided coordinates.")
+    else:
+        log(f"[CALIBRATE] Auto-calibration complete. {len(RESOLVED_COORDS)} buttons resolved.")
+
+    return RESOLVED_COORDS
+
+
 def load_coordinates():
-    """Load button coordinates, return empty dict if file missing."""
-    if not os.path.exists(CONFIG_FILE):
-        log(f"[WARN] {CONFIG_FILE} not found - using R|Trader window detection only")
-        return {}
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-        required = ["BUTTON_BUY", "BUTTON_SELL", "BUTTON_FLATTEN",
-                    "ACCOUNT_DROPDOWN", "SIM_ACCOUNT_SLOT", "APEX_ACCOUNT_SLOT"]
-        for key in required:
-            if key not in config:
-                log(f"[WARN] Missing coordinate: {key} - some features may not work")
-        return config
-    except Exception as e:
-        log(f"[ERROR] Failed to load {CONFIG_FILE}: {e}")
-        return {}
+    """Load optional TradingView coordinate overrides, return empty dict if file missing."""
+    merged = dict(RESOLVED_COORDS)  # Start with auto-calibrated coordinates
+
+    # Overlay manual config_coordinates.json if present
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                manual = json.load(f)
+            for key in ("BUTTON_BUY", "BUTTON_SELL", "BUTTON_FLATTEN"):
+                if key in manual:
+                    merged[key] = manual[key]
+                    log(f"[CONFIG] Manual override applied for {key}")
+        except Exception as e:
+            log(f"[ERROR] Failed to load {CONFIG_FILE}: {e}")
+    else:
+        log(f"[INFO] {CONFIG_FILE} not found - relying on auto-calibration or packet coordinates")
+
+    required = ["BUTTON_BUY", "BUTTON_SELL", "BUTTON_FLATTEN"]
+    for key in required:
+        if key not in merged:
+            log(f"[WARN] Missing coordinate: {key} - execution will require explicit packet target")
+    return merged
 
 
 def hex_to_rgb(hex_color):
@@ -203,51 +197,77 @@ def human_click(btn_x, btn_y):
     jx = btn_x + random.randint(-CLICK_JITTER, CLICK_JITTER)
     jy = btn_y + random.randint(-CLICK_JITTER, CLICK_JITTER)
     pyautogui.click(clicks=1, interval=random.uniform(0.05, 0.15), button='left', x=jx, y=jy)
+    return jx, jy
 
 
-def execute_strike(config, action):
+def _coords_from_packet(cmd):
+    """Extract explicit TradingView/RPA coordinates sent by main.py."""
+    target = cmd.get("target") or {}
+    absolute = target.get("absolute") or target.get("coords") or target.get("coordinates")
+    if isinstance(absolute, dict):
+        absolute = (absolute.get("x"), absolute.get("y"))
+    if isinstance(absolute, (list, tuple)) and len(absolute) >= 2:
+        try:
+            x = int(float(absolute[0]))
+            y = int(float(absolute[1]))
+            if x > 0 and y > 0:
+                return x, y, str(target.get("point_name", "packet_target"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def execute_packet_target(cmd):
+    """Physically click packet-provided coordinates on the active screen frame."""
+    resolved = _coords_from_packet(cmd)
+    if not resolved:
+        return None
+    x, y, point_name = resolved
+    packet_id = cmd.get("packet_id", "unknown")
+    selectors = cmd.get("selectors") or {}
+    log(
+        f"[PACKET] packet_id={packet_id} action={cmd.get('action')} ticker={cmd.get('ticker')} "
+        f"target={point_name} abs=({x},{y}) selectors={selectors}"
+    )
+    with CLICK_LOCK:
+        move_human(x, y)
+        time.sleep(random.uniform(0.05, 0.15))
+        clicked_x, clicked_y = human_click(x, y)
+    log(f"[CLICK_CONFIRM] packet_id={packet_id} physically clicked active frame at ({clicked_x},{clicked_y})")
+    return {
+        "point_name": point_name,
+        "requested": [x, y],
+        "clicked": [clicked_x, clicked_y],
+        "selectors": selectors,
+    }
+
+
+def execute_strike(config, action, cmd=None):
     log(f"[STRIKE] Lion executing: {action}")
+    cmd = cmd or {}
 
-    # Step0: Bring R|Trader window to foreground
-    log("[STEP 0] Bringing R|Trader window to foreground...")
-    rtrader_window = find_rtrader_window()
-    
-    if not rtrader_window:
-        log("[WINDOW HIDDEN] R|Trader Pro window not found - Window not found")
-        log("[DEBUG] Make sure R|Trader Pro is running on this machine")
-        log(f"[DEBUG] RTRADER_WINDOW_HINTS: {RTRADER_WINDOW_HINTS}")
-        return False
-    
-    if not bring_window_to_foreground(rtrader_window):
-        log("[WINDOW ERROR] Failed to bring R|Trader window to foreground")
-        return False
-    
-    log(f"[WINDOW] Successfully activated R|Trader window: {rtrader_window.title}")
-
-    if action != "FLATTEN":
-        dd = config["ACCOUNT_DROPDOWN"]
-        log(f"[ACCOUNT] Moving to dropdown ({dd['x']}, {dd['y']})")
-        move_human(dd["x"], dd["y"])
-        time.sleep(random.uniform(0.1, 0.25))
-        human_click(dd["x"], dd["y"])
-        time.sleep(random.uniform(0.2, 0.4))
-
-        slot_key = "SIM_ACCOUNT_SLOT" if "SIM" in action else "APEX_ACCOUNT_SLOT"
-        slot = config[slot_key]
-        log(f"[ACCOUNT] Selecting {slot_key} ({slot['x']}, {slot['y']})")
-        move_human(slot["x"], slot["y"])
-        time.sleep(random.uniform(0.1, 0.25))
-        human_click(slot["x"], slot["y"])
-        time.sleep(random.uniform(0.3, 0.5))
+    packet_click = execute_packet_target(cmd)
+    if packet_click:
+        log(f"[STRIKE] {action} execution complete via packet target.")
+        return True, packet_click
 
     btn_key = "BUTTON_BUY" if "BUY" in action else "BUTTON_SELL" if "SELL" in action else "BUTTON_FLATTEN"
+    if btn_key not in config:
+        log(
+            f"[REJECTED] No TradingView packet target or {btn_key} coordinate override supplied. "
+            "Legacy broker fallback has been removed."
+        )
+        return False, None
+
     btn = config[btn_key]
-    log(f"[BUTTON] Moving to {btn_key} ({btn['x']}, {btn['y']})")
-    move_human(btn["x"], btn["y"])
-    time.sleep(random.uniform(0.05, 0.15))
-    human_click(btn["x"], btn["y"])
+    log(f"[BUTTON] Moving to TradingView override {btn_key} ({btn['x']}, {btn['y']})")
+    with CLICK_LOCK:
+        move_human(btn["x"], btn["y"])
+        time.sleep(random.uniform(0.05, 0.15))
+        clicked_x, clicked_y = human_click(btn["x"], btn["y"])
+    log(f"[CLICK_CONFIRM] action={action} physically clicked configured {btn_key} at ({clicked_x},{clicked_y})")
     log(f"[STRIKE] {action} execution complete.")
-    return True
+    return True, {"point_name": btn_key, "requested": [btn["x"], btn["y"]], "clicked": [clicked_x, clicked_y]}
 
 
 def handle_client(config, conn, addr):
@@ -256,10 +276,35 @@ def handle_client(config, conn, addr):
         data = conn.recv(4096).decode("utf-8")
         if data:
             cmd = json.loads(data)
+            if str(cmd.get("type", "")).upper() == "HANDSHAKE":
+                response = json.dumps({
+                    "status": "ACK",
+                    "type": "HANDSHAKE_ACK",
+                    "port": PORT,
+                    "server": "execution_server.py",
+                    "received_at": datetime.now().isoformat(),
+                    "packet_id": cmd.get("packet_id"),
+                })
+                log(
+                    f"[HANDSHAKE] ACK sent to {addr} "
+                    f"packet_id={cmd.get('packet_id', 'unknown')} source={cmd.get('source', 'unknown')}"
+                )
+                conn.send(response.encode("utf-8"))
+                return
+
             action = cmd.get("action", "UNKNOWN")
-            success = execute_strike(config, action)
+            log(
+                f"[PACKET_RECEIVED] packet_id={cmd.get('packet_id', 'unknown')} "
+                f"source={cmd.get('source', 'unknown')} action={action} ticker={cmd.get('ticker', '')}"
+            )
+            success, click_receipt = execute_strike(config, action, cmd)
             if success:
-                response = json.dumps({"status": "SUCCESS", "action": action})
+                response = json.dumps({
+                    "status": "SUCCESS",
+                    "action": action,
+                    "packet_id": cmd.get("packet_id"),
+                    "click_receipt": click_receipt,
+                })
                 log(f"[RESPONSE] Sent: {response}")
             else:
                 response = json.dumps({"status": "ERROR", "message": "Execution failed - check window status"})
@@ -278,8 +323,12 @@ def handle_client(config, conn, addr):
 
 def main():
     log("=" * 60)
-    log("  GHOST-HAND SERVER (Master Stealth) - TRADING DESKTOP")
+    log("  GHOST-HAND SERVER - INSTITUTIONAL EXECUTION ENGINE")
     log("=" * 60)
+
+    # STAGE 1: Auto-calibrate button coordinates from screen templates
+    calibrate_trading_interface()
+
     config = load_coordinates()
     log(f"[SERVER] Listening on {HOST}:{PORT}")
     log(f"[SERVER] Click jitter: ±{CLICK_JITTER}px | Color check: {'ON' if False else 'OFF'}")

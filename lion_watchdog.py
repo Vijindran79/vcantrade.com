@@ -1,6 +1,9 @@
 """
 Lion Bot Watchdog - Self-Healing Wrapper for main.py
-Monitors main.py, restarts on crash, checks Rithmic connection health.
+Monitors main.py and restarts on crash.
+
+The legacy Rithmic/R|Trader window health check is retired because current
+execution runs through MetaTrader 5 and TradingView/Chrome sockets.
 """
 
 import subprocess
@@ -16,7 +19,6 @@ MAIN_SCRIPT = os.path.join(os.path.dirname(__file__), "main.py")
 RESTART_DELAY = 5  # Seconds to wait before restarting
 MAX_RESTARTS_PER_HOUR = 10  # Prevent restart loops
 HEALTH_CHECK_INTERVAL = 60  # Seconds between health checks
-RITHMIC_PROCESS_NAME = "RTraderPro.exe"  # Windows process name
 
 # Logging
 logging.basicConfig(
@@ -52,20 +54,8 @@ class Watchdog:
         sys.exit(0)
 
     def check_rithmic_connection(self) -> bool:
-        """Check if Rithmic Trader Pro is running (Windows only)"""
-        if os.name != "nt":
-            # On Linux, assume connection is handled by main.py
-            return True
-        try:
-            # Check if Rithmic process is running
-            result = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {RITHMIC_PROCESS_NAME}", "/NH"],
-                capture_output=True, text=True, timeout=5
-            )
-            return RITHMIC_PROCESS_NAME in result.stdout
-        except Exception as e:
-            logger.warning(f"Rithmic health check failed: {e}")
-            return True  # Assume OK if check fails
+        """Legacy compatibility stub; Rithmic window checks are retired."""
+        return True
 
     def start_main(self):
         """Start main.py subprocess"""
@@ -108,11 +98,8 @@ class Watchdog:
                 self.restart_count += 1
                 time.sleep(RESTART_DELAY)  # Wait for startup
 
-            # Health checks
-            if not self.check_rithmic_connection():
-                logger.warning("Rithmic connection lost! Restarting main.py...")
-                self.restart_main()
-                continue
+            # Legacy Rithmic/R|Trader window health checks are retired. The
+            # watchdog now restarts main.py only when the process exits.
 
             # Log main.py output
             if self.main_process.stdout:

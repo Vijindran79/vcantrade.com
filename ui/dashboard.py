@@ -12,6 +12,7 @@ Complete command center with:
 """
 
 import logging
+import time
 from datetime import datetime
 from typing import Dict, List
 
@@ -2113,6 +2114,44 @@ class CommandCenter(QWidget):
         self._update_analysis_option_visibility()
         self.watchlist_updated.emit(self.watchlist)
 
+    def _normalize_confidence_value(self, confidence) -> float:
+        try:
+            value = float(confidence or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if value > 1.0:
+            value = value / 100.0
+        return max(0.0, min(1.0, value))
+
+    def _watchlist_alert_color(self, state: Dict[str, object]) -> QColor | None:
+        """Return the active blink color for a watchlist row, if any."""
+        if not bool(getattr(config, "ENABLE_FLASHING_ALERTS", True)):
+            return None
+
+        confidence = self._normalize_confidence_value(state.get("confidence", 0.0))
+        signal = str(state.get("last_signal", "-") or "-").upper()
+        status_text = str(state.get("status_text", "") or "").upper()
+        alert_until = float(state.get("alert_until", 0.0) or 0.0)
+        threshold = float(getattr(config, "VISUAL_ALERT_MIN_CONFIDENCE", 0.60) or 0.60)
+        if threshold > 1.0:
+            threshold = threshold / 100.0
+
+        is_error = any(word in status_text for word in ("REJECT", "VETO", "BLOCK", "FAILED", "ERROR"))
+        is_fresh_alert = time.monotonic() <= alert_until
+        is_confident_signal = signal in {"BUY", "SELL"} and confidence >= threshold
+        if not (is_fresh_alert or is_confident_signal):
+            return None
+
+        if is_error and is_fresh_alert:
+            return QColor(255, 0, 60)
+        if signal == "BUY":
+            return QColor(0, 255, 65)
+        if signal == "SELL":
+            return QColor(255, 0, 60)
+        if confidence >= threshold:
+            return QColor(210, 153, 34)
+        return QColor(242, 204, 96)
+
     def _refresh_watchlist(self):
         self.watchlist_table.setRowCount(len(self.watchlist))
         for i, ticker in enumerate(self.watchlist):
@@ -2150,24 +2189,27 @@ class CommandCenter(QWidget):
             status_item.setForeground(status_color)
             self.watchlist_table.setItem(i, 3, status_item)
 
-            self._apply_watchlist_row_glow(i, confidence >= 0.90, pulse_now=self._confidence_glow_on)
+            self._apply_watchlist_row_glow(i, row_state, pulse_now=self._confidence_glow_on)
 
     def _pulse_confidence_rows(self):
         """Pulse high-confidence rows in neon green for fast visual triage."""
         self._confidence_glow_on = not self._confidence_glow_on
         for row, ticker in enumerate(self.watchlist):
-            confidence = float(self.watchlist_row_state.get(ticker, {}).get("confidence", 0.0) or 0.0)
-            self._apply_watchlist_row_glow(row, confidence >= 0.90, pulse_now=self._confidence_glow_on)
+            state = self.watchlist_row_state.get(ticker, {})
+            self._apply_watchlist_row_glow(row, state, pulse_now=self._confidence_glow_on)
 
-    def _apply_watchlist_row_glow(self, row: int, high_confidence: bool, pulse_now: bool):
+    def _apply_watchlist_row_glow(self, row: int, state: Dict[str, object], pulse_now: bool):
         """Apply or clear the neon row highlight for a watchlist entry."""
-        active_bg = QColor(57, 255, 20, 92 if pulse_now else 36)
+        color = self._watchlist_alert_color(state)
+        active_bg = QColor(color) if color is not None else None
+        if active_bg is not None:
+            active_bg.setAlpha(112 if pulse_now else 42)
         resting_bg = QColor(0, 0, 0, 0)
         for column in range(self.watchlist_table.columnCount()):
             item = self.watchlist_table.item(row, column)
             if item is None:
                 continue
-            item.setBackground(active_bg if high_confidence else resting_bg)
+            item.setBackground(active_bg if active_bg is not None else resting_bg)
 
     def _update_analysis_option_visibility(self):
         """Keep the analysis option strip visible whenever dashboard slots contain tickers."""
@@ -2206,9 +2248,17 @@ class CommandCenter(QWidget):
         state["status_text"] = label
         state["status_color"] = color.name()
         if confidence is not None:
-            state["confidence"] = float(confidence)
+            state["confidence"] = self._normalize_confidence_value(confidence)
         if last_signal is not None:
             state["last_signal"] = str(last_signal).upper()
+        raw_status = str(status or "").lower()
+        row_signal = str(state.get("last_signal", "-") or "-").upper()
+        if bool(getattr(config, "ENABLE_FLASHING_ALERTS", True)) and (
+            row_signal in {"BUY", "SELL"}
+            or any(word in raw_status for word in ("rejected", "veto", "blocked", "failed", "executing", "awaiting_strike", "dry_run"))
+        ):
+            duration = int(getattr(config, "ALERT_FLASH_DURATION_MS", 4500) or 4500)
+            state["alert_until"] = time.monotonic() + max(0.5, duration / 1000.0)
         for row in range(self.watchlist_table.rowCount()):
             item = self.watchlist_table.item(row, 1)
             if item and item.text() == ticker:
@@ -2218,7 +2268,7 @@ class CommandCenter(QWidget):
                     signal_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self.watchlist_table.setItem(row, 2, signal_item)
 
-                row_confidence = float(state.get("confidence", 0.0) or 0.0)
+                row_confidence = self._normalize_confidence_value(state.get("confidence", 0.0))
                 row_signal = str(state.get("last_signal", "-") or "-")
                 if row_signal != "-" and row_confidence > 0:
                     signal_item.setText(f"{row_signal} ({row_confidence:.0%})")
@@ -2236,7 +2286,7 @@ class CommandCenter(QWidget):
                 status_item.setText(label)
                 status_item.setForeground(color)
                 status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self._apply_watchlist_row_glow(row, row_confidence >= 0.90, pulse_now=self._confidence_glow_on)
+                self._apply_watchlist_row_glow(row, state, pulse_now=self._confidence_glow_on)
                 break
 
     def update_watchlist_signal(self, ticker: str, signal: str, confidence: float):

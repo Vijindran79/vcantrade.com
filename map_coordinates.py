@@ -5,7 +5,7 @@ import time
 
 pw = sync_playwright().start()
 try:
-    browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9223")
+    browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
     page = None
     for ctx in browser.contexts:
         for pg in ctx.pages:
@@ -16,7 +16,7 @@ try:
             break
 
     if not page:
-        print(json.dumps({"error": "No WealthCharts tab found on localhost:9223"}))
+        print(json.dumps({"error": "No WealthCharts tab found on localhost:9222"}))
     else:
         page.bring_to_front()
         time.sleep(1)
