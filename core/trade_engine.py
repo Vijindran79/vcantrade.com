@@ -19,6 +19,8 @@ from core.models import (
     ConfidenceLevel,
 )
 from execution.rpa_executor import RPAExecutor
+from core.profit_lock import ProfitLock, WalkAwayProtocol
+from core.atr_stops import LooseATRStops
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,12 @@ class TradeEngine:
         self.trade_history: List[TradeRecord] = []
         self.cooldown_until: Optional[datetime] = None
         self.rpa_executor = RPAExecutor()
+        self.last_indicators: dict = {}  # Populated by swarm before process_signal
+
+        # Active trade management: ProfitLock + ATR stops
+        self.profit_lock = ProfitLock()
+        self.walk_away = WalkAwayProtocol()
+        self.atr_stops = LooseATRStops()
 
         # Initialize SQLite ledger
         self._init_ledger()
@@ -85,6 +93,30 @@ class TradeEngine:
                 f"[TEACHER MODE] Signal: {signal.action} {signal.asset} - {signal.reason}"
             )
             return self._create_signal_record(signal)
+
+        # TREND FILTER: Block trades against the trend in autonomous mode
+        indicators = self.last_indicators
+        if mode == "AUTO" and indicators:
+            trend = str(indicators.get("TREND_DIRECTION", "N/A")).upper()
+            mtf_alignment = str(indicators.get("MTF_ALIGNMENT", "N/A")).upper()
+            if signal.action == SignalAction.BUY and trend == "BEARISH":
+                logger.warning(
+                    "[TREND FILTER] BLOCKED BUY %s — trend is BEARISH. Signal: %s",
+                    signal.asset, signal.reason,
+                )
+                return None
+            if signal.action == SignalAction.SELL and trend == "BULLISH":
+                logger.warning(
+                    "[TREND FILTER] BLOCKED SELL %s — trend is BULLISH. Signal: %s",
+                    signal.asset, signal.reason,
+                )
+                return None
+            if mtf_alignment == "AGAINST":
+                logger.warning(
+                    "[TREND FILTER] BLOCKED %s %s — MTF alignment is AGAINST trend.",
+                    signal.action.value, signal.asset,
+                )
+                return None
 
         # Auto mode: execute trade
         try:
@@ -140,8 +172,136 @@ class TradeEngine:
         self.safety_state.update_trade_ability()
         return self.safety_state.can_trade
 
+    def _get_confidence_risk_pct(self, confidence: ConfidenceLevel) -> float:
+        """Scale risk per trade based on signal confidence. Elite traders size up on A+ setups."""
+        risk_map = {
+            ConfidenceLevel.VERY_HIGH: 2.0,
+            ConfidenceLevel.HIGH: 1.5,
+            ConfidenceLevel.MEDIUM: 1.0,
+            ConfidenceLevel.LOW: 0.5,
+        }
+        return risk_map.get(confidence, 1.0)
+
+    def manage_open_trades(self, current_prices: dict) -> list:
+        """
+        Active trade management loop — checks all open trades for:
+        - Walk Away Protocol (daily loss breach -> 24h shutdown)
+        - Break-even moves (ProfitLock)
+        - Time-based exits (max 30min hold)
+        - Stop/TP hit detection
+
+        Call this on every tick/scan cycle. Returns list of closed trade IDs.
+        """
+        closed_ids = []
+        now = datetime.utcnow()
+
+        # Walk Away Protocol: check daily P&L
+        if config.CURRENT_BALANCE > 0:
+            daily_pnl_pct = (self.safety_state.daily_pnl / config.CURRENT_BALANCE) * 100
+            if self.walk_away.check_violation(daily_pnl_pct):
+                logger.critical(
+                    "[WALK AWAY] Daily loss %.2f%% exceeds threshold. Shutting down for 24h.",
+                    daily_pnl_pct,
+                )
+                for trade in list(self.open_trades):
+                    self._close_trade_at_price(trade, current_prices.get(trade.asset, trade.entry_price), "WALK_AWAY")
+                    closed_ids.append(trade.id)
+                return closed_ids
+
+        # Manage each open trade
+        for trade in list(self.open_trades):
+            current_price = current_prices.get(trade.asset)
+            if current_price is None:
+                continue
+
+            is_long = trade.action == SignalAction.BUY
+
+            # Check max hold time (30 minutes)
+            if trade.timestamp:
+                hold_seconds = (now - trade.timestamp).total_seconds()
+                if hold_seconds > 1800:
+                    logger.info(
+                        "[TIME EXIT] %s held for %.0fs (>1800s). Closing.",
+                        trade.asset, hold_seconds,
+                    )
+                    self._close_trade_at_price(trade, current_price, "TIME_EXIT")
+                    closed_ids.append(trade.id)
+                    continue
+
+            # Build position dict for ProfitLock API
+            position = {
+                "asset": trade.asset,
+                "entry": trade.entry_price,
+                "entry_price": trade.entry_price,
+                "sl_price": trade.stop_loss or 0,
+                "current_stop": trade.stop_loss or 0,
+                "side": "BUY" if is_long else "SELL",
+                "quantity": 1,
+            }
+
+            # Break-even check via ProfitLock
+            break_even_result = self.profit_lock.check_break_even(position, current_price)
+            if break_even_result:
+                new_stop = float(break_even_result.get("new_stop", 0) or 0)
+                if new_stop > 0 and new_stop != trade.stop_loss:
+                    logger.info(
+                        "[BREAK EVEN] %s stop moved to break-even: %.2f -> %.2f",
+                        trade.asset, trade.stop_loss, new_stop,
+                    )
+                    trade.stop_loss = new_stop
+                    self.profit_lock.update_position_stop(
+                        trade.asset, new_stop, reason="break_even",
+                        break_even_locked=True,
+                    )
+
+            # Check if stop was hit
+            if trade.stop_loss and trade.stop_loss > 0:
+                if is_long and current_price <= trade.stop_loss:
+                    logger.info("[STOP HIT] %s price %.2f <= stop %.2f", trade.asset, current_price, trade.stop_loss)
+                    self._close_trade_at_price(trade, current_price, "STOP_HIT")
+                    closed_ids.append(trade.id)
+                elif not is_long and current_price >= trade.stop_loss:
+                    logger.info("[STOP HIT] %s price %.2f >= stop %.2f", trade.asset, current_price, trade.stop_loss)
+                    self._close_trade_at_price(trade, current_price, "STOP_HIT")
+                    closed_ids.append(trade.id)
+
+            # Check if take profit was hit
+            if trade.take_profit and trade.take_profit > 0:
+                if is_long and current_price >= trade.take_profit:
+                    logger.info("[TP HIT] %s price %.2f >= TP %.2f", trade.asset, current_price, trade.take_profit)
+                    self._close_trade_at_price(trade, current_price, "TP_HIT")
+                    closed_ids.append(trade.id)
+                elif not is_long and current_price <= trade.take_profit:
+                    logger.info("[TP HIT] %s price %.2f <= TP %.2f", trade.asset, current_price, trade.take_profit)
+                    self._close_trade_at_price(trade, current_price, "TP_HIT")
+                    closed_ids.append(trade.id)
+
+        return closed_ids
+
+    def _close_trade_at_price(self, trade: TradeRecord, price: float, reason: str):
+        """Close a trade at a specific price with reason."""
+        trade.exit_price = price
+        trade.closed_at = datetime.utcnow()
+        trade.status = f"CLOSED_{reason}"
+        trade.pnl = (
+            (trade.exit_price - trade.entry_price)
+            if trade.action == SignalAction.BUY
+            else (trade.entry_price - trade.exit_price)
+        )
+        self.safety_state.daily_pnl += trade.pnl or 0
+        self.open_trades.remove(trade)
+        self.trade_history.append(trade)
+        self._update_trade(trade)
+        logger.info(
+            "[CLOSE] %s %s @ %.2f -> %.2f | PnL: %.2f | Reason: %s",
+            trade.action.value, trade.asset, trade.entry_price,
+            trade.exit_price, trade.pnl or 0, reason,
+        )
+
     def _execute_buy(self, signal: LLMAnalysisOutput) -> TradeRecord:
-        """Execute buy trade"""
+        """Execute buy trade with confidence-based position sizing"""
+        risk_pct = self._get_confidence_risk_pct(signal.confidence)
+        logger.info("[SIZING] %s confidence -> %.1f%% risk per trade", signal.confidence.value, risk_pct)
         trade = TradeRecord(
             asset=signal.asset,
             action=SignalAction.BUY,
@@ -170,7 +330,9 @@ class TradeEngine:
         return trade
 
     def _execute_sell(self, signal: LLMAnalysisOutput) -> TradeRecord:
-        """Execute sell trade"""
+        """Execute sell trade with confidence-based position sizing"""
+        risk_pct = self._get_confidence_risk_pct(signal.confidence)
+        logger.info("[SIZING] %s confidence -> %.1f%% risk per trade", signal.confidence.value, risk_pct)
         trade = TradeRecord(
             asset=signal.asset,
             action=SignalAction.SELL,

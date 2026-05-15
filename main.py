@@ -1335,6 +1335,9 @@ class AnalysisWorker(QThread):
                     output, transcript = self.analyzer.analyze_market(
                         market_data, chart_image_base64=chart_base64
                     )
+                    # Store enriched indicators (trend, EMA, MTF) on trade engine
+                    # so process_signal's trend filter can use them
+                    self.trade_engine.last_indicators = dict(market_data.indicators)
                     self.analysis_complete.emit(output, transcript)
                 except Exception as analysis_error:
                     logger.error(f"Swarm analysis failed for {market_data.asset}: {analysis_error}")

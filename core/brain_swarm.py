@@ -592,16 +592,118 @@ Return JSON only:
             return f"[SIGNAL] {action}"
         return "[SIGNAL] WAIT"
 
+    def _enrich_trend_data(self, market_data: MarketDataPoint) -> None:
+        """Compute EMA-20, EMA-50, trend direction, and MTF alignment from recent candles."""
+        import numpy as np
+
+        candles = market_data.indicators.get("RECENT_CANDLES", [])
+        if not candles or len(candles) < 20:
+            return
+
+        try:
+            closes = []
+            for c in candles:
+                parts = str(c).split()
+                for p in parts:
+                    if p.startswith("C="):
+                        closes.append(float(p[2:]))
+                        break
+
+            if len(closes) < 20:
+                return
+
+            closes_arr = np.array(closes, dtype=float)
+            price = closes_arr[-1]
+
+            ema_20 = self._compute_ema(closes_arr, 20)
+            period_50 = min(50, len(closes_arr))
+            ema_50 = self._compute_ema(closes_arr[-period_50:], period_50)
+
+            if price > ema_20 > ema_50:
+                trend = "BULLISH"
+            elif price < ema_20 < ema_50:
+                trend = "BEARISH"
+            else:
+                trend = "NEUTRAL"
+
+            recent_5 = closes_arr[-5:]
+            if trend == "BULLISH":
+                alignment = "WITH" if recent_5[-1] > recent_5[0] else "AGAINST"
+            elif trend == "BEARISH":
+                alignment = "WITH" if recent_5[-1] < recent_5[0] else "AGAINST"
+            else:
+                alignment = "NEUTRAL"
+
+            market_data.indicators["EMA_20"] = round(ema_20, 2)
+            market_data.indicators["EMA_50"] = round(ema_50, 2)
+            market_data.indicators["TREND_DIRECTION"] = trend
+            market_data.indicators["MTF_BIAS"] = trend
+            market_data.indicators["MTF_ALIGNMENT"] = alignment
+
+            logger.info(
+                "[TREND] %s | Price=%.2f | EMA20=%.2f | EMA50=%.2f | Trend=%s | MTF=%s",
+                market_data.asset, price, ema_20, ema_50, trend, alignment,
+            )
+        except Exception as e:
+            logger.warning("[TREND] Failed to enrich trend data: %s", e)
+
+    def _compute_ema(self, data: "np.ndarray", period: int) -> float:
+        """Compute EMA over the given period."""
+        import numpy as np
+        if len(data) < period:
+            return float(data[-1]) if len(data) > 0 else 0.0
+        multiplier = 2.0 / (period + 1)
+        ema = float(data[0])
+        for val in data[1:]:
+            ema = float(val) * multiplier + ema * (1 - multiplier)
+        return ema
+
+    def _apply_devil_penalty(
+        self,
+        output: LLMAnalysisOutput,
+        devils_challenge: Dict,
+    ) -> LLMAnalysisOutput:
+        """Apply Devil's Advocate confidence penalty to the final output."""
+        penalty = float(devils_challenge.get("confidence_penalty", -0.10) or -0.10)
+        rating = str(devils_challenge.get("rating", "NEUTRAL")).upper()
+        reasons = devils_challenge.get("rejection_reasons", [])
+
+        levels_to_drop = max(1, int(abs(penalty) / 0.12))
+
+        confidence_order = {
+            ConfidenceLevel.LOW: 0,
+            ConfidenceLevel.MEDIUM: 1,
+            ConfidenceLevel.HIGH: 2,
+            ConfidenceLevel.VERY_HIGH: 3,
+        }
+        reverse_order = {v: k for k, v in confidence_order.items()}
+        current_level = confidence_order.get(output.confidence, 1)
+
+        if rating == "STRONG_AVOID":
+            new_level = max(0, current_level - max(levels_to_drop, 2))
+        elif rating == "CAUTIOUS":
+            new_level = max(0, current_level - levels_to_drop)
+        else:
+            new_level = current_level
+
+        output.confidence = reverse_order.get(new_level, ConfidenceLevel.MEDIUM)
+        reason_str = "; ".join(reasons[:2]) if reasons else "Devil's Advocate flagged risks"
+        output.reason = f"{output.reason} | [DEVIL] {reason_str}"
+        return output
+
     async def run(
         self,
         market_data: MarketDataPoint,
         news_context: str = "",
         chart_image_base64: Optional[str] = None,
-        user_suggestion: str = "",  # NEW: Co-Pilot Command Bridge
+        user_suggestion: str = "",
         skip_vibe_debate: bool = False,
     ) -> Tuple[LLMAnalysisOutput, DebateTranscript]:
-        """Execute a 3-step Vibe -> Liquidity -> Closer analysis flow."""
-        logger.info(f"[BRAIN] Analyzing {market_data.asset} with {self.model}")
+        """Execute a parallel swarm analysis: Vibe+Vision -> Liquidity -> Closer -> Devil."""
+        import asyncio
+        import time as _time
+        _t0 = _time.monotonic()
+        logger.info(f"[BRAIN] Analyzing {market_data.asset} with {self.model} (PARALLEL SWARM)")
         if user_suggestion:
             logger.info(f"[SUCCESS] User suggestion received: {user_suggestion}")
 
@@ -610,67 +712,92 @@ Return JSON only:
         session_detector = MarketSessionDetector()
         session_context = session_detector.get_session_context()
 
+        # Enrich market data with trend indicators before analysis
+        self._enrich_trend_data(market_data)
+
         memory_summary = str(market_data.indicators.get("VIBE_MEMORY_SUMMARY", "") or "").strip()
         skip_reason = ""
 
+        # ============================================================
+        # PHASE 1: Vibe + Vision run IN PARALLEL (no dependencies)
+        # ============================================================
         if skip_vibe_debate:
             skip_reason = "FORCE ACTION armed - skipped Vibe and Liquidity debate before strike."
             vibe_result = self._default_vibe_result(market_data, skipped=True)
-            liquidity_result = self._default_liquidity_result(market_data, skipped=True)
+            vision_result = None
+            detected_symbol = ""
+            vision_summary = "Vision agent: no chart image supplied."
         else:
             vibe_prompt = self._build_vibe_prompt(market_data, session_context, user_suggestion, memory_summary)
-            vibe_result = call_local_brain(vibe_prompt, model=self.model, timeout=self.timeout)
+
+            async def _run_vibe():
+                return call_local_brain(vibe_prompt, model=self.model, timeout=self.timeout)
+
+            async def _run_vision():
+                if not chart_image_base64:
+                    return None, "", "Vision agent: no chart image supplied."
+                vr = await asyncio.to_thread(
+                    analyze_chart_with_vision,
+                    chart_image_base64, market_data.asset,
+                    config.MULTI_ASSET_VISION_MODEL, self.timeout,
+                )
+                ds = await asyncio.to_thread(
+                    detect_symbol_from_chart,
+                    chart_image_base64,
+                    config.MULTI_ASSET_VISION_MODEL, min(self.timeout, 60),
+                )
+                if ds:
+                    market_data.indicators["VISION_DETECTED_SYMBOL"] = ds
+                    translation = translate_chart_symbol(ds)
+                    if translation:
+                        market_data.indicators["VISION_SYMBOL_TRANSLATION"] = translation.to_dict()
+                        market_data.indicators["VISION_ANALYSIS_SYMBOL"] = translation.tradingview_symbol
+                vs = self._format_vision_summary(vr, ds, market_data.asset)
+                return vr, ds, vs
+
+            vibe_task = asyncio.create_task(_run_vibe())
+            vision_task = asyncio.create_task(_run_vision())
+            vibe_result, (vision_result, detected_symbol, vision_summary) = await asyncio.gather(
+                vibe_task, vision_task
+            )
+
             if "error" in vibe_result:
                 logger.error("Vibe agent failed: %s", vibe_result["error"])
                 vibe_result = self._default_vibe_result(market_data)
 
+        _t1 = _time.monotonic()
+        logger.info("[SWARM] Phase 1 (Vibe+Vision) done in %.1fs", _t1 - _t0)
+
+        # ============================================================
+        # PHASE 2: Liquidity (depends on Vibe result)
+        # ============================================================
+        if skip_vibe_debate:
+            liquidity_result = self._default_liquidity_result(market_data, skipped=True)
+        else:
             liquidity_prompt = self._build_liquidity_prompt(
-                market_data,
-                session_context,
-                user_suggestion,
-                vibe_result,
-                memory_summary,
+                market_data, session_context, user_suggestion, vibe_result, memory_summary,
             )
-            liquidity_result = call_local_brain(liquidity_prompt, model=self.model, timeout=self.timeout)
+            liquidity_result = await asyncio.to_thread(
+                call_local_brain, liquidity_prompt, self.model, self.timeout,
+            )
             if "error" in liquidity_result:
                 logger.error("Liquidity agent failed: %s", liquidity_result["error"])
                 liquidity_result = self._default_liquidity_result(market_data)
 
-        vision_result = None
-        detected_symbol = ""
-        vision_summary = "Vision agent: no chart image supplied."
-        if chart_image_base64:
-            vision_result = analyze_chart_with_vision(
-                chart_image_base64,
-                market_data.asset,
-                model=config.MULTI_ASSET_VISION_MODEL,
-                timeout=self.timeout,
-            )
-            detected_symbol = detect_symbol_from_chart(
-                chart_image_base64,
-                model=config.MULTI_ASSET_VISION_MODEL,
-                timeout=min(self.timeout, 60),
-            )
-            if detected_symbol:
-                market_data.indicators["VISION_DETECTED_SYMBOL"] = detected_symbol
-                translation = translate_chart_symbol(detected_symbol)
-                if translation:
-                    market_data.indicators["VISION_SYMBOL_TRANSLATION"] = translation.to_dict()
-                    market_data.indicators["VISION_ANALYSIS_SYMBOL"] = translation.tradingview_symbol
-            vision_summary = self._format_vision_summary(vision_result, detected_symbol, market_data.asset)
+        _t2 = _time.monotonic()
+        logger.info("[SWARM] Phase 2 (Liquidity) done in %.1fs", _t2 - _t1)
 
+        # ============================================================
+        # PHASE 3: Closer (needs Vibe + Liquidity results)
+        # ============================================================
         closer_prompt = self._build_analysis_prompt(
-            market_data,
-            news_context,
-            session_context,
-            user_suggestion,
-            vibe_result=vibe_result,
-            liquidity_result=liquidity_result,
-            memory_summary=memory_summary,
-            skip_reason=skip_reason,
+            market_data, news_context, session_context, user_suggestion,
+            vibe_result=vibe_result, liquidity_result=liquidity_result,
+            memory_summary=memory_summary, skip_reason=skip_reason,
             vision_summary=vision_summary,
         )
-        result = call_local_brain(closer_prompt, model=self.model, timeout=self.timeout)
+
+        result = await asyncio.to_thread(call_local_brain, closer_prompt, self.model, self.timeout)
         if "error" in result:
             logger.error(f"Local brain failed: {result['error']}")
             result = self._default_result(market_data)
@@ -692,6 +819,29 @@ Return JSON only:
         signal_label = "WAIT" if output.action == SignalAction.HOLD else output.action.value
         if "[SIGNAL]" not in output.reason.upper():
             output.reason = f"[SIGNAL] {signal_label} {output.reason}"
+
+        # ============================================================
+        # PHASE 4: Devil's Advocate (depends on Closer output)
+        # ============================================================
+        devils_challenge = await asyncio.to_thread(
+            self.devils_advocate.challenge_trade,
+            market_data, output.action.value,
+            output.entry_price or market_data.price,
+            output.stop_loss or market_data.price * 0.99,
+            output.take_profit or market_data.price * 1.01,
+            output.confidence.value, session_context,
+        )
+
+        if devils_challenge.get("rating") in ["STRONG_AVOID", "CAUTIOUS"]:
+            penalty = devils_challenge.get("confidence_penalty", -0.10)
+            logger.warning(
+                f"[DEVIL] Devil's Advocate PENALTY: {penalty:.2f} | "
+                f"Reasons: {devils_challenge.get('rejection_reasons', [])}"
+            )
+            output = self._apply_devil_penalty(output, devils_challenge)
+
+        _t3 = _time.monotonic()
+        logger.info("[SWARM] Full parallel analysis done in %.1fs", _t3 - _t0)
 
         vibe_action = self._normalize_action(vibe_result.get("bias") or vibe_result.get("action"))
         liquidity_action = self._normalize_action(
@@ -721,25 +871,6 @@ Return JSON only:
             "aggression_mode": skip_vibe_debate,
             "prompt_context": user_suggestion[:500],
         }
-
-        # [DEVIL] Devil's Advocate Challenge - Find reasons NOT to take this trade
-        devils_challenge = self.devils_advocate.challenge_trade(
-            market_data=market_data,
-            suggested_action=output.action.value,
-            entry_price=output.entry_price or market_data.price,
-            stop_loss=output.stop_loss or market_data.price * 0.99,
-            take_profit=output.take_profit or market_data.price * 1.01,
-            confidence=output.confidence.value,
-            session_context=session_context,
-        )
-
-        # Apply confidence penalty if Devil's Advocate found issues
-        if devils_challenge.get("rating") in ["STRONG_AVOID", "CAUTIOUS"]:
-            penalty = devils_challenge.get("confidence_penalty", -0.10)
-            logger.warning(
-                f"[DEVIL] Devil's Advocate PENALTY: {penalty:.2f} | "
-                f"Reasons: {devils_challenge.get('rejection_reasons', [])}"
-            )
 
         vibe_brief = SwarmAgentBrief(
             agent="Vibe",
@@ -816,6 +947,13 @@ Return JSON only:
         memory_block = memory_summary or "No prior losing Vibe pattern recorded for this asset."
         skip_block = skip_reason or "None"
 
+        # Trend filter data from indicators
+        ema_20 = market_data.indicators.get("EMA_20", "N/A")
+        ema_50 = market_data.indicators.get("EMA_50", "N/A")
+        trend_direction = market_data.indicators.get("TREND_DIRECTION", "N/A")
+        mtf_bias = market_data.indicators.get("MTF_BIAS", "N/A")
+        mtf_alignment = market_data.indicators.get("MTF_ALIGNMENT", "N/A")
+
         return f"""You are The Closer. Return JSON only.
 
 {PREDATOR_SYSTEM_INSTRUCTION}
@@ -826,6 +964,11 @@ Return JSON only:
 ASSET: {market_data.asset}
 PRICE: {market_data.price:.2f}
 RSI: {market_data.indicators.get('RSI', 50):.1f}
+EMA_20: {ema_20}
+EMA_50: {ema_50}
+TREND_DIRECTION: {trend_direction}
+MTF_BIAS: {mtf_bias}
+MTF_ALIGNMENT: {mtf_alignment}
 LIQUIDITY: {market_data.indicators.get('LIQUIDITY_ZONE', 'N/A')}
 LAST 10 CANDLES:
 {snapshot['candles_block']}
@@ -846,6 +989,8 @@ VISION AGENT:
 {vision_summary or 'Vision agent unavailable.'}
 
 Rules:
+- TREND FILTER IS MANDATORY: If TREND_DIRECTION is BEARISH, you MUST NOT signal BUY. If BULLISH, you MUST NOT signal SELL.
+- If MTF_ALIGNMENT is AGAINST, downgrade to HOLD unless the setup has overwhelming confluence.
 - Output action BUY, SELL, or HOLD.
 - Prefix reason with [SIGNAL] BUY, [SIGNAL] SELL, or [SIGNAL] WAIT.
 - Respect VIBE MEMORY. If a similar losing pattern is present, downgrade confidence or WAIT unless the setup is clearly stronger now.

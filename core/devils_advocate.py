@@ -73,7 +73,7 @@ Respond in STRICT JSON only:
   "hidden_risks": "what other agents missed - 1 sentence",
   "better_entry_timing": "when would be safer - 1 sentence",
   "override_conditions": "what would change your mind - 1 sentence",
-    "confidence_penalty": -0.01
+    "confidence_penalty": -0.15
 }}
 """
 
@@ -192,20 +192,20 @@ class DevilsAdvocate:
         return result
 
     def _apply_weekend_relaxation(self, result: Dict, session_context: Optional[Dict]) -> Dict:
-        """TEMPORARY TEST: Reduce Devil's Advocate penalties during weekend signal testing."""
+        """Slightly reduce Devil's Advocate penalties during weekend sessions."""
         context = session_context or {}
         if not context.get("is_weekend"):
             return result
         rating = str(result.get("rating", "NEUTRAL") or "NEUTRAL").upper()
-        current_penalty = float(result.get("confidence_penalty", -0.01) or -0.01)
-        # Weekend relaxation: downgrade STRONG_AVOID to CAUTIOUS, cap penalty at -0.02
+        current_penalty = float(result.get("confidence_penalty", -0.15) or -0.15)
+        # Weekend: downgrade STRONG_AVOID to CAUTIOUS, cap penalty at -0.10
         if rating == "STRONG_AVOID":
             result["rating"] = "CAUTIOUS"
-            result["confidence_penalty"] = max(current_penalty, -0.02)
-            logger.info("[DEVIL] WEEKEND RELAXATION: STRONG_AVOID downgraded to CAUTIOUS for weekend testing")
-        elif current_penalty < -0.02:
-            result["confidence_penalty"] = max(current_penalty, -0.02)
-            logger.info("[DEVIL] WEEKEND RELAXATION: penalty capped at -0.02 for weekend testing")
+            result["confidence_penalty"] = max(current_penalty, -0.10)
+            logger.info("[DEVIL] WEEKEND: STRONG_AVOID downgraded to CAUTIOUS")
+        elif current_penalty < -0.10:
+            result["confidence_penalty"] = max(current_penalty, -0.10)
+            logger.info("[DEVIL] WEEKEND: penalty capped at -0.10")
         return result
 
     def _apply_temporal_guardrails(self, result: Dict, session_context: Optional[Dict]) -> Dict:
@@ -217,7 +217,7 @@ class DevilsAdvocate:
             holiday_name = str(context.get("holiday_name") or "Market holiday")
             reasons.insert(0, f"{holiday_name} reduces liquidity and follow-through for fresh entries.")
             result["rating"] = "STRONG_AVOID"
-            result["confidence_penalty"] = min(float(result.get("confidence_penalty", -0.10)), -0.25)
+            result["confidence_penalty"] = min(float(result.get("confidence_penalty", -0.15)), -0.25)
             result["better_entry_timing"] = "Wait for the next full market session after the holiday."
             result["hidden_risks"] = "Holiday conditions can distort price discovery and widen slippage."
 
@@ -227,9 +227,9 @@ class DevilsAdvocate:
                 0,
                 f"Friday after {cutoff:02d}:00 UTC is a close-risk window with reduced follow-through and gap risk."
             )
-            current_penalty = float(result.get("confidence_penalty", -0.10) or -0.10)
+            current_penalty = float(result.get("confidence_penalty", -0.15) or -0.15)
             result["rating"] = "STRONG_AVOID" if str(result.get("rating", "")).upper() != "STRONG_AVOID" else result["rating"]
-            result["confidence_penalty"] = min(current_penalty, -0.20)
+            result["confidence_penalty"] = min(current_penalty, -0.25)
             result["better_entry_timing"] = "Stand down into the weekend or wait for Monday liquidity."
             result["override_conditions"] = "Only reconsider if this is an active position-management action, not a fresh entry."
 
@@ -260,14 +260,14 @@ class DevilsAdvocate:
             return {"error": str(e)}
 
     def _default_challenge(self, suggested_action: str) -> Dict:
-        """Default fallback when LLM fails."""
+        """Default fallback when LLM fails — conservative by design."""
         return {
-            "rating": "NEUTRAL",
-            "rejection_reasons": ["Unable to perform deep analysis - proceed with caution"],
-            "hidden_risks": "Analysis failed - unknown risks",
-            "better_entry_timing": "Wait for clearer confirmation",
-            "override_conditions": "Higher volume and stronger technical setup",
-            "confidence_penalty": 0.0,
+            "rating": "CAUTIOUS",
+            "rejection_reasons": ["Devil's Advocate analysis unavailable - unknown risks remain"],
+            "hidden_risks": "Analysis failed - cannot verify hidden dangers",
+            "better_entry_timing": "Wait for full analysis confirmation",
+            "override_conditions": "Successful Devil's Advocate analysis required",
+            "confidence_penalty": -0.10,
         }
 
     def get_challenge_stats(self) -> Dict:
