@@ -1268,11 +1268,12 @@ class AnalysisWorker(QThread):
 
     analysis_complete = pyqtSignal(object, object)
 
-    def __init__(self):
+    def __init__(self, trade_engine=None):
         super().__init__()
         self.analyzer = LLMAnalyzer()
         self.market_data_queue = queue.Queue()
         self._running = True
+        self.trade_engine = trade_engine
         self.vision = (
             VisionCapture(
                 chart_region=(
@@ -1571,7 +1572,7 @@ class VcaniTradeApp:
         self.signal_listener = SignalListenerThread()  # Local HTTP listener
         self.data_scout_listener = DataScoutListenerThread()  # Vast.ai scout listener
         self.watchtower = WatchtowerScanner()  # Local fallback scanner
-        self.analysis_worker = AnalysisWorker()  # Local analysis (vision + swarm)
+        self.analysis_worker = AnalysisWorker(trade_engine=self.trade_engine)  # Local analysis (vision + swarm)
         self.cloud_bridge = CloudBridgeThread(self, host="0.0.0.0", port=8765)  # Remote dashboard bridge
         self.hunter = MultiAssetHunterThread(self) if config.MULTI_ASSET_ENABLED else None  # Vision-based multi-asset hunter
         self.cloud_scanner.scanner.tickers = list(self.current_watchlist)
