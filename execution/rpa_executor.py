@@ -11,6 +11,25 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def _weighted_hesitation(min_s: float = 0.3, max_s: float = 1.2) -> float:
+    """Generate a human-like pause using weighted distribution.
+
+    Favors shorter pauses (60% quick, 30% medium, 10% long) to mimic
+    realistic human reaction patterns and avoid prop firm detection.
+    """
+    roll = random.random()
+    range_s = max_s - min_s
+    if roll < 0.6:
+        # Quick review (60%): lower third of range
+        return random.uniform(min_s, min_s + range_s * 0.33)
+    elif roll < 0.9:
+        # Medium pause (30%): middle third
+        return random.uniform(min_s + range_s * 0.33, min_s + range_s * 0.66)
+    else:
+        # Deep think (10%): upper third
+        return random.uniform(min_s + range_s * 0.66, max_s)
+
+
 def _is_tradingview_tradovate_mode() -> bool:
     """Legacy check: returns True for old passive TV modes.
     ACTIVE_EXECUTION_SURFACE now controls routing directly."""
@@ -865,7 +884,7 @@ class RPAExecutor:
         try:
             mt5_window.activate()
             if self.human_latency_enabled:
-                time.sleep(random.uniform(0.5, 1.2))
+                time.sleep(_weighted_hesitation(0.3, 1.2))
 
             # 2. Strategy A: Color-based pixel search inside MT5 window
             screenshot = pyautogui.screenshot(
@@ -1027,7 +1046,7 @@ class RPAExecutor:
         try:
             window.activate()
             if self.human_latency_enabled:
-                time.sleep(random.uniform(0.5, 1.2))
+                time.sleep(_weighted_hesitation(0.3, 1.2))
 
             # AUTO-DETECT: scan left portion of window for TradingView button colors
             screenshot = pyautogui.screenshot(
@@ -1132,7 +1151,8 @@ class RPAExecutor:
                     score += 5
                 if score:
                     scored_windows.append((score, window))
-            except Exception:
+            except Exception as win_err:
+                logger.debug("[WINDOW] Error reading window attributes: %s", win_err)
                 continue
 
         if scored_windows:
@@ -1149,7 +1169,8 @@ class RPAExecutor:
                     logger.info("[WINDOW] Selected browser window by hint '%s': %s", hint, windows[0].title)
                     self.consecutive_window_failures = 0
                     return windows[0]
-            except Exception:
+            except Exception as hint_err:
+                logger.debug("[WINDOW] Error searching by hint '%s': %s", hint, hint_err)
                 continue
 
         # No window found: increment failure counter
@@ -1305,7 +1326,7 @@ class RPAExecutor:
         try:
             window.activate()
             if self.human_latency_enabled:
-                time.sleep(random.uniform(0.5, 1.2))  # Human reaction delay
+                time.sleep(_weighted_hesitation(0.3, 1.2))  # Human reaction delay
 
             # 1. Attempt Visual Pixel Search (The 'Eyes')
             screenshot = pyautogui.screenshot(
@@ -1464,7 +1485,7 @@ class RPAExecutor:
         try:
             window.activate()
             if self.human_latency_enabled:
-                time.sleep(random.uniform(0.3, 0.6))
+                time.sleep(_weighted_hesitation(0.2, 0.8))
             logger.info("[FOCUS] Browser window brought to front for %s", ticker_hint or "unknown")
             return True
         except Exception as e:

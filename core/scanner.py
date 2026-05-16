@@ -119,10 +119,12 @@ class CloudScanner:
 
         # Initialize MT5 connection only when in MT5 mode
         self._mt5_initialized = False
-        if config.EXECUTION_MODE.upper() == "MT5":
+        _active_mode = config.get_active_mode()
+        logger.info(f"[CLOUD] Active mode: {_active_mode}")
+        if _active_mode == "MT5":
             self._ensure_mt5()
         else:
-            logger.info("[CLOUD] UI mode detected — MT5 initialization skipped")
+            logger.info("[CLOUD] TradingView mode detected — MT5 initialization skipped")
 
         logger.info("[CLOUD] Cloud Scanner initialized with Market Session Awareness")
         logger.info(

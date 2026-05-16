@@ -2071,6 +2071,7 @@ class CommandCenter(QWidget):
     def _set_surface_tradingview(self):
         """Switch execution surface to TradingView (active RPA clicking)."""
         config.ACTIVE_EXECUTION_SURFACE = "TRADINGVIEW"
+        config.EXECUTION_MODE = "UI"
         self.btn_surface_tv.setChecked(True)
         self.btn_surface_mt5.setChecked(False)
         self.btn_surface_tv.setStyleSheet(f"""
@@ -2081,11 +2082,13 @@ class CommandCenter(QWidget):
             QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
         """)
-        self.log("[SURFACE] Execution surface switched to TRADINGVIEW — active RPA clicking enabled")
+        self.log("[SURFACE] Switched to TRADINGVIEW mode — scanner uses yfinance, execution via RPA clicking")
+        logger.info("[SURFACE] Mode switched: scanner=data(yfinance), execution=RPA(TradingView)")
 
     def _set_surface_mt5(self):
         """Switch execution surface to MetaTrader 5 (native order routing)."""
         config.ACTIVE_EXECUTION_SURFACE = "MT5"
+        config.EXECUTION_MODE = "MT5"
         self.btn_surface_mt5.setChecked(True)
         self.btn_surface_tv.setChecked(False)
         self.btn_surface_mt5.setStyleSheet(f"""
@@ -2096,7 +2099,8 @@ class CommandCenter(QWidget):
             QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
         """)
-        self.log("[SURFACE] Execution surface switched to MT5 — native order routing enabled")
+        self.log("[SURFACE] Switched to MT5 mode — scanner uses MT5 data, execution via MT5 API")
+        logger.info("[SURFACE] Mode switched: scanner=data(MT5), execution=API(MetaTrader5)")
 
     def _add_ticker(self):
         ticker = settings_manager.normalize_ticker(self.ticker_input.text())

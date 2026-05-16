@@ -525,3 +525,20 @@ DAILY_PROFIT_TARGET = 1500.0
 POSITION_SIZE_HIGH_CONF = 10
 
 DAILY_LOSS_KILL = 1000.0
+
+
+# ===== UNIFIED MODE HELPER =====
+def get_active_mode() -> str:
+    """Single source of truth for execution mode.
+
+    Returns "TRADINGVIEW" or "MT5".
+    Dashboard toggle (ACTIVE_EXECUTION_SURFACE) takes priority,
+    then falls back to EXECUTION_MODE env var.
+    """
+    surface = str(globals().get("ACTIVE_EXECUTION_SURFACE", "") or "").upper().strip()
+    if surface in ("TRADINGVIEW", "MT5"):
+        return surface
+    exec_mode = str(globals().get("EXECUTION_MODE", "") or "").upper().strip()
+    if exec_mode == "MT5":
+        return "MT5"
+    return "TRADINGVIEW"

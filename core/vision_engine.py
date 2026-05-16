@@ -35,10 +35,12 @@ def _is_passive_visual_mode() -> bool:
     """Return True when screenshot capture should be bypassed entirely."""
     if bool(getattr(config, "FAST_VISION_ENABLED", False)):
         return False
-    return str(getattr(config, "EXECUTION_MODE", "")).upper().strip() in {
-        "TV_DESKTOP",
-        "TRADOVATE",
-    }
+    # Passive modes are legacy TV desktop modes — not MT5 or main TradingView
+    exec_mode = str(getattr(config, "EXECUTION_MODE", "")).upper().strip()
+    surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper().strip()
+    if surface == "MT5" or exec_mode == "MT5":
+        return False
+    return exec_mode in {"TV_DESKTOP", "TRADOVATE"}
 
 
 # ---------------------------------------------------------------------------
@@ -400,13 +402,10 @@ class VisionCapture:
             logger.debug("[VISION] Skipping visual screenshot in passive mode.")
             return None
 
-        execution_mode = str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper()
-        trading_surface = str(
-            getattr(config, "TRADING_SURFACE", "TRADINGVIEW_TRADOVATE") or "TRADINGVIEW_TRADOVATE"
-        ).upper()
+        active_mode = config.get_active_mode()
         smart_eye_enabled = bool(getattr(config, "SMART_EYE_ENABLED", True))
 
-        if execution_mode == "MT5" and trading_surface == "METATRADER_5" and smart_eye_enabled:
+        if active_mode == "MT5" and smart_eye_enabled:
             detected_title = str(getattr(config, "DETECTED_TRADING_WINDOW_TITLE", "") or "").strip()
             candidates = []
             if detected_title:

@@ -1464,7 +1464,7 @@ class VcaniTradeApp:
         # on_blind_error fires when TradingView is minimized or covered by another app
         self.rpa_hand = RPAExecutor(on_blind_error=self._on_rpa_blind)
         self._ghost_executor = GhostExecutor()
-        # MT5 Executor - routes trades to MetaTrader 5 when EXECUTION_MODE == "MT5"
+        # MT5 Executor - routes trades to MetaTrader 5 when active mode is MT5
         self.mt5_executor = None
         if self._is_mt5_mode():
             self.mt5_executor = self._get_mt5_executor()
@@ -1630,11 +1630,8 @@ class VcaniTradeApp:
         self._run_on_ui_thread(lambda: self.ai_narrator.add_activity(icon, message))
 
     def _is_mt5_mode(self) -> bool:
-        """Return True when MT5 should handle execution.
-        Checks both legacy EXECUTION_MODE and the new ACTIVE_EXECUTION_SURFACE toggle."""
-        exec_mode = str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper()
-        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper()
-        return exec_mode == "MT5" or surface == "MT5"
+        """Return True when MT5 should handle execution."""
+        return config.get_active_mode() == "MT5"
 
     def _get_mt5_executor(self):
         if not self._is_mt5_mode():
@@ -3028,14 +3025,34 @@ class VcaniTradeApp:
             )
             
             # Run analysis with user suggestion
-            # This will use the NEW swarm consensus with user_suggestion parameter
             import asyncio
-            
-            # Create task for async analysis
-            asyncio.run_coroutine_threadsafe(
+
+            loop = getattr(self, '_browser_loop', None)
+            if loop is None or loop.is_closed():
+                self.cmd.log("[WARN] AI engine not ready yet — please wait a moment and try again")
+                self.cmd.update_copilot_status("Warming up...")
+                return
+
+            future = asyncio.run_coroutine_threadsafe(
                 self._run_copilot_analysis(market_data, user_suggestion),
-                self._browser_loop if hasattr(self, '_browser_loop') else asyncio.get_event_loop()
+                loop,
             )
+            # Check for errors from the async coroutine
+            def _check_future(fut):
+                try:
+                    exc = fut.exception(timeout=0)
+                    if exc:
+                        logger.error("Co-Pilot async analysis failed: %s", exc)
+                        self._run_on_ui_thread(lambda: self.cmd.log(f"[FAIL] AI analysis error: {exc}"))
+                        self._run_on_ui_thread(lambda: self.cmd.add_copilot_response(
+                            thoughts="AI engine returned an error",
+                            verdict="ERROR",
+                            adjustment=str(exc),
+                        ))
+                        self._run_on_ui_thread(lambda: self.cmd.update_copilot_status("Error"))
+                except Exception:
+                    pass
+            future.add_done_callback(_check_future)
             
         except Exception as e:
             self.cmd.log(f"[FAIL] Co-Pilot analysis failed: {e}")
@@ -6188,7 +6205,7 @@ class VcaniTradeApp:
     def _dispatch_trade_execution(self, symbol: str, action: str, reason: str = "") -> bool:
         """
         Unified trade execution dispatcher.
-        Routes to MT5 or UI (RPA) based on config.EXECUTION_MODE.
+        Routes to MT5 or TradingView (RPA) based on active mode.
         Returns True if execution succeeded.
         """
         from core.market_sessions import is_crypto_ticker, is_futures_ticker
@@ -6493,7 +6510,7 @@ class VcaniTradeApp:
         """
         Reality Check: Query MT5 for actual open positions and sync internal state.
         If MT5 shows no positions, reset internal memory to match reality.
-        Runs every 30 seconds when EXECUTION_MODE == 'MT5'.
+        Runs every 30 seconds when active mode is MT5.
         """
         mt5_executor = self._get_mt5_executor()
         if not mt5_executor or not mt5_executor.initialized:
@@ -6868,7 +6885,7 @@ def main():
     print("=" * 60)
     print(f"Mode:      {initial_mode}")
     print(f"Trading:   {trading_mode}")
-    print(f"Executor:  {config.EXECUTION_MODE} (UI=RPA, MT5=MetaTrader)")
+    print(f"Executor:  {config.get_active_mode()} (TRADINGVIEW=RPA, MT5=MetaTrader)")
     print(f"Surface:   {config.TRADING_SURFACE}")
     print(
         f"Vision:    {config.VLM_MODEL}" if config.USE_VISION else "Vision:    Disabled"
@@ -6885,7 +6902,7 @@ def main():
 
     # -- RPA Permission Gate ----------------------------------------------
     # Only required when the execution surface actually uses the local hand.
-    if str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper() != "MT5":
+    if config.get_active_mode() != "MT5":
         try:
             app.rpa_hand.assert_permissions_or_die()
         except RuntimeError as perm_err:
