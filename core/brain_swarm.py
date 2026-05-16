@@ -28,6 +28,7 @@ from core.models import (
     SwarmAgentBrief,
 )
 from core.devils_advocate import DevilsAdvocate
+from core.market_intelligence import MarketIntelligenceAgent
 
 logger = logging.getLogger(__name__)
 
@@ -519,6 +520,7 @@ class OllamaSwarmConsensus:
         self.model = config.OLLAMA_MODEL
         self.timeout = max(int(config.LLM_TIMEOUT), 180)
         self.devils_advocate = DevilsAdvocate()
+        self.mia = MarketIntelligenceAgent()
         logger.info(f"[BRAIN] Local Brain initialized: {self.model} at {self.base_url}")
         if _is_openrouter_url(self.base_url) and _looks_like_local_ollama_model(self.model):
             logger.error(
@@ -712,6 +714,10 @@ Return JSON only:
         session_detector = MarketSessionDetector()
         session_context = session_detector.get_session_context()
 
+        # [MIA] Fetch Super Intelligence Market Wisdom
+        market_wisdom = await self.mia.get_market_wisdom(market_data.asset)
+        logger.info(f"[MIA] Coaching Advice: {market_wisdom['coaching_advice']}")
+
         # Enrich market data with trend indicators before analysis
         self._enrich_trend_data(market_data)
 
@@ -793,8 +799,10 @@ Return JSON only:
         closer_prompt = self._build_analysis_prompt(
             market_data, news_context, session_context, user_suggestion,
             vibe_result=vibe_result, liquidity_result=liquidity_result,
-            memory_summary=memory_summary, skip_reason=skip_reason,
+            memory_summary=memory_summary,
+            skip_reason=skip_reason,
             vision_summary=vision_summary,
+            market_wisdom=market_wisdom,
         )
 
         result = await asyncio.to_thread(call_local_brain, closer_prompt, self.model, self.timeout)
@@ -937,6 +945,7 @@ Return JSON only:
         memory_summary: str = "",
         skip_reason: str = "",
         vision_summary: str = "",
+        market_wisdom: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build the closer prompt that merges Vibe + Liquidity into a strike decision."""
         snapshot = self._market_snapshot(market_data)
@@ -946,6 +955,11 @@ Return JSON only:
         liquidity_summary = self._format_agent_summary(liquidity_result, fallback="Liquidity agent unavailable")
         memory_block = memory_summary or "No prior losing Vibe pattern recorded for this asset."
         skip_block = skip_reason or "None"
+
+        # MIA Wisdom Integration
+        mia_block = "N/A"
+        if market_wisdom:
+            mia_block = f"ADVICE: {market_wisdom.get('coaching_advice')}\nINTELLIGENCE SCORE: {market_wisdom.get('intelligence_score')}/100"
 
         # Trend filter data from indicators
         ema_20 = market_data.indicators.get("EMA_20", "N/A")
