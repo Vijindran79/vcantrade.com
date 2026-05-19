@@ -20,7 +20,7 @@ pydantic>=2.5.0
 
 # --- Markets & Finance ---
 ccxt>=4.0.0
-python-holidays>=0.39
+holidays>=0.39
 
 # --- Browser Automation (Cloud CDP) ---
 playwright>=1.40.0
