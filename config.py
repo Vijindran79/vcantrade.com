@@ -66,9 +66,10 @@ COOLDOWN_AFTER_STOP = int(os.getenv("COOLDOWN_AFTER_STOP", "300"))
 KILL_SWITCH = False
 
 # News filter behaviour when Forex Factory is unreachable in AUTONOMOUS mode.
-# Default = false = FAIL CLOSED (pause trading). Set NEWS_FILTER_FAIL_OPEN=true
-# only if you accept trading through unverified news risk.
-NEWS_FILTER_FAIL_OPEN = os.getenv("NEWS_FILTER_FAIL_OPEN", "false").lower() == "true"
+# Default = true = FAIL OPEN (keep trading). The news scraper is unreliable
+# and should not block the entire bot when Forex Factory changes their HTML
+# or your DNS can't reach them.
+NEWS_FILTER_FAIL_OPEN = os.getenv("NEWS_FILTER_FAIL_OPEN", "true").lower() == "true"
 
 # Maximum hold time. Set to 0 to disable the hard time-stop entirely; otherwise
 # the trade engine flattens any open position after this many seconds.
@@ -468,7 +469,7 @@ RSI_OVERSOLD = 30
 SMA_FAST = 20
 SMA_SLOW = 50
 SWARM_INCUBATION_FLOOR = float(os.getenv("SWARM_INCUBATION_FLOOR", "60.0"))
-SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "90.0"))
+SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "85.0"))
 SWARM_CONFIDENCE_THRESHOLD = SWARM_INCUBATION_FLOOR / 100.0
 MIN_CONFIDENCE_THRESHOLD = SWARM_INCUBATION_FLOOR
 VISUAL_ALERT_MIN_CONFIDENCE = SWARM_HIGH_PRIORITY_THRESHOLD / 100.0
