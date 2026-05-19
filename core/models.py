@@ -75,12 +75,14 @@ class SafetyState(BaseModel):
         """Update whether trading is allowed based on safety rules"""
         import config
 
+        # MAX_DAILY_LOSS=0 means disabled (e.g. Apex has no daily limit)
+        daily_loss_ok = (config.MAX_DAILY_LOSS <= 0) or (abs(self.daily_pnl) < config.MAX_DAILY_LOSS)
         self.can_trade = (
             not self.kill_switch_active
             and not self.daily_loss_limit_hit
             and self.cooldown_remaining_seconds == 0
             and self.open_positions < config.MAX_OPEN_POSITIONS
-            and abs(self.daily_pnl) < config.MAX_DAILY_LOSS
+            and daily_loss_ok
         )
         return self.can_trade
 

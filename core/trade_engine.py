@@ -143,8 +143,8 @@ class TradeEngine:
             logger.warning("KILL SWITCH ACTIVE - Trading halted")
             return False
 
-        # Daily loss limit
-        if abs(self.safety_state.daily_pnl) >= config.MAX_DAILY_LOSS:
+        # Daily loss limit (0 = disabled, e.g. Apex Trader Funding has no daily limit)
+        if config.MAX_DAILY_LOSS > 0 and abs(self.safety_state.daily_pnl) >= config.MAX_DAILY_LOSS:
             logger.warning(
                 f"Daily loss limit reached: ${self.safety_state.daily_pnl:.2f}"
             )

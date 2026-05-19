@@ -2077,14 +2077,14 @@ class VcaniTradeApp:
         self.signal_listener.listener_error.connect(self._on_listener_error, Qt.ConnectionType.QueuedConnection)
 
         # Data Scout Listener -> UI + TV Flip + Narrator
-        self.data_scout_listener.signal_received.connect(self._on_data_scout_signal)
+        self.data_scout_listener.signal_received.connect(self._on_data_scout_signal, Qt.ConnectionType.QueuedConnection)
 
         # Watchtower -> UI alerts + Swarm handoff + Narrator
-        self.watchtower.alert_detected.connect(self._on_watchtower_alert)
-        self.watchtower.market_data_ready.connect(self._on_market_data)
+        self.watchtower.alert_detected.connect(self._on_watchtower_alert, Qt.ConnectionType.QueuedConnection)
+        self.watchtower.market_data_ready.connect(self._on_market_data, Qt.ConnectionType.QueuedConnection)
 
         # Analysis worker -> Trade engine + UI + Narrator
-        self.analysis_worker.analysis_complete.connect(self._on_analysis_complete)
+        self.analysis_worker.analysis_complete.connect(self._on_analysis_complete, Qt.ConnectionType.QueuedConnection)
 
         # Position monitoring timer
         self.position_timer = QTimer()
@@ -6040,7 +6040,8 @@ class VcaniTradeApp:
 
         # Update dashboard
         # self.overlay.update_signal_handler(overlay_signal)  # Removed overlay
-        self.cmd.log(f"[CHART] Signal: {overlay_signal.action} {overlay_signal.asset} @ ${overlay_signal.entry_price:.2f}")
+        entry_display = overlay_signal.entry_price or 0.0
+        self.cmd.log(f"[CHART] Signal: {overlay_signal.action} {overlay_signal.asset} @ ${entry_display:.2f}")
 
         # Log debate to terminal
         if transcript:
