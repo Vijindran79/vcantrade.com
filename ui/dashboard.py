@@ -164,6 +164,12 @@ class CommandCenter(QWidget):
 
         # Build all sections
         layout.addWidget(self._build_title_bar())
+        # Teacher-mode banner sits right under the title so it is impossible to
+        # miss when the bot is in suggest-only mode. Only shown when the lock
+        # is active in .env.
+        teacher_banner = self._build_teacher_banner()
+        if teacher_banner is not None:
+            layout.addWidget(teacher_banner)
         layout.addWidget(self._build_account_panel())
         layout.addWidget(self._build_prop_firm_panel())  # NEW: Prop Firm Compliance
         layout.addWidget(self._build_control_panel())
@@ -177,6 +183,44 @@ class CommandCenter(QWidget):
 
         scroll.setWidget(content)
         root.addWidget(scroll)
+
+    # =================== TEACHER BANNER ===================
+    def _build_teacher_banner(self):
+        """Big banner that appears when TEACHER_ONLY_LOCK is on.
+
+        Returns None when the lock is off so the banner doesn't take up space.
+        """
+        if not bool(getattr(config, "TEACHER_ONLY_LOCK", False)):
+            return None
+        container = QFrame()
+        container.setStyleSheet(
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+            "stop:0 #1F6FEB, stop:1 #00D4FF); "
+            "border-radius: 10px; padding: 6px;"
+        )
+        wrapper = QVBoxLayout(container)
+        wrapper.setContentsMargins(16, 10, 16, 10)
+        wrapper.setSpacing(2)
+
+        title = QLabel("TEACHER MODE — Suggestions Only")
+        title.setStyleSheet(
+            "color: white; font-size: 16px; font-weight: 800; "
+            "font-family: 'Segoe UI'; letter-spacing: 0.6px;"
+        )
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wrapper.addWidget(title)
+
+        sub = QLabel(
+            "The bot will analyze, alert, and explain. "
+            "It will NOT click the broker — you approve every trade."
+        )
+        sub.setStyleSheet(
+            "color: rgba(255,255,255,0.92); font-size: 12px; "
+            "font-family: 'Segoe UI'; padding-top: 2px;"
+        )
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wrapper.addWidget(sub)
+        return container
 
     # =================== TITLE BAR ===================
     def _build_title_bar(self) -> QWidget:
@@ -648,6 +692,16 @@ class CommandCenter(QWidget):
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 8px; }}
         """)
         self.btn_auto.clicked.connect(self._set_autonomous_mode)
+        # Teacher-only lock: when TEACHER_ONLY_LOCK=true in .env, the Autonomous
+        # button is greyed out and unclickable. The bot will only ever suggest;
+        # the human always clicks the broker.
+        if bool(getattr(config, "TEACHER_ONLY_LOCK", False)):
+            self.btn_auto.setEnabled(False)
+            self.btn_auto.setToolTip(
+                "Autonomous mode is locked off (TEACHER_ONLY_LOCK=true in .env).\n"
+                "Bot will analyze and suggest only — human approves every trade."
+            )
+            self.btn_auto.setText("[LOCK] AUTONOMOUS (locked off)")
         mode_row.addWidget(self.btn_auto)
         
         layout.addLayout(mode_row)
@@ -1100,24 +1154,35 @@ class CommandCenter(QWidget):
 
         layout.addWidget(slots_frame)
 
-        # Watchlist table
+        # Watchlist table — readable on Teacher Mode at-a-glance.
         self.watchlist_table = QTableWidget()
         self.watchlist_table.setColumnCount(4)
-        self.watchlist_table.setHorizontalHeaderLabels(["[OK]", "Ticker", "Last Signal", "Status"])
-        # Column width optimization: Slim Ticker/Status, wide Logic/Reasoning
-        self.watchlist_table.setColumnWidth(0, 30)   # Checkmark - very slim
-        self.watchlist_table.setColumnWidth(1, 80)   # Ticker - slim
-        self.watchlist_table.setColumnWidth(2, 200)  # Last Signal - medium
-        self.watchlist_table.horizontalHeader().setStretchLastSection(True)  # Status stretches
-        self.watchlist_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Status column stretches to fill
+        self.watchlist_table.setHorizontalHeaderLabels(["", "Ticker", "Last Signal", "Status / Reason"])
+        # Wider columns + bigger rows so alert text is readable when the row glows.
+        self.watchlist_table.setColumnWidth(0, 28)    # Checkmark - very slim
+        self.watchlist_table.setColumnWidth(1, 110)   # Ticker - readable
+        self.watchlist_table.setColumnWidth(2, 240)   # Last Signal — fits 'BUY (95%)'
+        self.watchlist_table.horizontalHeader().setStretchLastSection(True)
+        self.watchlist_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.watchlist_table.horizontalHeader().setMinimumSectionSize(70)
+        self.watchlist_table.horizontalHeader().setDefaultSectionSize(120)
+        self.watchlist_table.verticalHeader().setVisible(False)
+        self.watchlist_table.verticalHeader().setDefaultSectionSize(36)  # taller rows
         self.watchlist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.watchlist_table.setAlternatingRowColors(True)
-        self.watchlist_table.setMaximumHeight(200)
+        self.watchlist_table.setShowGrid(False)
+        self.watchlist_table.setMinimumHeight(260)
+        self.watchlist_table.setMaximumHeight(360)
         self.watchlist_table.setStyleSheet(f"""
             QTableWidget {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {BORDER};
-                          border-radius: 6px; font-family: 'Consolas'; font-size: 12px; }}
+                          border-radius: 6px; font-family: 'Consolas'; font-size: 13px;
+                          gridline-color: {BORDER}; selection-background-color: rgba(0,212,255,0.18);
+                          selection-color: {WHITE}; }}
+            QTableWidget::item {{ padding: 6px 10px; }}
+            QTableWidget::item:alternate {{ background: rgba(255,255,255,0.025); }}
             QHeaderView::section {{ background: {BG_PANEL}; color: {CYAN}; border: none;
-                                   padding: 6px; font-weight: bold; }}
+                                   padding: 8px 10px; font-weight: bold; font-size: 12px;
+                                   text-transform: uppercase; letter-spacing: 0.4px; }}
         """)
         self._refresh_watchlist()
         layout.addWidget(self.watchlist_table)
@@ -1137,29 +1202,37 @@ class CommandCenter(QWidget):
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
 
-        # Positions table
+        # Positions table — readable, taller rows, bigger fonts.
         self.positions_table = QTableWidget()
         self.positions_table.setColumnCount(8)
         self.positions_table.setHorizontalHeaderLabels([
             "Asset", "Side", "Entry", "Current", "P&L ($)", "P&L (%)", "TP", "SL"
         ])
-        # Column width optimization: Slim Side/Entry/Current, wide Asset for readability
-        self.positions_table.setColumnWidth(0, 100)  # Asset - medium
-        self.positions_table.setColumnWidth(1, 50)   # Side - slim (BUY/SELL)
-        self.positions_table.setColumnWidth(2, 70)   # Entry - slim
-        self.positions_table.setColumnWidth(3, 70)   # Current - slim
-        self.positions_table.setColumnWidth(4, 80)   # P&L ($) - medium
-        self.positions_table.setColumnWidth(5, 70)   # P&L (%) - medium
-        self.positions_table.setColumnWidth(6, 70)   # TP - slim
-        self.positions_table.setColumnWidth(7, 70)   # SL - slim
+        self.positions_table.setColumnWidth(0, 120)  # Asset
+        self.positions_table.setColumnWidth(1, 70)   # Side
+        self.positions_table.setColumnWidth(2, 90)   # Entry
+        self.positions_table.setColumnWidth(3, 90)   # Current
+        self.positions_table.setColumnWidth(4, 100)  # P&L ($)
+        self.positions_table.setColumnWidth(5, 90)   # P&L (%)
+        self.positions_table.setColumnWidth(6, 90)   # TP
+        self.positions_table.setColumnWidth(7, 90)   # SL
         self.positions_table.horizontalHeader().setStretchLastSection(True)
+        self.positions_table.horizontalHeader().setMinimumSectionSize(70)
+        self.positions_table.verticalHeader().setVisible(False)
+        self.positions_table.verticalHeader().setDefaultSectionSize(34)
         self.positions_table.setAlternatingRowColors(True)
-        self.positions_table.setMaximumHeight(200)
+        self.positions_table.setShowGrid(False)
+        self.positions_table.setMinimumHeight(220)
+        self.positions_table.setMaximumHeight(320)
         self.positions_table.setStyleSheet(f"""
             QTableWidget {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {BORDER};
-                          border-radius: 6px; font-family: 'Consolas'; font-size: 12px; }}
+                          border-radius: 6px; font-family: 'Consolas'; font-size: 13px;
+                          gridline-color: {BORDER}; }}
+            QTableWidget::item {{ padding: 6px 10px; }}
+            QTableWidget::item:alternate {{ background: rgba(255,255,255,0.025); }}
             QHeaderView::section {{ background: {BG_PANEL}; color: {CYAN}; border: none;
-                                   padding: 6px; font-weight: bold; }}
+                                   padding: 8px 10px; font-weight: bold; font-size: 12px;
+                                   text-transform: uppercase; letter-spacing: 0.4px; }}
         """)
         layout.addWidget(self.positions_table)
 
@@ -1193,26 +1266,34 @@ class CommandCenter(QWidget):
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
 
-        # Trade history table
+        # Trade history table — readable, taller rows, bigger fonts.
         self.trade_log_table = QTableWidget()
         self.trade_log_table.setColumnCount(6)
         self.trade_log_table.setHorizontalHeaderLabels([
             "Time", "Asset", "Action", "Amount", "P&L", "Status"
         ])
-        # Column width optimization: Slim Time/Action/Amount, wide Asset for readability
-        self.trade_log_table.setColumnWidth(0, 90)   # Time - slim
-        self.trade_log_table.setColumnWidth(1, 80)   # Asset - slim
-        self.trade_log_table.setColumnWidth(2, 60)   # Action - very slim (BUY/SELL)
-        self.trade_log_table.setColumnWidth(3, 70)   # Amount - slim
-        self.trade_log_table.setColumnWidth(4, 80)   # P&L - medium
-        self.trade_log_table.horizontalHeader().setStretchLastSection(True)  # Status stretches
+        self.trade_log_table.setColumnWidth(0, 100)  # Time
+        self.trade_log_table.setColumnWidth(1, 110)  # Asset
+        self.trade_log_table.setColumnWidth(2, 80)   # Action
+        self.trade_log_table.setColumnWidth(3, 100)  # Amount
+        self.trade_log_table.setColumnWidth(4, 110)  # P&L
+        self.trade_log_table.horizontalHeader().setStretchLastSection(True)
+        self.trade_log_table.horizontalHeader().setMinimumSectionSize(70)
+        self.trade_log_table.verticalHeader().setVisible(False)
+        self.trade_log_table.verticalHeader().setDefaultSectionSize(32)
         self.trade_log_table.setAlternatingRowColors(True)
-        self.trade_log_table.setMaximumHeight(180)
+        self.trade_log_table.setShowGrid(False)
+        self.trade_log_table.setMinimumHeight(200)
+        self.trade_log_table.setMaximumHeight(320)
         self.trade_log_table.setStyleSheet(f"""
             QTableWidget {{ background: {BG_INPUT}; color: {WHITE}; border: 1px solid {BORDER};
-                          border-radius: 6px; font-family: 'Consolas'; font-size: 11px; }}
+                          border-radius: 6px; font-family: 'Consolas'; font-size: 12px;
+                          gridline-color: {BORDER}; }}
+            QTableWidget::item {{ padding: 6px 10px; }}
+            QTableWidget::item:alternate {{ background: rgba(255,255,255,0.025); }}
             QHeaderView::section {{ background: {BG_PANEL}; color: {CYAN}; border: none;
-                                   padding: 6px; font-weight: bold; }}
+                                   padding: 8px 10px; font-weight: bold; font-size: 12px;
+                                   text-transform: uppercase; letter-spacing: 0.4px; }}
         """)
         layout.addWidget(self.trade_log_table)
 
@@ -2048,6 +2129,11 @@ class CommandCenter(QWidget):
         self.log("[EMOJI] Switched to TEACHER MODE - Manual approval required")
 
     def _set_autonomous_mode(self):
+        # Teacher-only lock: never allow AUTONOMOUS when the .env says lock is on.
+        if bool(getattr(config, "TEACHER_ONLY_LOCK", False)):
+            self.log("[LOCK] AUTONOMOUS request ignored — Teacher-only lock is on (TEACHER_ONLY_LOCK=true)")
+            self._set_teacher_mode()
+            return
         self._mode = "AUTONOMOUS"
         self.btn_auto.setChecked(True)
         self.btn_teacher.setChecked(False)
@@ -2070,8 +2156,13 @@ class CommandCenter(QWidget):
 
     def _set_surface_tradingview(self):
         """Switch execution surface to TradingView (active RPA clicking)."""
-        config.ACTIVE_EXECUTION_SURFACE = "TRADINGVIEW"
-        config.EXECUTION_MODE = "UI"
+        try:
+            from core.surface_router import set_active_surface
+            set_active_surface("TRADINGVIEW")
+        except Exception as exc:
+            logger.warning("[SURFACE] Could not flip router: %s", exc)
+            config.ACTIVE_EXECUTION_SURFACE = "TRADINGVIEW"
+            config.EXECUTION_MODE = "UI"
         self.btn_surface_tv.setChecked(True)
         self.btn_surface_mt5.setChecked(False)
         self.btn_surface_tv.setStyleSheet(f"""
@@ -2082,13 +2173,18 @@ class CommandCenter(QWidget):
             QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
         """)
-        self.log("[SURFACE] Switched to TRADINGVIEW mode — scanner uses yfinance, execution via RPA clicking")
-        logger.info("[SURFACE] Mode switched: scanner=data(yfinance), execution=RPA(TradingView)")
+        self.log("[SURFACE] Switched to TRADINGVIEW — orders go to TradingView Desktop (CDP/JS)")
+        logger.info("[SURFACE] Active surface = TRADINGVIEW")
 
     def _set_surface_mt5(self):
         """Switch execution surface to MetaTrader 5 (native order routing)."""
-        config.ACTIVE_EXECUTION_SURFACE = "MT5"
-        config.EXECUTION_MODE = "MT5"
+        try:
+            from core.surface_router import set_active_surface
+            set_active_surface("MT5")
+        except Exception as exc:
+            logger.warning("[SURFACE] Could not flip router: %s", exc)
+            config.ACTIVE_EXECUTION_SURFACE = "MT5"
+            config.EXECUTION_MODE = "MT5"
         self.btn_surface_mt5.setChecked(True)
         self.btn_surface_tv.setChecked(False)
         self.btn_surface_mt5.setStyleSheet(f"""
@@ -2099,8 +2195,8 @@ class CommandCenter(QWidget):
             QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px; }}
         """)
-        self.log("[SURFACE] Switched to MT5 mode — scanner uses MT5 data, execution via MT5 API")
-        logger.info("[SURFACE] Mode switched: scanner=data(MT5), execution=API(MetaTrader5)")
+        self.log("[SURFACE] Switched to MT5 — orders go to MetaTrader 5 (native API)")
+        logger.info("[SURFACE] Active surface = MT5")
 
     def _add_ticker(self):
         ticker = settings_manager.normalize_ticker(self.ticker_input.text())
@@ -2264,17 +2360,28 @@ class CommandCenter(QWidget):
             self._apply_watchlist_row_glow(row, state, pulse_now=self._confidence_glow_on)
 
     def _apply_watchlist_row_glow(self, row: int, state: Dict[str, object], pulse_now: bool):
-        """Apply or clear the neon row highlight for a watchlist entry."""
+        """Apply or clear the neon row highlight for a watchlist entry.
+
+        Uses a deeper background tint so coloured text stays readable, plus
+        a bold weight + larger pulse weight so important rows pop without
+        making text look smudged.
+        """
         color = self._watchlist_alert_color(state)
         active_bg = QColor(color) if color is not None else None
         if active_bg is not None:
-            active_bg.setAlpha(112 if pulse_now else 42)
+            # Lower the saturation slightly so coloured foreground text doesn't
+            # blend into the row glow. The pulse alternates between two clearly
+            # distinct alphas so the row visibly heartbeats.
+            active_bg.setAlpha(70 if pulse_now else 28)
         resting_bg = QColor(0, 0, 0, 0)
+        bold_font = QFont("Consolas", 13, QFont.Weight.Bold)
+        normal_font = QFont("Consolas", 13)
         for column in range(self.watchlist_table.columnCount()):
             item = self.watchlist_table.item(row, column)
             if item is None:
                 continue
             item.setBackground(active_bg if active_bg is not None else resting_bg)
+            item.setFont(bold_font if active_bg is not None else normal_font)
 
     def _update_analysis_option_visibility(self):
         """Keep the analysis option strip visible whenever dashboard slots contain tickers."""

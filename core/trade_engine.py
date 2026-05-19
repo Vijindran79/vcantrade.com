@@ -216,13 +216,17 @@ class TradeEngine:
 
             is_long = trade.action == SignalAction.BUY
 
-            # Check max hold time (30 minutes)
-            if trade.timestamp:
+            # Optional time-based exit. The old hard 30-minute exit was killing
+            # legitimate trends, so we now read MAX_TRADE_HOLD_SECONDS from
+            # config (default 0 = disabled). Set to a non-zero value only if
+            # you genuinely want a wall-clock timeout.
+            max_hold = int(getattr(config, "MAX_TRADE_HOLD_SECONDS", 0) or 0)
+            if max_hold > 0 and trade.timestamp:
                 hold_seconds = (now - trade.timestamp).total_seconds()
-                if hold_seconds > 1800:
+                if hold_seconds > max_hold:
                     logger.info(
-                        "[TIME EXIT] %s held for %.0fs (>1800s). Closing.",
-                        trade.asset, hold_seconds,
+                        "[TIME EXIT] %s held for %.0fs (>%ds). Closing.",
+                        trade.asset, hold_seconds, max_hold,
                     )
                     self._close_trade_at_price(trade, current_price, "TIME_EXIT")
                     closed_ids.append(trade.id)

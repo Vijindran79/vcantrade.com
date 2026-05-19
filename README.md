@@ -1,226 +1,171 @@
-# 🎯 VcaniTrade AI - Hybrid Trading Assistant
+﻿# VcanTrade AI
 
-**AI-powered hybrid trading system with cloud scanning, swarm intelligence, and RPA execution**
-
-Current repo handoff status: see [CURRENT_STATUS.md](CURRENT_STATUS.md).
-
----
-
-## 🌟 Features
-
-### 🔄 **Hybrid Architecture**
-- **Cloud Scanner (Vast.ai)**: Monitors 10 tickers 24/7 using yfinance, no screen required
-- **Signal Dispatch**: High-confidence signals (>0.70) sent to local laptop via HTTP
-- **Local Executor**: Receives signals, performs vision confirmation, executes via RPA
-- **Best of Both Worlds**: Solves "blindness" of cloud bot and "paralysis" of local bot
-
-### 📡 **Cloud Market Scanner**
-- Monitors 10 core counters: XAUUSD, EURUSD, GBPUSD, BTC, ETH, TSLA, SPY, QQQ, AAPL, NVDA
-- Detects technical signals:
-  - **Volume Spike**: >3x average volume
-  - **RSI Cross**: Overbought (>70) / Oversold (<30)
-  - **SMA Cross**: Golden Cross / Death Cross (20/50 SMA)
-- Triggers Swarm Debate when signals detected
-- Only dispatches signals with >0.70 confidence threshold
-
-### 🖥️ **Enhanced Dashboard UI**
-- **Vertical ScrollArea**: No more cut-off elements, scroll to see all content
-- **Balance & Equity**: Real-time balance display with daily/total P/L
-- **Status LEDs**: Cloud connection, Watchtower, Vision, and RPA status
-- **Trade Ledger**: Scrollable table showing `Asset | Action | Price | Result`
-- **Control Panel**: 
-  - Mode toggle: `TEACHER` / `AUTONOMOUS`
-  - Ticker selector dropdown for 10 monitored counters
-  - Quick access: Calibrate RPA, Test Vision, EOD Report
-- **Minimum Window Size**: Prevents element overlapping on small screens
-
-### 🎓 **Teacher Mode (Default)**
-- AI analyzes markets and shows signals overlay
-- **No automatic execution** - you manually trade based on AI suggestions
-- Perfect for learning and validating AI accuracy
-- Green zone = Take Profit target
-- Red zone = Stop Loss level
-- Plain English explanation of why AI recommends each trade
-
-### 🤖 **Auto Mode (Optional)**
-- AI executes trades automatically via RPA (keyboard hotkeys)
-- Strict safety controls with kill switch
-- Paper trading mode for testing
-- Only enable when you're confident in the system
-
-### 🛡️ **Safety Controls (Always Active)**
-- **Kill Switch**: Emergency stop - halts all trading instantly
-- **Paper Trading**: Dry-run mode logs trades without real money
-- **Daily Loss Limit**: Auto-stops trading after max loss threshold
-- **Cooldown Period**: Wait time after stop-loss hits
-- **Max Positions**: Limits concurrent open trades
-- **JSON Schema Validation**: LLM output strictly validated with Pydantic
-
-### 📊 **AI Grader (Report Card)**
-- Grades AI performance: A, B, C, D, F
-- Analyzes win rate, profit factor, and sample size
-- Grades by confidence level accuracy
-- Identifies best trading hours and assets
-
-### 🧠 **Local LLM Integration (Ollama)**
-- Runs **100% locally** via Ollama - no API keys, no cloud, no privacy concerns
-- Supports llama3, mistral, codellama, and other models
-- Forces strict JSON output for reliable parsing
-- Falls back to mock analysis if Ollama unavailable
+Autonomous trading bot for **TradingView Desktop** and **MetaTrader 5**, configured for **Apex Trader Funding**.
+One switch on the dashboard chooses where the orders go. Both **Teacher Mode** (analyze only) and **Autonomous Mode** (auto-execute) are supported.
 
 ---
 
-## 🚀 Quick Start
+## ⚡ Install in one line
 
-### Prerequisites
-- Python 3.10+
-- (Optional) Ollama installed locally: https://ollama.ai
+> Replace `Vijindran79/vcantrade.com` in the commands below with your actual GitHub link once you push this code.
 
-### Installation
+There are **two installers**. Pick the one that matches the user.
+
+### 🟢 Standard install (Teacher + Autonomous, both modes available)
+
+For traders who want the bot to be able to click on its own.
+
+**Windows** — open **PowerShell** and paste:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/Vijindran79/vcantrade.com/main/install.ps1 | iex
+```
+
+**macOS / Linux** — open **Terminal** and paste:
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# (Optional) Pull Ollama model
-ollama pull llama3
-
-# Run the app
-python main.py
+curl -fsSL https://raw.githubusercontent.com/Vijindran79/vcantrade.com/main/install.sh | bash
 ```
 
-### What You'll See
-1. **Control Window**: Mode switches, kill switch, activity log
-2. **Transparent Overlay**: Glass HUD floating above your screen showing trading signals
-3. **Live Updates**: Overlay refreshes every 2 seconds with new signals
+### 🟣 Teacher-only install (suggestions only, never clicks)
 
----
+For traders who want the bot to analyze and alert, but always click Buy/Sell themselves. The Autonomous button is permanently greyed out on the dashboard.
 
-## 🎮 How to Use
+**Windows** — open **PowerShell** and paste:
 
-### First Run (Safe Mode)
-1. App starts in **Teacher Mode + Paper Trading** by default
-2. Transparent overlay shows AI signals above your chart
-3. You manually trade based on AI suggestions
-4. Log tracks all decisions for review
-
-### After Testing (Optional Auto Mode)
-1. Switch to **Auto Mode** in control panel
-2. Keep **Paper Mode ON** for risk-free automated testing
-3. Monitor log to see AI executing trades
-4. Review performance grade in log
-
-### Going Live (Not Recommended Without Extensive Testing)
-⚠️ **Only after 2+ weeks of paper trading with positive results:**
-1. Toggle **Paper Mode OFF** (switches to Live)
-2. Set hotkeys in your trading platform:
-   - `Ctrl+B` = Buy
-   - `Ctrl+S` = Sell
-   - `Ctrl+X` = Close position
-3. Keep **Kill Switch** button ready
-4. Start with minimal position sizes
-
----
-
-## 📁 Project Structure
-
-```
-vcantrade.com/
-├── main.py                      # Application entry point
-├── config.py                    # Safety controls & settings
-├── requirements.txt             # Python dependencies
-├── core/
-│   ├── models.py               # Pydantic data models
-│   ├── llm_analyzer.py         # Ollama LLM integration
-│   ├── trade_engine.py         # Trade execution & safety controls
-│   └── grader.py               # Performance grading (A-F)
-├── execution/
-│   └── rpa_executor.py         # RPA via hotkeys/PyAutoGUI
-└── ui/
-    └── dashboard.py            # Control window + transparent overlay
+```powershell
+iwr -useb https://raw.githubusercontent.com/Vijindran79/vcantrade.com/main/install-teacher.ps1 | iex
 ```
 
+**macOS / Linux** — open **Terminal** and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Vijindran79/vcantrade.com/main/install-teacher.sh | bash
+```
+
+That's it. The installer will:
+1. Install Python 3.11 (if missing)
+2. Install Git (if missing)
+3. Download the bot to `%USERPROFILE%\VcanTrade` (Windows) or `~/VcanTrade` (Mac/Linux)
+4. Install all Python dependencies inside a clean virtual environment
+5. Drop a **VcanTrade** shortcut on the Desktop (Windows) or set up `start.sh` (Mac/Linux)
+
+When it finishes, **double-click the Desktop icon** (Windows) or **run `~/VcanTrade/start.sh`** (Mac/Linux) to start the bot.
+
+> **Important for Mac users:** MetaTrader 5 has no Mac Python connector. If you trade through MT5, install the bot on the Windows machine that runs MT5 (or a Parallels Windows VM). The Mac install only supports TradingView mode.
+
 ---
 
-## ⚙️ Configuration
+## 🚀 Daily use
 
-Edit `config.py` to customize:
+### Before you start the bot
+1. **Start Ollama.** In a separate terminal, run `ollama serve` (Mac/Linux) or just open the Ollama app (Windows).
+2. **Pull the model** (one-time only):
+   ```bash
+   ollama pull qwen2.5:1.5b-instruct-q4_K_M
+   ollama pull llava:7b
+   ```
+   On a small Mac the 1.5b text model and llava:7b vision model are enough.
+3. **Open MetaTrader 5** *or* **TradingView Desktop**, depending on which one you're trading.
+   - For **TradingView Desktop** specifically, launch it with remote debugging enabled (the bot connects via Chrome DevTools on port 9222). The bot's launcher does this automatically.
+   - For **MetaTrader 5**, just have it open and logged into your Apex account. Enable Algo Trading in the toolbar.
 
-```python
-# Safety Controls
-DRY_RUN = True                   # Always True by default
-MAX_DAILY_LOSS = 100.00          # Max loss per day
-MAX_OPEN_POSITIONS = 3           # Concurrent position limit
-COOLDOWN_AFTER_STOP = 300        # 5 min cooldown after stop loss
+### Start the bot
+- **Windows:** double-click the **VcanTrade** icon on the Desktop. That's it. The launcher will:
+  1. Open Chrome / Edge / TradingView Desktop on port 9222 (the port the bot listens on)
+  2. Wait for it to be ready
+  3. Start the bot
 
-# Trading Mode
-TEACHER_MODE = True              # Show signals only (no auto-execution)
+  > **Always launch this way.** If you open Chrome a different way (or someone else's Chrome window is already open without the debug port), the bot won't see your charts.
+  >
+  > If the Desktop icon ever goes missing, run `create-desktop-shortcut.ps1` (right-click → "Run with PowerShell") to put it back.
 
-# LLM Settings
-OLLAMA_MODEL = "llama3"          # Local AI model
-JSON_OUTPUT = True               # Strict JSON validation
+- **Mac/Linux:** run `~/VcanTrade/start.sh`
 
-# Overlay
-OVERLAY_ALPHA = 0.15             # Transparency level
-OVERLAY_UPDATE_MS = 2000         # Refresh rate (2 seconds)
+### Flip the surface switch (in the bot dashboard)
+The dashboard has two big buttons:
+- **TradingView** → orders go to TradingView Desktop via JS click (used by you).
+- **MetaTrader 5** → orders go to MT5 via the native API (used by your brother).
+
+Press whichever one matches your platform. The bot remembers it.
+
+### Teacher vs Autonomous
+- **Teacher Mode:** the bot reads the chart, runs its analysis, and tells you what it would do — but doesn't click. Use this for the first day.
+- **Autonomous Mode:** the bot clicks Buy/Sell on its own using all safety guards.
+
+The mode is picked from the same dashboard. Start in Teacher Mode, watch it for a session, then flip to Autonomous when you trust the calls.
+
+---
+
+## 🔄 Update to the latest version
+
+Whenever you push a new fix to GitHub, your brother can update with one line.
+
+### Windows
+```powershell
+iwr -useb https://raw.githubusercontent.com/Vijindran79/vcantrade.com/main/install.ps1 | iex
+```
+Same line as the install. The installer detects an existing copy and just pulls the latest code.
+
+### macOS / Linux
+```bash
+curl -fsSL https://raw.githubusercontent.com/Vijindran79/vcantrade.com/main/install.sh | bash
 ```
 
 ---
 
-## 🔒 Safety First
+## 🛡️ Safety controls (already on by default)
 
-### Why This Architecture is Safe
-| Feature | Purpose |
-|---------|---------|
-| **Paper Mode Default** | Can't lose money until you explicitly disable it |
-| **Teacher Mode Default** | You control execution, AI only suggests |
-| **Kill Switch** | One-click emergency halt |
-| **Daily Loss Limit** | Prevents runaway losses |
-| **Cooldown Period** | Stops revenge trading after losses |
-| **Local LLM** | No cloud dependency, no API costs, 100% private |
-| **JSON Schema** | Prevents LLM hallucination from breaking parser |
-| **Hotkey Execution** | 3-5x faster than mouse, less error-prone |
-
-### Testing Protocol (Recommended)
-1. **Week 1-2**: Teacher Mode + Paper Trading only
-2. **Week 3-4**: Review grader report, validate accuracy
-3. **Week 5+**: If Grade A/B + 60%+ win rate, consider auto mode
-4. **Month 2+**: If paper auto-mode profitable, test live with minimal size
+- **`DRY_RUN=True`** in `.env` is the boot default. The bot will NOT click real orders until you set this to `False`.
+- **News filter fails closed:** if Forex Factory can't be reached, the bot pauses trading instead of trading blind.
+- **Walk-Away Protocol:** if daily loss crosses the threshold, the bot shuts down for 24 hours.
+- **Apex preset:** `PROP_FIRM_NAME=Apex Trader Funding`, `PROP_ACCOUNT_SIZE=50000`, trailing-drawdown rules baked in.
+- **One armed surface at a time:** when you flip to MT5, TradingView is silent — and vice versa. No accidental double orders.
 
 ---
 
-## 🔮 Future Enhancements (Phase 2)
+## 📂 Where things live
 
-- [ ] Live WebSocket market data feed (ccxt, yfinance, Polygon.io)
-- [ ] OpenCV screen calibration for any broker platform
-- [ ] News sentiment pipeline (RSS + NewsAPI)
-- [ ] Multi-timeframe analysis (1m, 5m, 15m, 1h)
-- [ ] Backtesting engine with historical data
-- [ ] Mobile notifications (Telegram/Discord bot)
-- [ ] Performance dashboard web UI
+```
+%USERPROFILE%\VcanTrade\        (Windows)
+~/VcanTrade/                    (Mac/Linux)
+├── main.py              # the bot
+├── start.bat / start.sh # daily launcher
+├── .env                 # your settings — edit this for your account
+├── requirements.txt     # Python dependencies
+├── core/                # trading engine, surface router, risk
+├── ui/                  # dashboard
+└── threads/             # background workers
+```
 
----
-
-## 🐛 Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| `ModuleNotFoundError: PyQt6` | Run `pip install -r requirements.txt` |
-| Overlay not visible | Press Alt+Tab; overlay stays on top but click-through |
-| Ollama connection failed | App falls back to mock analysis automatically |
-| Hotkeys not working | Configure hotkeys in your trading platform first |
-| App won't start | Check Python 3.10+ with `python --version` |
+The only file you usually need to edit is `.env`.
 
 ---
 
-## 📝 License
+## ❓ Troubleshooting
 
-MIT License - Use at your own risk. This is a trading **assistant**, not financial advice.
+**"Python 3.11 not found"** during install on Windows
+Open PowerShell as Administrator and re-run the install line.
+
+**"Cannot connect to TradingView Desktop"**
+TradingView Desktop must be running with remote debugging enabled. Close it fully, then start it again from the bot's shortcut so the launcher passes the right flag.
+
+**"MT5 executor not initialised"**
+Open MetaTrader 5 first. Click `Tools → Options → Expert Advisors` and tick **Allow algorithmic trading**. Restart the bot.
+
+**"Ollama not running"**
+Run `ollama serve` in a separate terminal, or start the Ollama desktop app.
+
+**Bot reacts too slowly when price drops fast**
+You're already running the new build — the old yfinance probe that caused 5-second delays is gone. Live ticks come from MT5 (microseconds) on the MT5 surface, and TradingView clicks fire instantly because the JS executes against the visible Buy/Sell buttons.
 
 ---
 
-## 🤝 Support
+## 🗺️ What's planned next
 
-For issues, questions, or contributions, open an issue on GitHub.
+- ATR-based stops and trailing (replacing the fixed `$15/$30/$2` thresholds)
+- Single unified position sizer (volatility-targeted, Kelly-fractional)
+- Real backtest harness so every threshold change is gated on out-of-sample Sharpe
+- Per-route latency dashboard
 
-**Built with ❤️ for safer, smarter trading**
+Open an issue or DM if something breaks. The bot logs everything to `vcani_trade.log`.

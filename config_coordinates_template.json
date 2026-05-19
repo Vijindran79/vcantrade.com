@@ -1,8 +1,0 @@
-{
-    "BUTTON_BUY": {"x": 960, "y": 540, "color": "#00FF41"},
-    "BUTTON_SELL": {"x": 960, "y": 580, "color": "#FF003C"},
-    "BUTTON_FLATTEN": {"x": 960, "y": 620, "color": "#FFD700"},
-    "ACCOUNT_DROPDOWN": {"x": 500, "y": 200, "color": "#FFFFFF"},
-    "SIM_ACCOUNT_SLOT": {"x": 500, "y": 250, "color": "#FFFFFF"},
-    "APEX_ACCOUNT_SLOT": {"x": 500, "y": 280, "color": "#FFFFFF"}
-}

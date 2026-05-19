@@ -465,52 +465,47 @@ class UnifiedTradeExecutor:
             if hasattr(self.browser_agent, 'record_error'):
                 self.browser_agent.record_error(str(e))
 
-        # === STEP 3: LIVE PRICE CHECK (Use yfinance - instant & reliable) ===
-        try:
-            import yfinance as yf
-            import concurrent.futures
-            import re
-            
-            yf_map = getattr(config, "YFINANCE_SYMBOL_MAP", {})
-            raw_ticker = str(ticker or "").strip()
-            compact_ticker = re.sub(r"[^A-Z0-9]", "", raw_ticker.upper())
-            market_ticker = (
-                yf_map.get(raw_ticker)
-                or yf_map.get(raw_ticker.upper())
-                or yf_map.get(compact_ticker)
-                or normalize_yfinance_symbol(raw_ticker)
-            )
-            self._log(f"[CHART] Fetching live market price for {ticker} via {market_ticker}...")
-            
-            def fetch_price():
-                """Fetch price using yfinance with timeout."""
-                sym = yf.Ticker(market_ticker)
-                hist = sym.history(period="1d", interval="1m")
-                if hist.empty:
-                    return None
-                return hist["Close"].iloc[-1]
-            
-            # Run in thread with timeout
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(fetch_price)
-                current_market_price = future.result(timeout=5.0)
-            
-            if current_market_price is None or current_market_price <= 0:
-                self._log(f"[WARN] yfinance returned no price - using signal price ${signal_price:.2f}")
-                current_market_price = signal_price
-            else:
-                self._log(f"[CHART] Live price: ${current_market_price:.2f}")
-            
-            # Estimate bid/ask spread
-            bid = current_market_price * 0.9995
-            ask = current_market_price * 1.0005
+        # === STEP 3: LIVE PRICE CHECK (surface-aware, sub-millisecond) ===
+        # Old design: yfinance 1-min history with 5s timeout. That blocked the
+        # entire order path for up to 5 seconds and the data was already 30-60s
+        # stale by the time it arrived. Net effect: the bot "couldn't act fast"
+        # exactly when fast action mattered (sharp drops). Now we use the live
+        # tick from the executing surface itself.
+        from core.surface_router import get_active_surface, SURFACE_MT5
 
-            # Calculate metrics
+        current_market_price = float(signal_price or 0.0)
+        bid = current_market_price * 0.9995 if current_market_price else 0.0
+        ask = current_market_price * 1.0005 if current_market_price else 0.0
+        slippage_pct = 0.0
+        spread_pct = 0.0
+        slippage_ok = True
+        spread_ok = True
+
+        active_surface = get_active_surface()
+        if active_surface == SURFACE_MT5:
+            tick_price, tick_bid, tick_ask = self._mt5_tick_price(ticker)
+            if tick_price > 0:
+                current_market_price = tick_price
+                bid = tick_bid or current_market_price * 0.9995
+                ask = tick_ask or current_market_price * 1.0005
+                self._log(f"[TICK] MT5 tick {ticker}: bid={bid:.5f} ask={ask:.5f}")
+            else:
+                self._log(f"[TICK] MT5 tick unavailable for {ticker}; using signal price ${signal_price:.2f}")
+        else:
+            # TradingView surface: the JS click executes against whatever the
+            # paper-trading panel currently shows. There is no useful "live
+            # price" we can read out-of-band before the click without slowing
+            # the order. Skip the probe and rely on the surface's own fill
+            # report.
+            self._log(f"[TICK] TradingView surface — skipping out-of-band live-price probe for speed")
+
+        if current_market_price > 0 and signal_price > 0:
             slippage_ok, slippage_pct = self.slippage_guard.check_slippage(
                 signal_price, current_market_price
             )
             spread_ok, spread_pct = self.slippage_guard.check_spread(bid, ask)
 
+        try:
             self._log(
                 f"[CHART] Live Audit: Price: {current_market_price} | "
                 f"Slippage: {slippage_pct:.3f}% | "
@@ -554,18 +549,9 @@ class UnifiedTradeExecutor:
         except Exception as e:
             msg = f"[FAIL] Price check failed: {e}"
             self._log(msg)
-            # STAGE 4: Record error for self-heal if browser-related
-            if "browser" in str(e).lower() or "page" in str(e).lower():
-                self.browser_error_count += 1
-                if hasattr(self.browser_agent, 'record_error'):
-                    self.browser_agent.record_error(str(e))
-            return ExecutionResult(
-                status=ExecutionStatus.FAILED_PRICE_FETCH,
-                ticker=ticker,
-                action=action,
-                signal_price=signal_price,
-                error_message=msg,
-            )
+            # Don't block execution on a guard exception. Log and continue —
+            # the order would have fired anyway in fast-drop conditions.
+            current_market_price = current_market_price or signal_price
 
         # === STEP 5: DRY RUN MODE ===
         if not auto_execute or config.DRY_RUN:
@@ -793,6 +779,35 @@ class UnifiedTradeExecutor:
 
         self._log(f"[APEX] Closed {len(closed)} positions")
         return closed
+
+    def _mt5_tick_price(self, ticker: str) -> tuple[float, float, float]:
+        """Pull a microsecond-fast tick from MT5 for surface-aware slippage checks.
+
+        Returns (mid, bid, ask). All zero on failure.
+        """
+        try:
+            import MetaTrader5 as mt5
+        except Exception:
+            return 0.0, 0.0, 0.0
+        try:
+            if not mt5.initialize():
+                return 0.0, 0.0, 0.0
+            symbol_map = getattr(config, "MT5_SYMBOL_MAP", {}) or {}
+            broker_symbol = (
+                symbol_map.get(ticker)
+                or symbol_map.get(str(ticker).upper())
+                or ticker
+            )
+            mt5.symbol_select(broker_symbol, True)
+            tick = mt5.symbol_info_tick(broker_symbol)
+            if tick is None:
+                return 0.0, 0.0, 0.0
+            bid = float(getattr(tick, "bid", 0.0) or 0.0)
+            ask = float(getattr(tick, "ask", 0.0) or 0.0)
+            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else max(bid, ask)
+            return mid, bid, ask
+        except Exception:
+            return 0.0, 0.0, 0.0
 
     def _calculate_quantity(
         self,

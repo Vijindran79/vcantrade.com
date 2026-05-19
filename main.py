@@ -83,7 +83,13 @@ from core.watchtower import WatchtowerScanner
 from core.vision_engine import VisionCapture
 from core.scanner import CloudScanner
 from services.signal_dispatcher import SignalDispatcher
-from services.execution_socket_client import ExecutionSocketClient
+from core.surface_router import (
+    SurfaceRouter,
+    SURFACE_TRADINGVIEW,
+    SURFACE_MT5,
+    get_active_surface,
+    set_active_surface,
+)
 from core.browser_agent import BrowserAgent
 from core.settings import settings_manager
 from core.financial_safety import FinancialSafetyManager
@@ -158,6 +164,8 @@ logger = logging.getLogger(__name__)
 
 def _teacher_mode_forced_by_config() -> bool:
     """Return True when env/config explicitly pins the app to Teacher mode."""
+    if bool(getattr(config, "TEACHER_ONLY_LOCK", False)):
+        return True
     execution_mode = str(getattr(config, "EXECUTION_MODE", "") or "").strip().upper()
     trading_surface = str(getattr(config, "TRADING_SURFACE", "") or "").strip().upper()
     runtime_mode = str(os.getenv("RUNTIME_MODE", os.getenv("TRADING_MODE", "")) or "").strip().upper()
@@ -1447,10 +1455,11 @@ class VcaniTradeApp:
         self.executor = None  # Will be initialized when browser agent is ready
         self.risk_manager = RiskManager(risk_per_trade_pct=1.0)
         self.trade_executor = TradeExecutor(exchange_client=None)
-        # Side-by-Side Execution Strategy: Raw socket client for port 5555.
-        # Initialize before HybridExecutionGateway so all execution paths share it.
-        self.execution_socket_client = ExecutionSocketClient()
-        self.side_by_side_enabled = True  # Set to False to disable socket commands
+        # Surface Router: one armed surface (TRADINGVIEW or MT5) at a time.
+        # The legacy port-5555 socket has been retired; orders go directly to
+        # MT5 (native API) or TradingView Desktop (CDP / JS click).
+        self.execution_socket_client = None  # legacy attribute, kept None
+        self.side_by_side_enabled = False
         self._verify_ghost_hand_socket_async()
         exchange_provider = os.getenv("EXCHANGE_PROVIDER", "binance")
         exchange_api_key = os.getenv("EXCHANGE_API_KEY") or os.getenv("BINANCE_API_KEY") or os.getenv("BYBIT_API_KEY")
@@ -1470,7 +1479,7 @@ class VcaniTradeApp:
             self.mt5_executor = self._get_mt5_executor()
         self._ghost_executor.set_mt5_executor(self.mt5_executor)
         self.hybrid_gateway = HybridExecutionGateway(
-            socket_client=self.execution_socket_client,
+            socket_client=None,
             mt5_executor=self.mt5_executor,
             ghost_executor=self._ghost_executor,
         )
@@ -3606,90 +3615,58 @@ class VcaniTradeApp:
             self.test_status_text = f"Error: {e}"
 
     def _on_force_test_trade(self):
-        """Handle manual force-hand request through the local execution socket."""
+        """Force a single BUY through the active surface (TradingView or MT5).
+
+        This is a smoke test — it bypasses confidence and risk gates so you can
+        verify the click/order pipeline against your paper account.
+        """
         import threading
-        import yfinance as yf
 
         ticker_hint = self.current_watchlist[0] if self.current_watchlist else self.ticker_selector
-        self.cmd.log(f"[BOLT] FORCE HAND TEST: Sending BUY_REAL to local execution socket for {ticker_hint}")
-        self.ai_narrator.add_activity("[MOUSE]", f"Force hand test: sending to local execution socket for {ticker_hint}")
-
-        # FIX 3: Fetch live price data for the ticker before sending command
-        entry_price = 0.0
-        stop_loss = 0.0
-        take_profit = 0.0
-        try:
-            market_ticker = self._canonical_market_ticker(ticker_hint)
-            sym = yf.Ticker(market_ticker)
-            hist = sym.history(period="1d", interval="1m")
-            if not hist.empty and "Close" in hist.columns:
-                entry_price = float(hist["Close"].dropna().iloc[-1])
-                # Estimate SL/TP as 1% below/above current price
-                stop_loss = entry_price * 0.99
-                take_profit = entry_price * 1.015
-                self.cmd.log(f"[CHART] Force test live price for {ticker_hint}: ${entry_price:.2f}")
-        except Exception as price_err:
-            self.cmd.log(f"[WARN] Could not fetch live price for {ticker_hint}: {price_err}")
-
-        target_info = self.rpa_hand.describe_entry_target("BUY", ticker_hint=ticker_hint)
-        tradingview_selectors = {
-            "buy_market": "button[data-type=\"buy-mkt\"]",
-            "sell_market": "button[data-type=\"sell-mkt\"]",
-            "generic_button_query": "button, div[role=\"button\"], span[role=\"button\"]",
-        }
-        if target_info:
-            abs_x, abs_y = target_info.get("absolute", (None, None))
-            self.cmd.log(f"[TARGET] Force hand target resolved: BUY {ticker_hint} abs=({abs_x}, {abs_y})")
-        else:
-            self.cmd.log("[WARN] Force hand target not resolved; socket server will reject if no coordinate override exists")
+        surface = get_active_surface()
+        self.cmd.log(f"[BOLT] FORCE TEST: BUY {ticker_hint} via {surface}")
+        self.ai_narrator.add_activity("[MOUSE]", f"Force test: BUY {ticker_hint} on {surface}")
 
         def run_force_test_in_thread():
             try:
-                # Send test command to the local execution socket (port 5555).
-                # FIX 3: Pass real market data alongside the command.
-                success = self.execution_socket_client.send_command(
-                    "BUY_REAL",
-                    entry_price=entry_price,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    ticker=ticker_hint,
-                    target=target_info or {},
-                    selectors=tradingview_selectors,
-                    source="main.py.force_hand_test",
+                router = SurfaceRouter(
+                    mt5_executor=self.mt5_executor,
+                    ghost_executor=self._ghost_executor,
                 )
-                if success:
-                    self._log_ui(f'<span style="color:#3FB950;font-weight:bold">[MOUSE] FORCE HAND TEST PASSED</span>: BUY_REAL sent to local execution socket for {ticker_hint}')
-                    self._activity_ui("[OK]", f"Force hand test passed - local execution socket received command for {ticker_hint}")
+                browser_loop = getattr(self, "_browser_loop", None)
+                result = router.execute(
+                    symbol=ticker_hint,
+                    action="BUY",
+                    quantity=float(getattr(config, "MT5_VOLUME", 0.1) or 0.1),
+                    browser_loop=browser_loop,
+                )
+                if result.success:
+                    self._log_ui(
+                        f'<span style="color:#3FB950;font-weight:bold">[OK] FORCE TEST PASSED</span>: '
+                        f'{result.surface} accepted BUY {ticker_hint} in {result.latency_ms:.1f}ms'
+                    )
+                    self._activity_ui("[OK]", f"Force test {result.surface} BUY {ticker_hint}")
                 else:
-                    self._log_ui(f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE HAND TEST FAILED</span>: Could not reach local execution socket on port 5555 for {ticker_hint}')
-                    self._activity_ui("[WARN]", f"Force hand test failed - local execution socket not responding for {ticker_hint}")
+                    self._log_ui(
+                        f'<span style="color:#F85149;font-weight:bold">[WARN] FORCE TEST FAILED</span> on {result.surface}: '
+                        f'{result.message}'
+                    )
+                    self._activity_ui("[WARN]", f"Force test {result.surface} failed: {result.message[:80]}")
             except Exception as e:
-                self._log_ui(f'<span style="color:#F85149">[FAIL] FORCE HAND TEST ERROR</span>: {e}')
+                self._log_ui(f'<span style="color:#F85149">[FAIL] FORCE TEST ERROR</span>: {e}')
 
-        hand_test_thread = threading.Thread(target=run_force_test_in_thread, daemon=True)
-        hand_test_thread.start()
-        self.cmd.log("[BOLT] Force hand test dispatched to local execution socket (port 5555)")
+        threading.Thread(target=run_force_test_in_thread, daemon=True).start()
+        self.cmd.log(f"[BOLT] Force test dispatched to {surface}")
 
     def _verify_ghost_hand_socket_async(self):
-        """Confirm the local execution socket is online without blocking UI startup."""
-        def run_handshake():
-            try:
-                if self.execution_socket_client.reconnect():
-                    message = "[SUCCESS] Ghost-Hand Socket Connection established on port 5555!"
-                    logger.info(message)
-                    self._log_ui(f'<span style="color:#3FB950;font-weight:bold">{message}</span>')
-                    if hasattr(self.ai_narrator, "add_activity"):
-                        self._activity_ui("[OK]", "Ghost-Hand socket online on port 5555")
-                else:
-                    warning = "[WARN] Ghost-Hand Socket Connection unavailable on port 5555"
-                    logger.warning(warning)
-                    self._log_ui(f'<span style="color:#D29922;font-weight:bold">{warning}</span>')
-                    if hasattr(self.ai_narrator, "add_activity"):
-                        self._activity_ui("[WARN]", "Ghost-Hand socket not responding on port 5555")
-            except Exception as exc:
-                logger.warning("[EXEC_SOCKET] Startup handshake failed: %s", exc)
+        """No-op preserved for backward compatibility.
 
-        threading.Thread(target=run_handshake, daemon=True).start()
+        The legacy port-5555 socket has been retired. The router now talks
+        directly to MT5 (native API) or TradingView Desktop (CDP/JS) so there
+        is nothing to handshake here. Kept as a stub so older callers that
+        may still reference it don't crash.
+        """
+        return None
 
     def _on_rpa_blind(self, reason: Optional[str] = None):
         """
@@ -5004,72 +4981,40 @@ class VcaniTradeApp:
     def _send_side_by_side_command(self, action: str, confidence: float,
                                     entry_price: float = 0.0, stop_loss: float = 0.0,
                                     take_profit: float = 0.0) -> bool:
+        """Compatibility shim for legacy callers.
+
+        The old port-5555 "side-by-side" socket has been retired. This now
+        forwards the request to the active surface via SurfaceRouter so the
+        operator gets a real fill on whichever platform (TradingView or MT5)
+        is currently armed.
         """
-        Send Side-by-Side Execution command via raw socket to port 5555.
-        
-        Confidence Ladder:
-        - 50% - 84%: Send _SIM actions
-        - 85%+: Send _REAL actions
-        
-        =====================================================================
-        FIX 3: Live market prices are now forwarded to the socket server so
-        escalator.trigger_probe() receives real data instead of (0,0,0).
-        =====================================================================
-        
-        Args:
-            action: Base action ("BUY" or "SELL" or "FLATTEN")
-            confidence: Confidence score (0-100)
-            entry_price: Live market entry price (0.0 = not provided).
-            stop_loss: Calculated stop-loss price (0.0 = not provided).
-            take_profit: Calculated take-profit price (0.0 = not provided).
-            
-        Returns:
-            True if command was sent successfully
-        """
-        if not self.side_by_side_enabled:
-            logger.debug("[SIDE-BY-SIDE] Disabled, skipping socket command")
+        if not action:
             return False
-            
-        if action.upper() == "FLATTEN":
-            # Map to FLATTEN_SIM or FLATTEN_REAL based on confidence
-            if confidence >= 85.0:
-                command = "FLATTEN_REAL"
-            else:
-                command = "FLATTEN_SIM"
-        else:
-            # Map to BUY_SIM/SELL_SIM or BUY_REAL/SELL_REAL based on confidence
-            command = ExecutionSocketClient._get_trade_action(action, confidence)
-        
-        logger.info(
-            "[SIDE-BY-SIDE] Sending command: %s (action=%s, confidence=%.1f%%, "
-            "entry=%.4f, sl=%.4f, tp=%.4f)",
-            command, action, confidence, entry_price, stop_loss, take_profit
-        )
-        
-        self.cmd.log(
-            f'<span style="color:#58A6FF;font-weight:bold">[SOCKET] SIDE-BY-SIDE</span>: '
-            f'Sending {command} (confidence={confidence:.1f}%%)'
-        )
-        
-        # FIX 3: Pass real market data to the socket server
-        return self.execution_socket_client.send_command(
-            command,
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            target={
-                "point_name": "buy_button" if action.upper() == "BUY" else "sell_button" if action.upper() == "SELL" else "flatten_button",
-                "absolute": list(config.FALLBACK_COORDS.get(
-                    "buy_button" if action.upper() == "BUY" else "sell_button" if action.upper() == "SELL" else "flatten_button",
-                    (0, 0),
-                )),
-            },
-            selectors={
-                "buy_market": "button[data-type=\"buy-mkt\"]",
-                "sell_market": "button[data-type=\"sell-mkt\"]",
-            },
-            source="main.py.side_by_side",
-        )
+        ticker_hint = self.current_watchlist[0] if self.current_watchlist else self.ticker_selector
+
+        try:
+            router = SurfaceRouter(
+                mt5_executor=self.mt5_executor,
+                ghost_executor=self._ghost_executor,
+            )
+            browser_loop = getattr(self, "_browser_loop", None)
+            quantity = float(getattr(config, "MT5_VOLUME", 0.1) or 0.1)
+            result = router.execute(
+                symbol=ticker_hint,
+                action=action.upper(),
+                quantity=quantity,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                browser_loop=browser_loop,
+            )
+            self.cmd.log(
+                f'<span style="color:#58A6FF;font-weight:bold">[ROUTER]</span>: '
+                f'{action.upper()} on {result.surface} ({result.latency_ms:.1f}ms) — {result.message}'
+            )
+            return result.success
+        except Exception as exc:
+            logger.exception("[ROUTER] _send_side_by_side_command failed: %s", exc)
+            return False
 
     def _signal_dispatch_key(self, signal_data: dict) -> str:
         """Stable key used to confirm the HTTP listener saw a scanner signal."""

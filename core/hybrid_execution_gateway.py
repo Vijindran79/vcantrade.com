@@ -1,28 +1,26 @@
 """
-Hybrid low-latency execution gateway.
+Hybrid Execution Gateway — thin compatibility shim over `core.surface_router.SurfaceRouter`.
 
-Priority:
-1. Direct broker WebSocket when configured.
-2. Local execution socket on port 5555.
-3. MT5 direct order_send when available.
-4. TradingView GhostExecutor JS click.
+The legacy "hybrid" gateway tried four routes (broker WebSocket, local socket,
+MT5, TradingView JS) and silently fell back. That was a footgun: a single
+ambiguous response could fire the same logical order on two surfaces.
 
-Legacy mouse RPA remains outside this gateway as the caller's final fallback.
+The new design is one armed surface per click, controlled by
+`config.ACTIVE_EXECUTION_SURFACE`:
+  * "TRADINGVIEW" -> GhostExecutor JS click on TradingView Desktop
+  * "MT5"         -> Native MT5 order_send
+
+Existing call sites (`HybridExecutionGateway(...)`, `gateway.execute(...)`,
+`GatewayResult`) keep working — the gateway just forwards to `SurfaceRouter`.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import time
 from dataclasses import dataclass
 from typing import Optional
 
-import aiohttp
-
-import config
-from services.execution_socket_client import ExecutionSocketClient
+from core.surface_router import SurfaceRouter, get_active_surface
 
 logger = logging.getLogger(__name__)
 
@@ -35,98 +33,44 @@ class GatewayResult:
     message: str = ""
 
 
-class BrokerWebSocketClient:
-    """Minimal generic WebSocket broker adapter.
-
-    The adapter sends a normalized JSON order packet. Real broker-specific
-    signing and field names can be added behind this same interface once the
-    endpoint is known.
-    """
-
-    def __init__(
-        self,
-        url: str,
-        token: str = "",
-        timeout_seconds: float = 0.75,
-        dry_run: bool = True,
-    ) -> None:
-        self.url = (url or "").strip()
-        self.token = (token or "").strip()
-        self.timeout_seconds = float(timeout_seconds or 0.75)
-        self.dry_run = bool(dry_run)
-
-    @property
-    def configured(self) -> bool:
-        return bool(self.url)
-
-    async def send_order(
-        self,
-        symbol: str,
-        action: str,
-        quantity: float,
-        order_type: str = "MARKET",
-    ) -> GatewayResult:
-        started = time.perf_counter()
-        if not self.configured:
-            return GatewayResult(False, "broker_ws", 0.0, "BROKER_WS_URL not configured")
-
-        payload = {
-            "type": "order",
-            "symbol": symbol,
-            "side": action.upper(),
-            "quantity": quantity,
-            "order_type": order_type.upper(),
-            "dry_run": self.dry_run,
-            "client": "vcantrade",
-            "sent_at": time.time(),
-        }
-        headers = {}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-
-        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.ws_connect(self.url) as ws:
-                    await ws.send_str(json.dumps(payload))
-                    msg = await ws.receive(timeout=self.timeout_seconds)
-                    latency_ms = (time.perf_counter() - started) * 1000.0
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        text = msg.data or ""
-                        ok = "error" not in text.lower() and "reject" not in text.lower()
-                        return GatewayResult(ok, "broker_ws", latency_ms, text[:300])
-                    if msg.type == aiohttp.WSMsgType.CLOSED:
-                        return GatewayResult(False, "broker_ws", latency_ms, "WebSocket closed")
-                    if msg.type == aiohttp.WSMsgType.ERROR:
-                        return GatewayResult(False, "broker_ws", latency_ms, str(ws.exception()))
-                    return GatewayResult(True, "broker_ws", latency_ms, str(msg.type))
-        except Exception as exc:
-            latency_ms = (time.perf_counter() - started) * 1000.0
-            return GatewayResult(False, "broker_ws", latency_ms, str(exc))
-
-
 class HybridExecutionGateway:
+    """Routes orders to whichever surface (TradingView or MT5) is currently armed."""
+
     def __init__(
         self,
-        socket_client: Optional[ExecutionSocketClient] = None,
+        socket_client=None,  # accepted but ignored (Rithmic socket retired)
         mt5_executor=None,
         ghost_executor=None,
     ) -> None:
-        self.socket_client = socket_client or ExecutionSocketClient()
+        self.router = SurfaceRouter(mt5_executor=mt5_executor, ghost_executor=ghost_executor)
+        self._mt5_executor = mt5_executor
+        self._ghost_executor = ghost_executor
+        # Kept as attributes so legacy callers that read them keep working.
+        self.socket_client = None
         self.mt5_executor = mt5_executor
         self.ghost_executor = ghost_executor
-        self.broker_ws = BrokerWebSocketClient(
-            url=str(getattr(config, "BROKER_WS_URL", "")),
-            token=str(getattr(config, "BROKER_WS_TOKEN", "")),
-            timeout_seconds=float(getattr(config, "BROKER_WS_TIMEOUT_SECONDS", 0.75)),
-            dry_run=bool(getattr(config, "BROKER_WS_DRY_RUN", True)),
-        )
 
+    # ------------------------------------------------------------------
+    # Setters used by main.py when MT5/Ghost executors come online late
+    # ------------------------------------------------------------------
+    def set_mt5_executor(self, executor) -> None:
+        self._mt5_executor = executor
+        self.mt5_executor = executor
+        self.router.update_executors(mt5_executor=executor)
+
+    def set_ghost_executor(self, executor) -> None:
+        self._ghost_executor = executor
+        self.ghost_executor = executor
+        self.router.update_executors(ghost_executor=executor)
+
+    # ------------------------------------------------------------------
+    # PUBLIC API (matches the legacy gateway signature)
+    # ------------------------------------------------------------------
     async def execute(
         self,
         symbol: str,
         action: str,
-        confidence: float,
+        confidence: float = 0.0,
         quantity: float = 0.0,
         entry_price: float = 0.0,
         stop_loss: float = 0.0,
@@ -135,125 +79,45 @@ class HybridExecutionGateway:
         selectors: Optional[dict] = None,
         browser_loop=None,
     ) -> GatewayResult:
-        action = str(action or "").upper()
-        if action not in {"BUY", "SELL", "CLOSE", "FLATTEN"}:
-            return GatewayResult(False, "gateway", 0.0, f"Unsupported action {action}")
-
-        if self.broker_ws.configured:
-            result = await self.broker_ws.send_order(symbol, action, quantity or 0.0)
-            if result.success:
-                logger.info("[HYBRID] %s %s via broker_ws in %.2fms", action, symbol, result.latency_ms)
-                return result
-            logger.warning("[HYBRID] broker_ws failed for %s %s: %s", action, symbol, result.message)
-
-        socket_result = self._execute_socket(
+        """Send a single order to the armed surface."""
+        result = self.router.execute(
             symbol=symbol,
             action=action,
-            confidence=confidence,
             quantity=quantity,
-            entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            target=target,
-            selectors=selectors,
+            browser_loop=browser_loop,
         )
-        if socket_result.success:
-            return socket_result
 
-        mt5_result = self._execute_mt5(symbol, action, quantity, stop_loss, take_profit)
-        if mt5_result.success:
-            return mt5_result
-
-        ghost_result = await self._execute_ghost(action, browser_loop)
-        if ghost_result.success:
-            return ghost_result
+        surface = result.surface
+        if result.success:
+            logger.info(
+                "[GATEWAY] %s %s via %s in %.2fms — %s",
+                action,
+                symbol,
+                surface,
+                result.latency_ms,
+                result.message,
+            )
+        else:
+            logger.warning(
+                "[GATEWAY] %s %s on %s failed in %.2fms — %s",
+                action,
+                symbol,
+                surface,
+                result.latency_ms,
+                result.message,
+            )
 
         return GatewayResult(
-            False,
-            "hybrid_gateway",
-            0.0,
-            "; ".join(
-                part
-                for part in [
-                    socket_result.message,
-                    mt5_result.message,
-                    ghost_result.message,
-                ]
-                if part
-            ),
+            success=result.success,
+            route=surface,
+            latency_ms=result.latency_ms,
+            message=result.message,
         )
 
-    def _execute_socket(
-        self,
-        symbol: str,
-        action: str,
-        confidence: float,
-        quantity: float = 0.0,
-        entry_price: float = 0.0,
-        stop_loss: float = 0.0,
-        take_profit: float = 0.0,
-        target: Optional[dict] = None,
-        selectors: Optional[dict] = None,
-    ) -> GatewayResult:
-        started = time.perf_counter()
-        try:
-            if action in {"CLOSE", "FLATTEN"}:
-                command = self.socket_client._get_flatten_action(confidence)
-            else:
-                command = self.socket_client._get_trade_action(action, confidence)
-            ok = self.socket_client.send_command(
-                command,
-                ticker=symbol,
-                quantity=quantity,
-                entry_price=entry_price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                target=target,
-                selectors=selectors,
-                source="hybrid_gateway",
-            )
-            latency_ms = (time.perf_counter() - started) * 1000.0
-            return GatewayResult(ok, "local_socket", latency_ms, "sent" if ok else "socket unavailable")
-        except Exception as exc:
-            return GatewayResult(False, "local_socket", (time.perf_counter() - started) * 1000.0, str(exc))
-
-    def _execute_mt5(
-        self,
-        symbol: str,
-        action: str,
-        quantity: float,
-        stop_loss: float = 0.0,
-        take_profit: float = 0.0,
-    ) -> GatewayResult:
-        started = time.perf_counter()
-        executor = self.mt5_executor
-        if executor is None:
-            return GatewayResult(False, "mt5", 0.0, "MT5 executor unavailable")
-        try:
-            ok = executor.execute_trade(
-                symbol,
-                action,
-                volume=quantity or None,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-            )
-            latency_ms = (time.perf_counter() - started) * 1000.0
-            return GatewayResult(ok, "mt5", latency_ms, "order_send" if ok else "MT5 rejected")
-        except Exception as exc:
-            return GatewayResult(False, "mt5", (time.perf_counter() - started) * 1000.0, str(exc))
-
-    async def _execute_ghost(self, action: str, browser_loop=None) -> GatewayResult:
-        started = time.perf_counter()
-        ghost = self.ghost_executor
-        if ghost is None:
-            return GatewayResult(False, "tradingview_js", 0.0, "GhostExecutor unavailable")
-        try:
-            if browser_loop and not browser_loop.is_closed():
-                future = asyncio.run_coroutine_threadsafe(ghost.execute_js(action), browser_loop)
-                ok = future.result(timeout=5.0)
-            else:
-                ok = await ghost.execute_js(action)
-            latency_ms = (time.perf_counter() - started) * 1000.0
-            return GatewayResult(ok, "tradingview_js", latency_ms, "clicked" if ok else "JS click failed")
-        except Exception as exc:
-            return GatewayResult(False, "tradingview_js", (time.perf_counter() - started) * 1000.0, str(exc))
+    # ------------------------------------------------------------------
+    # Helpers retained for compatibility
+    # ------------------------------------------------------------------
+    def active_surface(self) -> str:
+        return get_active_surface()

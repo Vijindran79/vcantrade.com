@@ -461,27 +461,48 @@ class FinancialSafetyManager:
         return False, ""
 
     async def update_news_filter(self):
-        """Update the news filter with latest events."""
+        """Update the news filter with latest events.
+
+        FAIL CLOSED in AUTONOMOUS mode. If Forex Factory cannot be reached and
+        we therefore have no event list, we PAUSE trading instead of charging
+        ahead. The user can override with NEWS_FILTER_FAIL_OPEN=true in .env if
+        they explicitly accept news risk.
+        """
         await self.check_upcoming_news()
 
+        fail_open = bool(getattr(config, "NEWS_FILTER_FAIL_OPEN", False))
+
         if self.runtime_mode == "AUTONOMOUS" and self.last_news_scrape_failed and not self.upcoming_news:
-            if self.trading_paused:
+            if fail_open:
+                if self.trading_paused:
+                    logger.warning(
+                        "News filter FAIL-OPEN override: clearing pause after scraper error: %s",
+                        self.last_news_scrape_error or "unknown error",
+                    )
+                self.trading_paused = False
+                self.pause_reason = ""
+                return
+            # Default: fail closed — pause until the scraper recovers.
+            if not self.trading_paused:
                 logger.warning(
-                    "News filter fail-open in AUTONOMOUS mode - clearing pause after scraper error: %s",
+                    "[NEWS-FAIL-CLOSED] Forex Factory unreachable; pausing trading. Error: %s",
                     self.last_news_scrape_error or "unknown error",
                 )
-            self.trading_paused = False
-            self.pause_reason = ""
+            self.trading_paused = True
+            self.pause_reason = (
+                "News feed unreachable — paused until next successful scrape "
+                "(set NEWS_FILTER_FAIL_OPEN=true to override)."
+            )
             return
-        
+
         # Check if we need to pause/resume
         should_pause, reason = self.should_pause_trading()
-        
+
         if should_pause and not self.trading_paused:
             self.trading_paused = True
             self.pause_reason = reason
             logger.warning(f"[STOP] TRADING PAUSED: {reason}")
-            
+
         elif not should_pause and self.trading_paused:
             self.trading_paused = False
             old_reason = self.pause_reason

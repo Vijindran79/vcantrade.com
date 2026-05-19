@@ -32,7 +32,7 @@ load_dotenv()
 
 # ===== PROP FIRM RULES (The "Professor") =====
 PROP_FIRM_ENABLED = os.getenv("PROP_FIRM_ENABLED", "True").lower() == "true"
-PROP_FIRM_NAME = os.getenv("PROP_FIRM_NAME", "TopStep")
+PROP_FIRM_NAME = os.getenv("PROP_FIRM_NAME", "Apex Trader Funding")
 PROP_ACCOUNT_SIZE = float(os.getenv("PROP_ACCOUNT_SIZE", "50000.0"))
 PROP_PHASE = int(os.getenv("PROP_PHASE", "1"))
 PROP_IS_FUNDED = os.getenv("PROP_IS_FUNDED", "False").lower() == "true"
@@ -45,19 +45,33 @@ HARDCODED_EQUITY_FALLBACK = float(os.getenv("HARDCODED_EQUITY_FALLBACK", "50000.
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
 # PRODUCTION RULE: DRY_RUN defaults to True. You MUST explicitly set DRY_RUN=False in .env to trade live.
 DRY_RUN = os.getenv("DRY_RUN", "True").lower() == "true"
-# MAX_DAILY_LOSS: Default to 2% of CURRENT_BALANCE (prop firm standard), override with MAX_DAILY_LOSS env var
-_max_daily_loss_env = os.getenv("MAX_DAILY_LOSS", None)
-if _max_daily_loss_env is not None:
+# UNIFIED DAILY LOSS LIMIT — single source of truth.
+# Apex Trader Funding has no daily loss limit (only trailing drawdown), so the
+# default is 0 = disabled. Override per firm in .env if needed.
+_max_daily_loss_env = os.getenv("MAX_DAILY_LOSS", "0")
+try:
     MAX_DAILY_LOSS = float(_max_daily_loss_env)
-else:
-    MAX_DAILY_LOSS = CURRENT_BALANCE * 0.02  # 2% of current balance
-# DAILY_LOSS_LIMIT: Absolute daily loss cap (user override for new accounts)
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "3000.0"))
+except (TypeError, ValueError):
+    MAX_DAILY_LOSS = 0.0
+# Aliases kept for backward compatibility — every consumer must pull from
+# MAX_DAILY_LOSS. These mirror the unified value so legacy reads stay correct.
+DAILY_LOSS_LIMIT = MAX_DAILY_LOSS
+DAILY_LOSS_KILL = MAX_DAILY_LOSS
 # MAX_TRADES_PER_DAY: Maximum number of trades allowed per day
-MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "20"))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 COOLDOWN_AFTER_STOP = int(os.getenv("COOLDOWN_AFTER_STOP", "300"))
 KILL_SWITCH = False
+
+# News filter behaviour when Forex Factory is unreachable in AUTONOMOUS mode.
+# Default = false = FAIL CLOSED (pause trading). Set NEWS_FILTER_FAIL_OPEN=true
+# only if you accept trading through unverified news risk.
+NEWS_FILTER_FAIL_OPEN = os.getenv("NEWS_FILTER_FAIL_OPEN", "false").lower() == "true"
+
+# Maximum hold time. Set to 0 to disable the hard time-stop entirely; otherwise
+# the trade engine flattens any open position after this many seconds.
+# Old default was 1800 (30 min) — far too short for futures trends.
+MAX_TRADE_HOLD_SECONDS = int(os.getenv("MAX_TRADE_HOLD_SECONDS", "0"))
 
 # ===== TRADING HOURS (UTC) =====
 # Set your allowed trading window. The bot will NOT trade outside these hours.
@@ -113,6 +127,12 @@ SYMBOL_FUZZY_TERMS = {
 
 # ===== TRADING MODE =====
 TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
+
+# Hard lock to Teacher Mode. When True, the Autonomous button on the dashboard
+# is disabled and any AUTONOMOUS request is downgraded to TEACHER. Set this in
+# the .env file with TEACHER_ONLY_LOCK=true. Useful for installs where the
+# user wants signals only and never wants the bot to click on its own.
+TEACHER_ONLY_LOCK = os.getenv("TEACHER_ONLY_LOCK", "False").lower() == "true"
 
 # ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
 # Native Ollama API (for /api/generate, /api/tags, model management)
@@ -243,7 +263,7 @@ MULTI_ASSET_TICKERS = ["CL=F", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
-SYMBOL_MAP = {
+SYMBOL_TO_YAHOO_MAP = {
     "CME_MINI:MNQ1!": "MNQ=F",
     "CME_MINI:MES1!": "MES=F",
     "CL=F": "CL=F",
@@ -252,6 +272,11 @@ SYMBOL_MAP = {
     "NYMEX:CLM26!": "CL=F",  # Legacy alias only
     "COMEX:MGC1!": "GC=F",
 }
+# Merge TradingView-side aliases into the canonical SYMBOL_MAP without
+# overwriting the broker (MT5) entries already defined above.
+for _alias, _yahoo in SYMBOL_TO_YAHOO_MAP.items():
+    SYMBOL_MAP.setdefault(_alias, _yahoo)
+del _alias, _yahoo
 # Symbol mapping: Yahoo / internal ticker -> TradingView chart symbol.
 # Used by browser_agent/rpa_executor when a chart symbol needs to be resolved.
 # NQ=F/ES=F/CL=F map to the current working TradingView chart codes.

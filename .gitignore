@@ -1,1 +1,67 @@
-Nothing should be ignored since only a Python source file (`hedge_fund_executor.py`) was added, which is a source code file that should be tracked in version control. No build artifacts, dependencies, or temporary files were included in the changes.
+# =========================
+# VcanTrade AI - .gitignore
+# Keeps secrets, runtime data, and per-machine state out of GitHub.
+# =========================
+
+# --- Secrets / per-machine config ---
+.env
+.env.local
+.env.production
+*.local.env
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Python build/cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Logs and runtime data ---
+*.log
+*.log.*
+vcani_trade.log
+vcanitrade_alerts.db
+vcanitrade_ledger.db
+trades.db
+trade_ledger.json
+e2e_output.txt
+e2e_report.txt
+.nuclear_purge_backups/
+
+# --- Browser profiles (huge + machine-specific) ---
+browser_profile/
+.chromium-cache/
+.playwright-browsers/
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Per-machine UI state ---
+calibration.json
+config_coordinates.json
+swarm_incubation_state.json
+
+# --- Local skills / agent caches (not part of the bot itself) ---
+.kilo/
+.qwen/
+
+# --- OS junk ---
+*.tmp
+*.temp
+~$*
