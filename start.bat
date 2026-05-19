@@ -38,6 +38,9 @@ if not exist "%VENV_PY%" (
 
 echo Launching VcanTrade AI...
 echo.
+echo === The dashboard window will open in a few seconds ===
+echo === If you don't see it, check your taskbar (look for "Lion" or "VcanTrade") ===
+echo.
 "%VENV_PY%" main.py
 set "EXIT_CODE=%ERRORLEVEL%"
 

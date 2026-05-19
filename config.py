@@ -414,7 +414,7 @@ BROKER_WS_DRY_RUN = os.getenv("BROKER_WS_DRY_RUN", "true").lower() == "true"
 FAST_VISION_ENABLED = os.getenv("FAST_VISION_ENABLED", "true").lower() == "true"
 FAST_VISION_BACKEND = os.getenv("FAST_VISION_BACKEND", "auto").lower().strip()
 HUD_GLASS_ENABLED = os.getenv("HUD_GLASS_ENABLED", "true").lower() == "true"
-SHOW_STARTUP_SWITCHBOARD = os.getenv("SHOW_STARTUP_SWITCHBOARD", "true").lower() == "true"
+SHOW_STARTUP_SWITCHBOARD = os.getenv("SHOW_STARTUP_SWITCHBOARD", "false").lower() == "true"
 SMART_EYE_ENABLED = os.getenv("SMART_EYE_ENABLED", "true").lower() == "true"
 AUTO_SYMBOL_DETECTION = os.getenv("AUTO_SYMBOL_DETECTION", "true").lower() == "true"
 DETECTED_TRADING_WINDOW_TITLE = os.getenv("DETECTED_TRADING_WINDOW_TITLE", "").strip()
