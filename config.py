@@ -140,10 +140,10 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # OpenAI-compatible v1 endpoint (for /v1/chat/completions with vision)
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
-MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "predator:latest")
 OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL",
-    MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen2.5:7b-instruct-q4_K_M",
+    MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "predator:latest",
 )
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 VAST_API_TOKEN = None
@@ -198,7 +198,7 @@ JSON_OUTPUT = True
 # ===== VISION / VLM CONFIGURATION =====
 # 1. Enable Vision & Screen capturing
 USE_VISION = True
-VLM_MODEL = os.getenv("VLM_MODEL", "llava:7b")
+VLM_MODEL = os.getenv("VLM_MODEL", "llama3.2-vision:latest")
 VISION_TIMEOUT = 120
 SAVE_DEBUG_SCREENSHOTS = True
 
@@ -375,7 +375,7 @@ MT5_SYMBOL_MAP = {
     "NVDA": "NVDA",
     "AAPL": "AAPL",
 }
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llava:7b")
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llama3.2-vision:latest")
 MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====
