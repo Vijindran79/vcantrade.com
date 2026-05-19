@@ -2059,22 +2059,22 @@ class VcaniTradeApp:
         # Cloud Bridge kill switch (thread-safe via pyqtSignal)
         self.cloud_bridge.kill_requested.connect(self._on_kill_switch)
 
-        # Multi-Asset Hunter signals
+        # Multi-Asset Hunter signals (QueuedConnection for thread safety)
         if self.hunter:
-            self.hunter.status_update.connect(self._on_hunter_status_update)
-            self.hunter.trade_signal.connect(self._on_hunter_trade_signal)
-            self.hunter.narrator_update.connect(self._on_hunter_narrator_update)
+            self.hunter.status_update.connect(self._on_hunter_status_update, Qt.ConnectionType.QueuedConnection)
+            self.hunter.trade_signal.connect(self._on_hunter_trade_signal, Qt.ConnectionType.QueuedConnection)
+            self.hunter.narrator_update.connect(self._on_hunter_narrator_update, Qt.ConnectionType.QueuedConnection)
 
-        # Cloud Scanner -> UI + Narrator
-        self.cloud_scanner.signal_detected.connect(self._on_cloud_signal)
-        self.cloud_scanner.technical_signal_detected.connect(self._on_technical_signal_detected)
-        self.cloud_scanner.scanner_error.connect(self._on_scanner_error)
-        self.cloud_scanner.ticker_status.connect(self._on_ticker_status_update)
+        # Cloud Scanner -> UI + Narrator (QueuedConnection ensures main-thread delivery)
+        self.cloud_scanner.signal_detected.connect(self._on_cloud_signal, Qt.ConnectionType.QueuedConnection)
+        self.cloud_scanner.technical_signal_detected.connect(self._on_technical_signal_detected, Qt.ConnectionType.QueuedConnection)
+        self.cloud_scanner.scanner_error.connect(self._on_scanner_error, Qt.ConnectionType.QueuedConnection)
+        self.cloud_scanner.ticker_status.connect(self._on_ticker_status_update, Qt.ConnectionType.QueuedConnection)
 
-        # Signal Listener -> UI + Narrator
-        self.signal_listener.signal_received.connect(self._on_signal_received)
-        self.signal_listener.handshake_received.connect(self._on_bridge_handshake_received)
-        self.signal_listener.listener_error.connect(self._on_listener_error)
+        # Signal Listener -> UI + Narrator (QueuedConnection for thread safety)
+        self.signal_listener.signal_received.connect(self._on_signal_received, Qt.ConnectionType.QueuedConnection)
+        self.signal_listener.handshake_received.connect(self._on_bridge_handshake_received, Qt.ConnectionType.QueuedConnection)
+        self.signal_listener.listener_error.connect(self._on_listener_error, Qt.ConnectionType.QueuedConnection)
 
         # Data Scout Listener -> UI + TV Flip + Narrator
         self.data_scout_listener.signal_received.connect(self._on_data_scout_signal)

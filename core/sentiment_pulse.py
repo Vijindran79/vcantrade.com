@@ -542,18 +542,20 @@ class SentimentPulse:
         """
         try:
             # Fetch DXY data (simulated for now, would use yfinance in production)
-            # In production: import yfinance as yf; dxy = yf.Ticker("DX-Y.NYB")
             current_dxy = await self._fetch_dxy_value()
-
-            # Fetch US 10-Year Yield
             current_us10y = await self._fetch_us10y_value()
+
+            # Guard against None returns from simulated fetchers
+            if current_dxy is None or current_us10y is None:
+                logger.debug("[MACRO] Skipping macro update — simulated values returned None")
+                return
 
             # Determine DXY direction
             if self.dxy_trend is not None:
                 dxy_change = current_dxy - self.dxy_trend
-                if dxy_change > 0.10:  # Significant move up
+                if dxy_change > 0.10:
                     self.dxy_direction = "UP"
-                elif dxy_change < -0.10:  # Significant move down
+                elif dxy_change < -0.10:
                     self.dxy_direction = "DOWN"
                 else:
                     self.dxy_direction = "NEUTRAL"
@@ -561,9 +563,9 @@ class SentimentPulse:
             # Determine US10Y direction
             if self.us10y_trend is not None:
                 us10y_change = current_us10y - self.us10y_trend
-                if us10y_change > 0.05:  # Significant move up
+                if us10y_change > 0.05:
                     self.us10y_direction = "UP"
-                elif us10y_change < -0.05:  # Significant move down
+                elif us10y_change < -0.05:
                     self.us10y_direction = "DOWN"
                 else:
                     self.us10y_direction = "NEUTRAL"
@@ -586,13 +588,12 @@ class SentimentPulse:
                 self.macro_history = self.macro_history[-100:]
 
             logger.info(
-                f"[CHART] Macro Indicators Updated: "
-                f"DXY={current_dxy:.2f} ({self.dxy_direction}), "
-                f"US10Y={current_us10y:.2f}% ({self.us10y_direction})"
+                "[CHART] Macro Indicators Updated: DXY=%.2f (%s), US10Y=%.2f%% (%s)",
+                current_dxy, self.dxy_direction, current_us10y, self.us10y_direction,
             )
 
         except Exception as e:
-            logger.error(f"Failed to update macro indicators: {e}")
+            logger.error("Failed to update macro indicators: %s", e)
 
     async def _fetch_dxy_value(self) -> float:
         """Fetch current DXY value (simulated for now)."""
