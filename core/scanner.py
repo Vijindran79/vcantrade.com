@@ -1939,12 +1939,23 @@ class CloudScanner:
                     )
                     or "AUTONOMOUS"
                 ).upper()
+
+                # REGIME GUARD: Don't allow counter-trend liquidity sweeps in strong regimes
+                regime = str(market_data.indicators.get("REGIME", "")).upper()
+                if "LIQUIDITY" in signal.signal_type:
+                    if regime == "STRONG_BULL" and technical_action == "SELL":
+                        logger.warning("[REGIME] REJECTED: SELL %s in STRONG_BULL regime", signal.ticker)
+                        continue
+                    if regime == "STRONG_BEAR" and technical_action == "BUY":
+                        logger.warning("[REGIME] REJECTED: BUY %s in STRONG_BEAR regime", signal.ticker)
+                        continue
                 # If the model collapses to HOLD while the deterministic scanner
                 # has a strong directional setup, keep the trade candidate alive.
                 if (
-                    analysis.action.value == "HOLD"
+                    (analysis.action.value in {"HOLD", "WAIT"})
                     and technical_action in {"BUY", "SELL"}
-                    and signal.strength >= 0.60
+                    and signal.strength >= 0.82
+                    and "LIQUIDITY" in signal.signal_type
                 ):
                     logger.info(
                         "[FIRE] TECHNICAL OVERRIDE: %s %s kept alive as %s "
@@ -1972,7 +1983,17 @@ class CloudScanner:
                 # Sniper triple-check: trend/setup/entry must all align (5m/3m/1m).
                 # If yfinance data is unavailable (futures symbols), skip this gate
                 # and rely on the regime detector + brain swarm for direction.
-                mtf_ok, mtf_votes = await self._evaluate_timeframe_alignment(
+                # AGGRESSIVE MODE: High-strength liquidity signals bypass MTF/LEVEL2 for speed
+                bypass_mtf_level2 = signal.strength >= 0.82 and "LIQUIDITY" in signal.signal_type
+                if bypass_mtf_level2:
+                    logger.info(
+                        "[AGGRESSIVE] High-strength liquidity signal (%.2f) bypassing MTF/LEVEL2 for %s",
+                        signal.strength, signal.ticker,
+                    )
+                    mtf_ok = True
+                    mtf_votes = {}
+                else:
+                    mtf_ok, mtf_votes = await self._evaluate_timeframe_alignment(
                     signal.ticker,
                     analysis.action.value,
                     signal_type=signal.signal_type,
@@ -1997,11 +2018,15 @@ class CloudScanner:
                     )
 
                 signal_price = float(signal.metadata.get("price", market_data.price) or 0.0)
-                level2_ok, level2_structure = await self._evaluate_level2_structure(
-                    signal.ticker,
-                    analysis.action.value,
-                    signal_price,
-                )
+                if bypass_mtf_level2:
+                    level2_ok = True
+                    level2_structure = {"reason": "bypassed for high-strength liquidity signal"}
+                else:
+                    level2_ok, level2_structure = await self._evaluate_level2_structure(
+                        signal.ticker,
+                        analysis.action.value,
+                        signal_price,
+                    )
                 if not level2_ok:
                     logger.info(
                         "[LEVEL2] Structure block: %s %s rejected | %s",

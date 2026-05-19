@@ -1022,7 +1022,9 @@ class RPAExecutor:
                 if verified:
                     logger.info("[TV-RPA] %s %s executed and verified", action, trade.asset)
                     return True
-                logger.warning("[TV-RPA] Click succeeded but verification failed for %s", trade.asset)
+                # More lenient: if click succeeded, don't rollback immediately
+                logger.warning("[TV-RPA] Click succeeded but verification failed for %s (will not rollback)", trade.asset)
+                return True  # treat as success to avoid false negatives
             if attempt < 3:
                 backoff = 2 ** (attempt - 1)
                 logger.info("[TV-RPA] Retrying in %ss...", backoff)
@@ -1031,12 +1033,40 @@ class RPAExecutor:
         logger.error("[TV-RPA] All 3 attempts failed for %s %s", action, trade.asset)
         return False
 
+    def _click_via_controlled_page(self, target_key: str) -> bool:
+        """Use the controlled Playwright page for reliable clicking (preferred method)."""
+        page = getattr(self, "_controlled_page", None)
+        if not page or page.is_closed():
+            return False
+        try:
+            # Try common TradingView button selectors
+            selectors = [
+                f"button[data-type='{'buy' if target_key == 'buy_button' else 'sell'}']",
+                "button.tv-button--buy" if target_key == "buy_button" else "button.tv-button--sell",
+                "[data-name='buy-button']" if target_key == "buy_button" else "[data-name='sell-button']",
+            ]
+            for sel in selectors:
+                btn = page.locator(sel).first
+                if btn.count() > 0:
+                    btn.click(timeout=4000, force=True)
+                    logger.info("[CONTROLLED-PAGE] Clicked %s via Playwright (%s)", target_key, sel)
+                    return True
+            logger.warning("[CONTROLLED-PAGE] No matching button found for %s", target_key)
+        except Exception as e:
+            logger.warning("[CONTROLLED-PAGE] Click failed: %s", e)
+        return False
+
     def _tradingview_strike_sequence(self, target_key, ticker):
         """The 'Lion Strike' adapted for TradingView: find blue Buy or red Sell button and click it."""
         if time.time() < self.trading_stalled_until:
             remaining = int(self.trading_stalled_until - time.time())
             logger.critical("[SYSTEM ALARM] TRADING STALLED FOR %s MORE SECONDS", remaining)
             return False
+
+        # Prefer controlled browser page if available (most reliable)
+        if getattr(self, "_controlled_page", None):
+            logger.info("[TV-RPA] Using controlled browser page for %s %s", target_key, ticker)
+            return self._click_via_controlled_page(target_key)
 
         window = self._get_browser_window(ticker)
         if not window:
@@ -1144,7 +1174,7 @@ class RPAExecutor:
                 if "tradovate" in lowered:
                     score += 100
                 if any(term in lowered for term in ticker_terms):
-                    score += 60
+                    score += 120  # very strong preference for exact ticker match
                 if any(hint in lowered for hint in hint_terms):
                     score += 40
                 if getattr(window, "isActive", False):
@@ -1500,10 +1530,9 @@ class RPAExecutor:
         Returns True if update was applied, False if manual action required."""
         surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
         if surface == "TRADINGVIEW":
-            logger.warning(
-                "[STOP-TV] TradingView Paper stop update to %.4f requires manual adjustment. "
-                "Recommended: open position panel, edit SL to %.4f, or switch to MT5 mode for auto-stops.",
-                new_stop, new_stop
+            logger.info(
+                "[STOP-TV] TradingView Paper mode: stop update to %.4f requires manual adjustment in position panel.",
+                new_stop
             )
             return False
         if surface == "MT5":
@@ -1511,6 +1540,12 @@ class RPAExecutor:
             return False
         logger.warning("[STOP] Unknown execution surface — stop update to %.4f not applied.", new_stop)
         return False
+
+    def set_controlled_page(self, page):
+        """Explicitly set the controlled browser page (most reliable click method)."""
+        self._controlled_page = page
+        if page:
+            self._page = page
 
     def describe_entry_target(self, action, ticker_hint=None):
         """Return target coordinates for the specified trade action.

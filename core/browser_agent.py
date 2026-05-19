@@ -364,8 +364,9 @@ class BrowserAgent:
             return False
 
     async def start(self):
-        """Connect to existing Chrome via CDP. Auto-creates TradingView tab if missing.
-        STURDY BRIDGE: Retries CDP connection 5 times with 5s delay on ECONNREFUSED."""
+        """Launch or connect browser.
+        - headless=False → bot opens its own visible TradingView tab automatically
+        - headless=True  → passive CDP attachment to existing Chrome (original behavior)"""
         if self.is_running:
             logger.warning("Browser agent already running")
             return
@@ -377,7 +378,19 @@ class BrowserAgent:
             try:
                 self.playwright = await async_playwright().start()
 
-                # CDP ONLY: Connect to Chrome/TradingView Desktop — safe fallback to port 9222
+                if not self.headless:
+                    # User wants full control: launch our own visible browser + TradingView
+                    logger.info("[BROWSER] Launching visible Chromium + TradingView (headless=False)")
+                    self.browser = await self.playwright.chromium.launch(headless=False)
+                    self.context = await self.browser.new_context()
+                    self.page = await self.context.new_page()
+                    await self.page.goto("https://www.tradingview.com/chart/", wait_until="domcontentloaded")
+                    self._install_safe_dialog_handler()
+                    self.is_running = True
+                    logger.info("[OK] Browser agent launched visible TradingView tab")
+                    return
+
+                # CDP ONLY: Connect to Chrome/TradingView Desktop
                 cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222")
                 self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
                 contexts = self.browser.contexts

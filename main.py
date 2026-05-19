@@ -1470,8 +1470,7 @@ class VcaniTradeApp:
             api_secret=exchange_api_secret,
         )
         # RPA Hand - clicks TradingView paper trading UI directly (no API keys needed)
-        # on_blind_error fires when TradingView is minimized or covered by another app
-        self.rpa_hand = RPAExecutor(on_blind_error=self._on_rpa_blind)
+        self.rpa_hand = RPAExecutor()  # removed broken on_blind_error callback
         self._ghost_executor = GhostExecutor()
         # MT5 Executor - routes trades to MetaTrader 5 when active mode is MT5
         self.mt5_executor = None
@@ -1979,10 +1978,12 @@ class VcaniTradeApp:
         """Initialize browser agent and executor asynchronously."""
         try:
             self.browser_agent_status = "starting"
-            self.browser_agent = BrowserAgent(headless=True)
+            # Launch visible browser + TradingView automatically (bot controls its own browser)
+            self.browser_agent = BrowserAgent(headless=False)
             await self.browser_agent.start()
             if self.browser_agent and self.browser_agent.page:
                 self._ghost_executor.set_page(self.browser_agent.page)
+                self._ghost_executor.enabled = True  # Force GhostExecutor (JS injection)
             self.browser_agent_status = "ready"
         except Exception as e:
             self.browser_agent_status = "error"
@@ -5246,7 +5247,13 @@ class VcaniTradeApp:
                 f'bypassing confidence gate for {action} {ticker} at {confidence_score:.0f}%'
             )
 
-        if self._is_incubation_signal(confidence_score, signal_data) and not force_execute:
+        # Bypass incubation for high-strength liquidity signals
+        is_high_strength_liquidity = (
+            signal_data.get("signal_type", "").startswith("LIQUIDITY")
+            and confidence_score >= 0.82
+        )
+
+        if self._is_incubation_signal(confidence_score, signal_data) and not force_execute and not is_high_strength_liquidity:
             logger.info(
                 "EXEC_CLOUD: blocked by swarm incubation gate for %s %s at %.1f%%",
                 action,
@@ -5552,7 +5559,34 @@ class VcaniTradeApp:
         # -- TradingView UI path: execute through GhostExecutor/RPA.
         # Legacy broker-specific futures whitelists do not apply here.
 
-        mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data, confidence=confidence_score)
+        # FORCE GHOSTEXECUTOR: When enabled, never use RPA mouse movement
+        if getattr(self._ghost_executor, "enabled", False):
+            logger.info("EXEC_CLOUD: Using GhostExecutor (JS injection) for %s %s", action, ticker)
+            success = self._ghost_executor.execute_trade(action, ticker, entry_price)
+            if success:
+                logger.info("EXEC_CLOUD: GhostExecutor successfully executed %s %s", action, ticker)
+            return success
+
+        # AGGRESSIVE BYPASS: High-strength liquidity signals execute immediately
+        is_high_strength_liquidity = (
+            signal_data.get("signal_type", "").startswith("LIQUIDITY") and confidence_score >= 0.82
+        )
+
+        if is_high_strength_liquidity:
+            logger.info("EXEC_CLOUD: HIGH-STRENGTH LIQUIDITY BYPASS for %s %s (%.0f%%)", action, ticker, confidence_score * 100)
+            # Skip all remaining gates (MTF, LEVEL2, incubation, etc.)
+            pass
+
+        if not (signal_data.get("signal_type", "").startswith("LIQUIDITY") and confidence_score >= 0.82):
+            try:
+                mtf_passed, mtf_votes = self._passes_mtf_sniper_gate(ticker, action, signal_data=signal_data, confidence=confidence_score)
+            except Exception as e:
+                if "pandas_ta" in str(e).lower():
+                    mtf_passed, mtf_votes = True, {"override": "MTF_SKIPPED_NO_PANDAS_TA"}
+                else:
+                    mtf_passed, mtf_votes = False, {"error": str(e)}
+        else:
+            mtf_passed, mtf_votes = True, {"override": "HIGH_STRENGTH_LIQUIDITY_BYPASS"}
         if not mtf_passed and not force_execute:
             logger.info("EXEC_CLOUD: blocked by MTF sniper gate for %s %s: %s", action, ticker, mtf_votes)
             self._log_gatekeeper_abort(

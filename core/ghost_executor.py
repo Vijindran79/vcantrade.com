@@ -120,6 +120,15 @@ class GhostExecutor:
         """Attach an externally managed MT5 executor for direct API routing."""
         self._mt5_executor = executor
 
+    async def execute_trade(self, symbol: str, action: str, volume: float = 0.0) -> bool:
+        """Primary entry point: execute via TradingView JS injection or MT5."""
+        action = str(action).strip().upper()
+        if action in ("BUY", "SELL", "CLOSE"):
+            success = await self.execute_js(action)
+            if success:
+                return True
+        return self.execute_mt5(symbol, action, volume)
+
     def execute_mt5(self, symbol: str, action: str, volume: float = 0.0) -> bool:
         """Execute through the attached MT5 executor if one is available."""
         if not self._mt5_executor:
