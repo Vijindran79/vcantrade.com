@@ -118,9 +118,11 @@ class CommandCenter(QWidget):
         self.watchlist_sync_timer = QTimer(self)
         self.watchlist_sync_timer.setSingleShot(True)
         self.watchlist_sync_timer.timeout.connect(self._sync_watchlist_from_inputs)
+        # Glow timer slowed to 2s to reduce Qt thread contention with background
+        # signal emissions. The visual effect is still clear at this interval.
         self.confidence_glow_timer = QTimer(self)
         self.confidence_glow_timer.timeout.connect(self._pulse_confidence_rows)
-        self.confidence_glow_timer.start(650)
+        self.confidence_glow_timer.start(2000)
 
         self._setup_window()
         self._build_ui()
