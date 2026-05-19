@@ -27,7 +27,7 @@ echo.
 
 REM Run the bot
 cd /d "%SCRIPT_DIR%"
-python main.py
+"C:\Users\vijin\AppData\Local\Programs\Python\Python311\python.exe" main.py
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

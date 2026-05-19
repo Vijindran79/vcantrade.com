@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 import pandas as pd
-import pandas_ta as ta
+from ta import momentum, trend, volatility
 import aiohttp
 
 # Lazy import MetaTrader5 — only loaded when EXECUTION_MODE == "MT5"
@@ -1357,9 +1357,9 @@ class CloudScanner:
                 votes[label] = "WAIT"
                 continue
 
-            fast = ta.sma(df["Close"], length=9)
-            slow = ta.sma(df["Close"], length=21)
-            rsi = ta.rsi(df["Close"], length=14)
+            fast = trend.sma_indicator(df["Close"], window=9)
+            slow = trend.sma_indicator(df["Close"], window=21)
+            rsi = momentum.rsi(df["Close"], window=14)
 
             f = fast.iloc[-1]
             s = slow.iloc[-1]
@@ -1510,17 +1510,17 @@ class CloudScanner:
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate technical indicators (RSI, SMA, etc.)."""
         # RSI (14-period)
-        df["RSI"] = ta.rsi(df["Close"], length=14)
+        df["RSI"] = momentum.rsi(df["Close"], window=14)
 
         # SMA (20 and 50 period)
-        df["SMA_FAST"] = ta.sma(df["Close"], length=config.SMA_FAST)
-        df["SMA_SLOW"] = ta.sma(df["Close"], length=config.SMA_SLOW)
+        df["SMA_FAST"] = trend.sma_indicator(df["Close"], window=config.SMA_FAST)
+        df["SMA_SLOW"] = trend.sma_indicator(df["Close"], window=config.SMA_SLOW)
 
         # Volume moving average
-        df["VOL_MA"] = ta.sma(df["Volume"], length=20)
+        df["VOL_MA"] = trend.sma_indicator(df["Volume"], window=20)
 
         # ATR (14-period) for Gemini data package
-        df["ATR"] = ta.atr(df["High"], df["Low"], df["Close"], length=14)
+        df["ATR"] = volatility.average_true_range(df["High"], df["Low"], df["Close"], window=14)
 
         return df
 
