@@ -2302,17 +2302,22 @@ class CloudScanner:
         signal_weight = 0.05  # Small weight for technical signal strength
 
         # [DEVIL] Devil's Advocate Penalty - Reduce confidence if risks identified
+        # Capped at -0.10 max so the Devil doesn't kill every signal.
+        # The regime detector already blocks counter-trend trades; the Devil
+        # should only nudge, not veto.
         devils_penalty = 0.0
         if (
             transcript
             and hasattr(transcript, "devils_advocate")
             and transcript.devils_advocate
         ):
-            devils_penalty = transcript.devils_advocate.get("confidence_penalty", 0.0)
+            raw_penalty = float(transcript.devils_advocate.get("confidence_penalty", 0.0) or 0.0)
+            # Cap the penalty at -0.10 (was uncapped, often -0.25 to -0.35)
+            devils_penalty = max(raw_penalty, -0.10)
             rating = transcript.devils_advocate.get("rating", "NEUTRAL")
             if rating in ["STRONG_AVOID", "CAUTIOUS"]:
                 logger.warning(
-                    f"[DEVIL] Devil's Advocate applied {devils_penalty:.2f} penalty "
+                    f"[DEVIL] Devil's Advocate penalty: {raw_penalty:.2f} -> capped to {devils_penalty:.2f} "
                     f"(rating: {rating})"
                 )
 
