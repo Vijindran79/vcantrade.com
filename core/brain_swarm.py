@@ -559,11 +559,14 @@ class OllamaSwarmConsensus:
     def _build_fallback_brain_prompt(self, proposed_action: str, package: dict[str, Any]) -> str:
         candles_json = json.dumps(package.get("recent_ohlcv", []), ensure_ascii=False)
         zones_json = json.dumps(package.get("liquidity_zones", []), ensure_ascii=False)
+        regime_context = package.get("regime_context", "")
         return f"""{PREDATOR_SYSTEM_INSTRUCTION}
 
 You are the local Predator fallback strike gate.
 
 Review the proposed {str(proposed_action or 'WAIT').upper()}.
+
+{regime_context}
 
 Market snapshot:
 - Signal type: {package.get('signal_type', 'UNKNOWN')}
@@ -573,6 +576,13 @@ Market snapshot:
 - Current ATR: {package.get('atr', 0.0)}
 - Primary liquidity label: {package.get('liquidity_zone_label', 'N/A')}
 - Nearest liquidity zone coordinates: {zones_json}
+
+CRITICAL RULES:
+- If the MARKET REGIME says CHOPPY or the regime score is between -20 and +20, you MUST return WAIT.
+- If the regime says STRONG_BEAR and the proposed action is BUY, you MUST return WAIT.
+- If the regime says STRONG_BULL and the proposed action is SELL, you MUST return WAIT.
+- Only confirm BUY when regime is LEAN_BULL or STRONG_BULL.
+- Only confirm SELL when regime is LEAN_BEAR or STRONG_BEAR.
 
 Return JSON only:
 {{"verdict":"[SIGNAL] BUY or [SIGNAL] SELL or [SIGNAL] WAIT","reasoning":"one short execution reason under 240 chars"}}

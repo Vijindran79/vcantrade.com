@@ -1527,7 +1527,9 @@ class CloudScanner:
     def _build_brain_package(
         self, df: pd.DataFrame, liquidity_zone: Optional[dict]
     ) -> dict:
-        """Build the Gemini data package from the latest candles and liquidity geometry."""
+        """Build the data package from the latest candles, liquidity geometry, and market regime."""
+        from core.regime_detector import RegimeDetector
+
         recent = df.tail(10).copy() if df is not None else pd.DataFrame()
         recent_ohlcv = []
         recent_lines = []
@@ -1573,12 +1575,26 @@ class CloudScanner:
                 }
             )
 
+        # --- MARKET REGIME (hard math, no LLM) ---
+        regime_context = ""
+        regime_data = {}
+        try:
+            detector = RegimeDetector()
+            verdict = detector.analyze(df)
+            if verdict:
+                regime_context = verdict.as_prompt_context()
+                regime_data = verdict.as_dict()
+        except Exception as e:
+            logger.debug("[REGIME] Could not compute regime for brain package: %s", e)
+
         return {
             "recent_ohlcv": recent_ohlcv,
             "recent_candle_lines": recent_lines,
             "rsi": rsi_value,
             "atr": atr_value,
             "liquidity_zones": liquidity_zones,
+            "regime_context": regime_context,
+            "regime": regime_data,
         }
 
     def _detect_volume_spike(
