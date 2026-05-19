@@ -21,6 +21,8 @@ TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  (
 TP_HIGH_CONFIDENCE_MIN = 150.0 # Minimum target when AI confidence >= 85% ($150)
 TP_HIGH_CONFIDENCE_MAX = 200.0 # Maximum target when AI confidence >= 85% ($200)
 # Fast-trailing stop: lock break-even + trail after N dollars in profit
+# LEGACY: These fixed-dollar values are now overridden by ATR-based logic
+# in the execution path. Kept as absolute fallbacks only.
 TRAILING_STOP_ACTIVATE_AFTER_PROFIT = 30.0  # $30 profit before trailing activates
 TRAILING_STOP_DISTANCE = 15.0              # $15 trail distance after activation
 
@@ -466,7 +468,7 @@ RSI_OVERSOLD = 30
 SMA_FAST = 20
 SMA_SLOW = 50
 SWARM_INCUBATION_FLOOR = float(os.getenv("SWARM_INCUBATION_FLOOR", "60.0"))
-SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "85.0"))
+SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "90.0"))
 SWARM_CONFIDENCE_THRESHOLD = SWARM_INCUBATION_FLOOR / 100.0
 MIN_CONFIDENCE_THRESHOLD = SWARM_INCUBATION_FLOOR
 VISUAL_ALERT_MIN_CONFIDENCE = SWARM_HIGH_PRIORITY_THRESHOLD / 100.0
@@ -531,8 +533,17 @@ MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 AGGRESSIVE_HUNTER_CONFIDENCE_PCT = float(os.getenv("AGGRESSIVE_HUNTER_CONFIDENCE_PCT", "65.0"))
 
 # ===== AUTONOMOUS RISK MANAGEMENT =====
-AUTONOMOUS_BREAK_EVEN_TRIGGER_USD = 15.0
-AUTONOMOUS_BREAK_EVEN_PLUS_USD = 2.0
+# ATR-driven risk management (replaces fixed-dollar thresholds).
+# Break-even triggers when trade is up 1× ATR from entry.
+# Trailing stop follows at 1× ATR behind the best price.
+# These ATR multipliers are the core risk logic:
+ATR_STOP_MULTIPLIER = float(os.getenv("ATR_STOP_MULTIPLIER", "1.5"))       # SL = entry ± ATR × 1.5
+ATR_TP_MULTIPLIER = float(os.getenv("ATR_TP_MULTIPLIER", "3.0"))           # TP = entry ± ATR × 3.0 (2:1 R:R)
+ATR_BREAKEVEN_MULTIPLIER = float(os.getenv("ATR_BREAKEVEN_MULTIPLIER", "1.0"))  # Move to BE after 1× ATR profit
+ATR_TRAIL_MULTIPLIER = float(os.getenv("ATR_TRAIL_MULTIPLIER", "1.0"))     # Trail at 1× ATR behind best price
+# Legacy fixed-dollar fallbacks (used only when ATR data is unavailable):
+AUTONOMOUS_BREAK_EVEN_TRIGGER_USD = float(os.getenv("AUTONOMOUS_BREAK_EVEN_TRIGGER_USD", "15.0"))
+AUTONOMOUS_BREAK_EVEN_PLUS_USD = float(os.getenv("AUTONOMOUS_BREAK_EVEN_PLUS_USD", "2.0"))
 AUTONOMOUS_TRAILING_LOOKBACK_BARS = 3
 AUTONOMOUS_TRAILING_UPDATE_SECONDS = 60
 

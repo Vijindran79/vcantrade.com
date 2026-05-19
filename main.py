@@ -5350,13 +5350,61 @@ class VcaniTradeApp:
         auto_risk_enabled = bool(self.settings.get("auto_risk_enabled", True))
         tp_price = 0.0
         if auto_risk_enabled:
-            sl_price = self._derive_structure_stop_loss(action, entry_price, signal_data, risk_eval)
-            # Auto-risk TP: 1.5x the SL distance (short: TP below entry, long: TP above entry)
-            sl_dist = abs(entry_price - sl_price) if sl_price > 0 else entry_price * 0.01
-            if action == "SELL":
-                tp_price = entry_price - (sl_dist * 1.5)
+            # ATR-DRIVEN STOP LOSS & TAKE PROFIT
+            # The bot uses the 14-period ATR to set stops that breathe with
+            # volatility. No more fixed-dollar thresholds that get stopped out
+            # by noise on NQ but are too wide on CL.
+            atr_value = float(signal_data.get("atr", 0.0) or 0.0)
+            if atr_value <= 0:
+                # Fallback: estimate ATR from recent price action if scanner didn't provide it
+                atr_value = entry_price * 0.005  # 0.5% of price as rough ATR proxy
+
+            atr_sl_multiplier = float(getattr(config, "ATR_STOP_MULTIPLIER", 1.5))
+            atr_tp_multiplier = float(getattr(config, "ATR_TP_MULTIPLIER", 3.0))
+            atr_stop_distance = atr_value * atr_sl_multiplier
+            atr_tp_distance = atr_value * atr_tp_multiplier
+
+            # Primary: ATR-based stop
+            if action == "BUY":
+                atr_sl = entry_price - atr_stop_distance
+                atr_tp = entry_price + atr_tp_distance
             else:
-                tp_price = entry_price + (sl_dist * 1.5)
+                atr_sl = entry_price + atr_stop_distance
+                atr_tp = entry_price - atr_tp_distance
+
+            # Secondary: Structure-based stop (nearest S/R level)
+            structure_sl = self._derive_structure_stop_loss(action, entry_price, signal_data, risk_eval)
+
+            # Use the TIGHTER of ATR stop and structure stop (more protective)
+            # but never tighter than 0.3% (avoids noise stop-outs)
+            min_stop_distance = entry_price * 0.003  # 0.3% absolute minimum
+            if structure_sl > 0:
+                if action == "BUY":
+                    sl_price = max(atr_sl, structure_sl)  # Tighter = higher for BUY
+                    sl_price = min(sl_price, entry_price - min_stop_distance)  # But not too tight
+                else:
+                    sl_price = min(atr_sl, structure_sl)  # Tighter = lower for SELL
+                    sl_price = max(sl_price, entry_price + min_stop_distance)
+            else:
+                sl_price = atr_sl
+
+            tp_price = atr_tp
+
+            # Log the ATR-driven risk plan
+            rr_ratio = atr_tp_distance / max(atr_stop_distance, 0.0001)
+            logger.info(
+                "[ATR-RISK] %s %s | ATR=%.4f | SL=%.4f (%.2f%% from entry) | "
+                "TP=%.4f (%.2f%% from entry) | R:R=%.1f:1",
+                ticker, action, atr_value,
+                sl_price, abs(entry_price - sl_price) / entry_price * 100,
+                tp_price, abs(tp_price - entry_price) / entry_price * 100,
+                rr_ratio,
+            )
+            self.cmd.log(
+                f'<span style="color:#00D4FF;font-weight:bold">[ATR RISK]</span> '
+                f'{action} {ticker} | ATR={atr_value:.2f} | '
+                f'SL=${sl_price:.2f} | TP=${tp_price:.2f} | R:R={rr_ratio:.1f}:1'
+            )
         else:
             sl_price, tp_price = self._manual_risk_targets(action, entry_price)
             self.cmd.log(
