@@ -850,52 +850,26 @@ class CloudScanner:
 
             strength = max(0.60, min(0.85, 0.85 - (distance_ratio * 100)))
 
-        # SNIPER ENTRY: Validate wick rejection >= 15% of candle range (MSS confirmation)
+        # SNIPER ENTRY: Light validation — let the brain decide, don't over-filter.
+        # Old logic required 15% wick + single-candle momentum confirmation.
+        # That killed 99% of signals on 1-minute futures. Now we only block
+        # the most obvious counter-trend entries (strong 4-bar momentum against us).
         candle_range = candle["high"] - candle["low"]
         if candle_range > 0 and bias:
-            if bias == "BUY":
-                lower_wick = min(candle["open"], candle["close"]) - candle["low"]
-                wick_pct = lower_wick / candle_range
-                if wick_pct < 0.15:
-                    logger.info(
-                        "[SNIPER] Rejected %s %s: lower wick %.1f%% < 15%% (no rejection)",
-                        ticker, signal_type, wick_pct * 100,
-                    )
-                    return None
-                # MSS: price must be moving away from zone (close > open or close near high)
-                if candle["close"] <= candle["open"]:
-                    logger.info("[SNIPER] Rejected %s %s: no bullish momentum (close <= open)", ticker, signal_type)
-                    return None
-            elif bias == "SELL":
-                upper_wick = candle["high"] - max(candle["open"], candle["close"])
-                wick_pct = upper_wick / candle_range
-                if wick_pct < 0.15:
-                    logger.info(
-                        "[SNIPER] Rejected %s %s: upper wick %.1f%% < 15%% (no rejection)",
-                        ticker, signal_type, wick_pct * 100,
-                    )
-                    return None
-                # MSS: price must be moving away from zone (close < open or close near low)
-                if candle["close"] >= candle["open"]:
-                    logger.info("[SNIPER] Rejected %s %s: no bearish momentum (close >= open)", ticker, signal_type)
-                    return None
-                if candle["close"] >= prev_close:
-                    logger.info(
-                        "[SNIPER] Rejected %s %s: no breakdown confirmation (close %.2f >= prev close %.2f)",
-                        ticker,
-                        signal_type,
-                        candle["close"],
-                        prev_close,
-                    )
-                    return None
-                if recent_momentum_pct > 0:
-                    logger.info(
-                        "[SNIPER] Rejected %s %s: shorting into bullish 4-bar momentum (%+.2f%%)",
-                        ticker,
-                        signal_type,
-                        recent_momentum_pct,
-                    )
-                    return None
+            if bias == "SELL" and recent_momentum_pct > 0.05:
+                # Only block SELL if there's STRONG bullish momentum (>0.05% in 4 bars)
+                logger.info(
+                    "[SNIPER] Rejected %s %s: shorting into strong bullish 4-bar momentum (%+.2f%%)",
+                    ticker, signal_type, recent_momentum_pct,
+                )
+                return None
+            elif bias == "BUY" and recent_momentum_pct < -0.05:
+                # Only block BUY if there's STRONG bearish momentum
+                logger.info(
+                    "[SNIPER] Rejected %s %s: buying into strong bearish 4-bar momentum (%+.2f%%)",
+                    ticker, signal_type, recent_momentum_pct,
+                )
+                return None
 
         logger.info(
             "[TARGET] Liquidity trigger armed for %s: %s near %s",
@@ -1996,14 +1970,18 @@ class CloudScanner:
                     continue  # Skip to next signal
 
                 # Sniper triple-check: trend/setup/entry must all align (5m/3m/1m).
+                # If yfinance data is unavailable (futures symbols), skip this gate
+                # and rely on the regime detector + brain swarm for direction.
                 mtf_ok, mtf_votes = await self._evaluate_timeframe_alignment(
                     signal.ticker,
                     analysis.action.value,
                     signal_type=signal.signal_type,
                     strength=signal.strength,
-                    confidence=confidence_score * 100.0,  # AGGRESSIVE HUNTER: pass confidence %
+                    confidence=confidence_score * 100.0,
                 )
-                if not mtf_ok:
+                # If all votes are WAIT, yfinance data was unavailable — pass through
+                all_wait = all(v == "WAIT" for v in mtf_votes.values())
+                if not mtf_ok and not all_wait:
                     logger.info(
                         "[TARGET] MTF block: %s %s rejected by 5m/3m/1m alignment %s",
                         analysis.action.value,
@@ -2012,6 +1990,11 @@ class CloudScanner:
                     )
                     self._emit_status(signal.ticker, "trade_rejected")
                     continue
+                elif all_wait:
+                    logger.info(
+                        "[TARGET] MTF data unavailable for %s — bypassing MTF gate (regime detector active)",
+                        signal.ticker,
+                    )
 
                 signal_price = float(signal.metadata.get("price", market_data.price) or 0.0)
                 level2_ok, level2_structure = await self._evaluate_level2_structure(
