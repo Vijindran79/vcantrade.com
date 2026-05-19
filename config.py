@@ -105,7 +105,7 @@ SYMBOL_MAP = {
     "CL=F": os.getenv("MT5_CL_SYMBOL", "WTI_SB"),
     "CL1!": os.getenv("MT5_CL_SYMBOL", "WTI_SB"),
     "CLM26": os.getenv("MT5_CLM26_SYMBOL", "WTI_SB"),  # Legacy alias only
-    "MGC": os.getenv("MT5_MGC_SYMBOL", "XAUUSD"),
+    "MGC": os.getenv("MT5_MGC_SYMBOL", "XAUUSD_SB"),
 }
 
 # Extra exact candidates to try before fuzzy searching the MT5 symbol list.
@@ -113,7 +113,7 @@ SYMBOL_BRIDGE_CANDIDATES = {
     "CL=F": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),
     "CL1!": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),
     "CLM26": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),  # Legacy alias only
-    "MGC": ("XAUUSD", "GOLD_SB", "Gold_SB", "Gold", "XAU", "MGC"),
+    "MGC": ("XAUUSD_SB", "XAUUSD", "Gold_SB", "Gold", "XAU", "MGC"),
     "NQM6": ("NQM6", "NAS100_SB", "NAS100", "MNQ"),
     "ESM6": ("ESM6", "US500_SB", "US500", "MES"),
 }
@@ -356,8 +356,12 @@ MT5_SYMBOL_MAP = {
     "SI": "XAGUSD",
     "YM": "YM1!",
     # Gold / Silver
-    "XAUUSD": "Gold_SB",
-    "Gold_SB": "Gold_SB",
+    "XAUUSD": "XAUUSD_SB",
+    "Gold_SB": "XAUUSD_SB",
+    "COMEX:MGC1!": "XAUUSD_SB",
+    "GC=F": "XAUUSD_SB",
+    "GC": "XAUUSD_SB",
+    "MGC": "XAUUSD_SB",
     # Fuzzy fallback fragments (used by scanner fuzzy search)
     "Crude": "Crude_SB",
     "WTI": "Crude_SB",
