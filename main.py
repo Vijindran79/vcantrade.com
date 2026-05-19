@@ -1589,7 +1589,10 @@ class VcaniTradeApp:
         # State
         self._manual_mode_override = False
         self._settings_mode_cache = "TEACHER" if self._teacher_mode_forced_by_config() else "AUTONOMOUS"
-        self.current_mode = "TEACHER" if self._teacher_mode_forced_by_config() or config.DRY_RUN else "AUTONOMOUS"
+        # Boot in TEACHER only when config explicitly forces it. DRY_RUN alone
+        # does NOT force TEACHER any more — paper Autonomous is the normal way
+        # to test the bot.
+        self.current_mode = "TEACHER" if self._teacher_mode_forced_by_config() else "AUTONOMOUS"
         self.analysis_mode = False
         self.latest_signals = {}
         self.ticker_selector = self.current_watchlist[0] if self.current_watchlist else "BTC-USD"
@@ -2107,9 +2110,15 @@ class VcaniTradeApp:
         if requested == "AUTONOMOUS" and self._teacher_mode_forced_by_config():
             logger.info("[MODE] Ignoring AUTONOMOUS request from %s because Teacher mode is config-forced", source)
             return "TEACHER"
+        # IMPORTANT: DRY_RUN no longer forces TEACHER. Autonomous in paper mode
+        # is the whole point of paper testing — you watch the bot click on its
+        # own with simulated fills. Real-money safety stays guarded by DRY_RUN
+        # checks deeper in the executor, not here.
         if requested == "AUTONOMOUS" and bool(getattr(config, "DRY_RUN", False)):
-            logger.info("[MODE] Ignoring AUTONOMOUS request from %s while DRY_RUN is enabled", source)
-            return "TEACHER"
+            logger.info(
+                "[MODE] %s switched to AUTONOMOUS in PAPER mode (DRY_RUN=True) - simulated orders only",
+                source,
+            )
         return requested
 
     def _set_runtime_mode(self, mode: str, source: str = "runtime", manual: bool = False) -> str:
@@ -6033,11 +6042,14 @@ class VcaniTradeApp:
     def _on_dry_run_changed(self, is_dry_run: bool):
         """Keep the runtime engine aligned with the dashboard dry-run toggle."""
         config.DRY_RUN = bool(is_dry_run)
-        if is_dry_run and self.current_mode == "AUTONOMOUS":
-            self._set_runtime_mode("TEACHER", source="dry_run")
-            self._apply_mode_to_dashboard("TEACHER")
+        # PAPER mode no longer forces TEACHER. Autonomous + DRY_RUN means
+        # "let the bot click on its own with simulated fills" — exactly what
+        # paper trading is for.
+        if is_dry_run:
+            self.cmd.log("[PAPER] DRY_RUN is ON - orders will be simulated, no real money at risk")
         else:
-            self._set_runtime_mode(self.current_mode, source="dry_run")
+            self.cmd.log("[LIVE] DRY_RUN is OFF - orders will be sent to your broker")
+        self._set_runtime_mode(self.current_mode, source="dry_run")
         logger.info("Dry run changed to %s", config.DRY_RUN)
 
     def _on_ticker_changed(self, ticker: str):
@@ -6822,7 +6834,7 @@ def main():
         print("Another VcaniTrade dashboard instance is already running. Exiting.")
         return
 
-    initial_mode = "TEACHER" if _teacher_mode_forced_by_config() or config.DRY_RUN else "AUTONOMOUS"
+    initial_mode = "TEACHER" if _teacher_mode_forced_by_config() else "AUTONOMOUS"
     trading_mode = "PAPER (dry run)" if config.DRY_RUN else "LIVE"
 
     print("=" * 60)
