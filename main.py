@@ -174,6 +174,10 @@ def _teacher_mode_forced_by_config() -> bool:
 
 def _is_passive_visual_mode() -> bool:
     """Return True when the bot must not capture browser/desktop screenshots."""
+    # OVERRIDE: Active TradingView execution needs screenshots for vision analysis
+    active_surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
+    if active_surface == "TRADINGVIEW":
+        return False
     execution_mode = str(getattr(config, "EXECUTION_MODE", "")).upper().strip()
     trading_surface = str(getattr(config, "TRADING_SURFACE", "")).upper().strip()
     return execution_mode in {
@@ -1118,7 +1122,7 @@ class MultiAssetHunterThread(QThread):
             threat = result.get("threat", "MEDIUM")
             reason = result.get("reason", "No reason")
 
-            self.status_update.emit(symbol, f"SIGNAL_{signal}", reason)
+            self.status_update.emit(symbol, f"SIGNAL_{signal}", f"{confidence}% | {reason}")
 
             # 4. INTELLIGENCE LAYER: Rich analysis narrative to Activity Feed
             self._emit_hunter_intelligence(symbol, signal, confidence, threat, reason)
@@ -1984,6 +1988,14 @@ class VcaniTradeApp:
             if self.browser_agent and self.browser_agent.page:
                 self._ghost_executor.set_page(self.browser_agent.page)
                 self._ghost_executor.enabled = True  # Force GhostExecutor (JS injection)
+            # Connect CDP page to RPA hand for hybrid click strategy
+            if hasattr(self, 'rpa_hand') and self.browser_agent.page:
+                self.rpa_hand.set_controlled_page(self.browser_agent.page, self._browser_loop)
+            # Wire page-switch callback so RPA hand follows tab changes
+            def _page_switched(new_page):
+                if hasattr(self, 'rpa_hand'):
+                    self.rpa_hand.set_controlled_page(new_page, self._browser_loop)
+            self.browser_agent._on_page_switched = _page_switched
             self.browser_agent_status = "ready"
         except Exception as e:
             self.browser_agent_status = "error"
@@ -2031,6 +2043,9 @@ class VcaniTradeApp:
                     ai_narrator=self.ai_narrator,
                 )
                 self._browser_executor_initialized = True
+                # Ensure RPA hand has the controlled page
+                if hasattr(self, 'rpa_hand') and self.browser_agent.page:
+                    self.rpa_hand.set_controlled_page(self.browser_agent.page, self._browser_loop)
                 if not self._browser_ready_announced:
                     self._browser_ready_announced = True
                     self.cmd.log("[GLOBE] Browser agent ready - autonomous price checking ready")
@@ -6179,6 +6194,24 @@ class VcaniTradeApp:
         """Update UI when the Multi-Asset Hunter cycles through symbols."""
         self.cmd.log(f"[HUNTER] {symbol} | {status}: {message}")
         self.ai_narrator.add_activity("[HUNTER]", f"{symbol} {status}")
+
+        # Route hunter status to dashboard watchlist for live signal/confidence display
+        import re as _re
+        if status.startswith("SIGNAL_"):
+            signal = status.replace("SIGNAL_", "")
+            conf_match = _re.search(r'(\d+)%', message)
+            confidence = int(conf_match.group(1)) / 100.0 if conf_match else 0.85
+            self.cmd.update_watchlist_status(symbol, "awaiting_strike", confidence=confidence, last_signal=signal)
+        elif status == "OBSERVING":
+            self.cmd.update_watchlist_status(symbol, "scanning")
+        elif status == "SCREENSHOT":
+            self.cmd.update_watchlist_status(symbol, "scanning")
+        elif status == "ANALYZING":
+            self.cmd.update_watchlist_status(symbol, "analyzing_liquidity")
+        elif status.startswith("SKIPPED_"):
+            self.cmd.update_watchlist_status(symbol, "trade_rejected")
+        elif status == "ERROR":
+            self.cmd.update_watchlist_status(symbol, "trade_rejected")
 
     def _on_hunter_narrator_update(self, icon: str, message: str):
         """Thread-safe relay: Hunter thread -> main GUI thread -> Activity Feed."""

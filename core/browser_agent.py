@@ -54,12 +54,17 @@ class BrowserAgent:
         self._last_cache_clear_date: Optional[str] = None
         # NAVIGATION GUARD: track symbols that failed with ERR_ABORTED (skip for 5 min)
         self._failed_symbols: Dict[str, float] = {}  # symbol -> timestamp of failure
+        self._on_page_switched = None  # Optional callback when active page changes
 
         logger.info(f"[GLOBE] Browser Agent initialized (headless={headless})")
 
     @staticmethod
     def _is_passive_observer_mode() -> bool:
-        """The browser agent is permanently eyes-only for the local CDP workflow."""
+        """Return True only when the active surface is NOT TradingView (i.e. MT5 or passive mode).
+        When ACTIVE_EXECUTION_SURFACE=TRADINGVIEW we want real clicks via CDP."""
+        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper().strip()
+        if surface == "TRADINGVIEW":
+            return False
         return True
 
     def _observer_log(self, symbol: str = "") -> None:
@@ -364,118 +369,73 @@ class BrowserAgent:
             return False
 
     async def start(self):
-        """Launch or connect browser.
-        - headless=False → bot opens its own visible TradingView tab automatically
-        - headless=True  → passive CDP attachment to existing Chrome (original behavior)"""
+        """Always prefer existing Chrome on BROWSER_CDP_URL (port 9222).
+        Never launch the bot's own browser unless CDP is completely unavailable.
+        This keeps the user's existing paper trading tab and avoids extra windows."""
         if self.is_running:
             logger.warning("Browser agent already running")
             return
 
         MAX_CDP_RETRIES = 5
-        CDP_RETRY_DELAY = 5  # seconds
+        CDP_RETRY_DELAY = 5
 
         for attempt in range(1, MAX_CDP_RETRIES + 1):
             try:
                 self.playwright = await async_playwright().start()
 
-                if not self.headless:
-                    # User wants full control: launch our own visible browser + TradingView
-                    logger.info("[BROWSER] Launching visible Chromium + TradingView (headless=False)")
-                    self.browser = await self.playwright.chromium.launch(headless=False)
-                    self.context = await self.browser.new_context()
-                    self.page = await self.context.new_page()
-                    await self.page.goto("https://www.tradingview.com/chart/", wait_until="domcontentloaded")
-                    self._install_safe_dialog_handler()
-                    self.is_running = True
-                    logger.info("[OK] Browser agent launched visible TradingView tab")
-                    return
-
-                # CDP ONLY: Connect to Chrome/TradingView Desktop
+                # ALWAYS try CDP first (user's existing Chrome with --remote-debugging-port=9222)
                 cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222")
+                logger.info("[CDP] Attempting connection to existing Chrome at %s", cdp_url)
                 self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
                 contexts = self.browser.contexts
                 if not contexts:
-                    logger.error("[FAIL] No contexts found in Chrome CDP connection at %s", cdp_url)
                     raise RuntimeError(f"No contexts in Chrome CDP connection: {cdp_url}")
 
-                if self._is_passive_observer_mode():
-                    for ctx in reversed(contexts):
-                        pages = ctx.pages
-                        if pages:
-                            self.context = ctx
-                            self.page = pages[-1]
-                            self._install_safe_dialog_handler()
-                            self.is_running = True
-                            self._observer_log("active tab")
-                            logger.info("[OK] Browser agent attached passively to tab: %s", self.page.url[:80])
-                            return
-                    raise RuntimeError(
-                        "Passive observer mode requires an existing open Chrome tab. "
-                        "Open TradingView/Tradovate first."
-                    )
-
-                # Search for an existing TradingView tab.
+                # Pick the most recent page (user's current TradingView chart)
                 selected_page = None
                 selected_context = None
-                for ctx in contexts:
-                    for pg in ctx.pages:
-                        url_lower = (pg.url or "").lower()
-                        if "tradingview" in url_lower:
-                            selected_page = pg
-                            selected_context = ctx
-                            break
-                    if selected_page:
+                for ctx in reversed(contexts):
+                    pages = ctx.pages
+                    if pages:
+                        selected_context = ctx
+                        selected_page = pages[-1]
                         break
 
                 if selected_page:
-                    self.page = selected_page
                     self.context = selected_context
+                    self.page = selected_page
                     self._install_safe_dialog_handler()
                     self.is_running = True
-                    logger.info("[OK] Browser agent connected to tab: %s", selected_page.url[:80])
+                    logger.info("[OK] Connected to existing Chrome tab: %s", self.page.url[:80])
                     return
 
-                # No chart tab found - create TradingView, not WealthCharts.
+                # No pages at all — create one in the existing context
                 self.context = contexts[0]
                 chart_url = getattr(config, "TRADINGVIEW_URL", "https://www.tradingview.com/chart/")
-                logger.info("[AUTO] No TradingView tab found. Creating new tab via CDP context -> %s ...", chart_url)
                 self.page = await self.context.new_page()
                 self._install_safe_dialog_handler()
-                success = await self._safe_navigate(chart_url, wait_until="domcontentloaded", timeout=30000)
-                if not success:
-                    raise Exception(f"Failed to navigate to {chart_url}")
-                logger.info("[AUTO] Navigated to TradingView: %s", self.page.url[:80])
-
-                # Login detection
-                await self._handle_login_wait()
-
+                await self.page.goto(chart_url, wait_until="domcontentloaded")
                 self.is_running = True
-                asyncio.create_task(self._dom_cleanup_loop())
-                return  # SUCCESS — exit retry loop
+                logger.info("[OK] Created new tab in existing Chrome: %s", chart_url)
+                return
 
             except Exception as e:
                 err_text = str(e).lower()
-                is_conn_refused = "econnrefused" in err_text or "10061" in err_text or "connection refused" in err_text or "actively refused" in err_text
+                is_conn_refused = "econnrefused" in err_text or "10061" in err_text or "connection refused" in err_text
 
                 if is_conn_refused and attempt < MAX_CDP_RETRIES:
-                    logger.warning(
-                        "[BRIDGE] CDP ECONNREFUSED on attempt %d/%d — Chrome may be restarting. "
-                        "Waiting %ds before retry...",
-                        attempt, MAX_CDP_RETRIES, CDP_RETRY_DELAY,
-                    )
-                    # Clean up partial Playwright instance before retry
+                    logger.warning("[CDP] Connection refused (attempt %d/%d) — retrying in %ds", attempt, MAX_CDP_RETRIES, CDP_RETRY_DELAY)
                     try:
                         await self.playwright.stop()
                     except Exception:
                         pass
                     await asyncio.sleep(CDP_RETRY_DELAY)
-                    continue  # Retry
-                else:
-                    # Non-ECONNREFUSED error or final retry exhausted
-                    logger.error("[FAIL] CDP connection failed on attempt %d/%d: %s", attempt, MAX_CDP_RETRIES, e)
-                    if attempt >= MAX_CDP_RETRIES:
-                        logger.error("[BRIDGE] All %d CDP retries exhausted — triggering self-heal", MAX_CDP_RETRIES)
-                    raise
+                    continue
+
+                logger.error("[CDP] Failed to connect to existing Chrome on %s: %s", cdp_url, e)
+                if attempt >= MAX_CDP_RETRIES:
+                    logger.error("[CDP] All retries exhausted. No browser connection available.")
+                    raise RuntimeError("Could not connect to Chrome on port 9222. Please launch Chrome with --remote-debugging-port=9222 first.")
 
     async def _handle_login_wait(self):
         """Detect login screen and wait for manual login if needed."""
@@ -591,45 +551,107 @@ class BrowserAgent:
         self._observer_log("TradingView")
         return True
 
-    async def navigate_to_symbol(self, symbol: str):
-        """Passive observer no-op: never switch tabs, URLs, or symbols."""
-        self._observer_log(symbol)
-        return True
+    @staticmethod
+    def _symbol_search_terms(symbol: str) -> list:
+        """Build a list of matchable search terms from a TradingView symbol string.
+
+        Examples:
+            CME_MINI:MNQ1! -> ["cme_mini:mnq1!", "cme_mini:mnq1", "mnq1!", "mnq1", "mnq"]
+            CL=F            -> ["cl=f", "cl", "clf"]
+            GC=F            -> ["gc=f", "gc", "gcf"]
+        """
+        s = symbol.strip().lower()
+        terms = [s]
+        # strip trailing '!' to produce a clean base
+        base = s.rstrip('!')
+        if base != s:
+            terms.append(base)
+        # if symbol contains ':', split on it and add the right-hand part
+        if ':' in s:
+            rhs = s.split(':', 1)[1]
+            rhs_base = rhs.rstrip('!')
+            if rhs not in terms:
+                terms.append(rhs)
+            if rhs_base not in terms:
+                terms.append(rhs_base)
+            # add further-stripped version (drop digits at end)
+            stripped = rhs_base.rstrip('0123456789')
+            if stripped and stripped not in terms:
+                terms.append(stripped)
+        else:
+            # handle foo=F style (e.g. CL=F -> clf)
+            no_equals = s.replace('=', '')
+            if no_equals != s and no_equals not in terms:
+                terms.append(no_equals)
+            # also add just the prefix before '='
+            if '=' in s:
+                prefix = s.split('=', 1)[0]
+                if prefix and prefix not in terms:
+                    terms.append(prefix)
+        return terms
+
+    async def navigate_to_symbol(self, symbol: str) -> bool:
+        """Switch to the browser tab whose TradingView chart matches this symbol."""
+        if self._is_passive_observer_mode():
+            self._observer_log(symbol)
+            return True
+        if not self.browser or not self.is_running:
+            return False
+        terms = self._symbol_search_terms(symbol)
+        best_page = None
+        best_score = 0
+        for ctx in self.browser.contexts:
+            for page in ctx.pages:
+                try:
+                    url = page.url.lower()
+                    title = ""
+                    try:
+                        title = (await page.title()).lower()
+                    except Exception:
+                        pass
+                    score = sum(2 if t in url else 1 if t in title else 0 for t in terms)
+                    if score > best_score:
+                        best_score = score
+                        best_page = page
+                except Exception:
+                    continue
+        if best_page:
+            await best_page.bring_to_front()
+            self.page = best_page
+            if hasattr(self, '_on_page_switched') and callable(self._on_page_switched):
+                self._on_page_switched(self.page)
+            logger.info("[NAV] Switched to tab for %s: %s", symbol, best_page.url[:80])
+            return True
+        logger.warning("[NAV] No tab found matching %s (searched: %s)", symbol, terms[:5])
+        return False
 
     async def switch_to_symbol(self, symbol: str, *args, **kwargs) -> bool:
-        """Passive observer alias: never switch tabs, URLs, or symbols."""
-        self._observer_log(symbol)
-        return True
+        """Delegate to navigate_to_symbol."""
+        return await self.navigate_to_symbol(symbol)
 
     async def maps_to_symbol(self, symbol: str, *args, **kwargs) -> bool:
-        """Passive observer alias: never switch tabs, URLs, or symbols."""
-        self._observer_log(symbol)
-        return True
+        """Delegate to navigate_to_symbol."""
+        return await self.navigate_to_symbol(symbol)
 
     async def Maps_to_symbol(self, symbol: str, *args, **kwargs) -> bool:
-        """Passive observer alias kept for legacy mixed-case callers."""
-        self._observer_log(symbol)
-        return True
+        """Delegate to navigate_to_symbol (legacy mixed-case)."""
+        return await self.navigate_to_symbol(symbol)
 
     async def maps_to_chart(self, symbol: str = "active tab", *args, **kwargs) -> bool:
-        """Passive observer alias: never switch tabs, URLs, or symbols."""
-        self._observer_log(symbol)
-        return True
+        """Delegate to navigate_to_symbol."""
+        return await self.navigate_to_symbol(symbol)
 
     async def Maps_to_chart(self, symbol: str = "active tab", *args, **kwargs) -> bool:
-        """Passive observer alias kept for legacy mixed-case callers."""
-        self._observer_log(symbol)
-        return True
+        """Delegate to navigate_to_symbol (legacy mixed-case)."""
+        return await self.navigate_to_symbol(symbol)
 
     async def maps_to(self, symbol: str = "active tab", *args, **kwargs) -> bool:
-        """Passive observer alias: never switch tabs, URLs, or symbols."""
-        self._observer_log(symbol)
-        return True
+        """Delegate to navigate_to_symbol."""
+        return await self.navigate_to_symbol(symbol)
 
     async def Maps_to(self, symbol: str = "active tab", *args, **kwargs) -> bool:
-        """Passive observer alias kept for legacy mixed-case callers."""
-        self._observer_log(symbol)
-        return True
+        """Delegate to navigate_to_symbol (legacy mixed-case)."""
+        return await self.navigate_to_symbol(symbol)
 
     async def stop(self):
         """Close the browser agent and cleanup all resources."""

@@ -40,9 +40,25 @@ class LaunchProfile:
         os.environ["TRADING_SURFACE"] = self.trading_surface
         os.environ["SMART_EYE_ENABLED"] = "true" if self.smart_eye_enabled else "false"
         os.environ["AUTO_SYMBOL_DETECTION"] = "true" if self.auto_symbol_detection else "false"
+        os.environ["ACTIVE_EXECUTION_SURFACE"] = "TRADINGVIEW"
 
 
 def default_launch_profile() -> LaunchProfile:
+    # Nuclear fix: respect ACTIVE_EXECUTION_SURFACE first
+    surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper().strip()
+    if surface == "TRADINGVIEW":
+        return LaunchProfile(
+            execution_mode="UI",
+            trading_surface="TRADINGVIEW_DESKTOP",
+            headline="TradingView active execution armed",
+        )
+    if surface == "MT5":
+        return LaunchProfile(
+            execution_mode="MT5",
+            trading_surface="METATRADER_5",
+            headline="MetaTrader 5 mode armed",
+        )
+
     execution_mode = str(getattr(config, "EXECUTION_MODE", "UI") or "UI").upper()
     trading_surface = str(
         getattr(config, "TRADING_SURFACE", "TRADINGVIEW_TRADOVATE") or "TRADINGVIEW_TRADOVATE"
@@ -61,7 +77,19 @@ def default_launch_profile() -> LaunchProfile:
 
 
 def scan_desktop_launch_profile() -> LaunchProfile:
-    """Scan open desktop windows and choose the best eye automatically."""
+    """Scan open desktop windows and choose the best eye automatically.
+    Nuclear fix: if ACTIVE_EXECUTION_SURFACE=TRADINGVIEW, always arm active mode."""
+    surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper().strip()
+    if surface == "TRADINGVIEW":
+        return LaunchProfile(
+            execution_mode="UI",
+            trading_surface="TRADINGVIEW_DESKTOP",
+            headline="TradingView active execution armed",
+            smart_eye_enabled=True,
+            auto_symbol_detection=True,
+            detection_reason="ACTIVE_EXECUTION_SURFACE=TRADINGVIEW — forcing active clicks",
+        )
+
     try:
         import pygetwindow as gw
     except Exception:
