@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 def _is_passive_visual_mode() -> bool:
     """Return True when the bot must not capture browser/desktop screenshots."""
+    # OVERRIDE: Active TradingView execution needs screenshots for vision analysis
+    active_surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
+    if active_surface == "TRADINGVIEW":
+        return False
     execution_mode = str(getattr(config, "EXECUTION_MODE", "")).upper().strip()
     trading_surface = str(getattr(config, "TRADING_SURFACE", "")).upper().strip()
     return execution_mode in {

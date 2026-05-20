@@ -41,6 +41,8 @@ echo.
 echo === The dashboard window will open in a few seconds ===
 echo === If you don't see it, check your taskbar (look for "Lion" or "VcanTrade") ===
 echo.
+set "ACTIVE_EXECUTION_SURFACE=TRADINGVIEW"
+set "BROWSER_CDP_URL=http://127.0.0.1:9222"
 "%VENV_PY%" main.py
 set "EXIT_CODE=%ERRORLEVEL%"
 

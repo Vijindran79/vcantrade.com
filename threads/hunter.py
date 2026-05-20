@@ -281,7 +281,7 @@ class MultiAssetHunterThread(QThread):
             threat = result.get("threat", "MEDIUM")
             reason = result.get("reason", "No reason")
 
-            self.status_update.emit(symbol, f"SIGNAL_{signal}", reason)
+            self.status_update.emit(symbol, f"SIGNAL_{signal}", f"{confidence}% | {reason}")
             self._emit_hunter_intelligence(symbol, signal, confidence, threat, reason)
 
             # Sunday Gap Guard
