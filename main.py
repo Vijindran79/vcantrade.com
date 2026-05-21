@@ -940,6 +940,7 @@ class MultiAssetHunterThread(QThread):
         self.interval_sec = interval_sec or config.MULTI_ASSET_CYCLE_SECONDS
         self.running = True
         self.index = 0
+        self._last_focus_log_ts = 0.0
 
     def _get_ready_browser_agent(self, symbol: str, require_page: bool = True):
         """Return BrowserAgent only when the async startup path is ready."""
@@ -983,6 +984,34 @@ class MultiAssetHunterThread(QThread):
                 # RESPECT DASHBOARD WATCHLIST: Only scan what the user manually entered.
                 # Never auto-add MNQ/MES/MCL — the user controls the watchlist.
                 active_symbols = list(watchlist) if watchlist else []  # strict: no fallback, user must set watchlist
+
+            if not active_symbols:
+                self.status_update.emit("WATCHLIST", "WAITING", "No active symbols armed")
+                time.sleep(min(self.interval_sec, 5))
+                continue
+
+            if bool(getattr(config, "SINGLE_TRADE_FOCUS_MODE", True)) and getattr(self.app, "positions", []):
+                focus_assets = [
+                    str(pos.get("asset", "") or "").strip()
+                    for pos in getattr(self.app, "positions", [])
+                    if str(pos.get("asset", "") or "").strip()
+                ]
+                if focus_assets:
+                    focus_symbol = focus_assets[0]
+                    parked_count = max(0, len(active_symbols) - 1)
+                    active_symbols = [focus_symbol]
+                    now_ts = time.time()
+                    if now_ts - self._last_focus_log_ts >= 60:
+                        logger.info(
+                            "[FOCUS] Hunter locked on %s; parking %d other symbol(s)",
+                            focus_symbol,
+                            parked_count,
+                        )
+                        self.narrator_update.emit(
+                            "[FOCUS]",
+                            f"Hunter locked on {focus_symbol}; other symbols parked",
+                        )
+                        self._last_focus_log_ts = now_ts
 
             # Monday State Re-Sync (Anti-Ghosting) - properly awaited via asyncio
             if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
@@ -5508,6 +5537,34 @@ class VcaniTradeApp:
             )
             self.cmd.log(f"[WARN] No valid entry price for {ticker} - cannot execute trade")
             self.ai_narrator.notify_error(f"No entry price for {ticker}")
+            return
+
+        # Fast focus/duplicate gate: reject parked symbols before expensive audits,
+        # ATR planning, or RPA setup. The later gate stays as defense in depth.
+        capacity_ok_early, capacity_note_early = self._check_position_capacity(ticker, action)
+        if not capacity_ok_early:
+            logger.info(
+                "EXEC_CLOUD: early position/focus block for %s %s (%s)",
+                action,
+                ticker,
+                capacity_note_early,
+            )
+            self._on_ticker_status_update(ticker, "focus_locked")
+            return
+
+        should_exec_early, conflict_note_early = self._check_position_conflict(
+            ticker,
+            action,
+            confidence_score=confidence_score,
+        )
+        if not should_exec_early:
+            logger.info(
+                "EXEC_CLOUD: early position conflict block for %s %s (%s)",
+                action,
+                ticker,
+                conflict_note_early,
+            )
+            self._on_ticker_status_update(ticker, "trade_rejected")
             return
 
         vetoed, veto_reason, veto_status = self._check_rsi_veto(action, rsi_value)
