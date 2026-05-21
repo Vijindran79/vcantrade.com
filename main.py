@@ -1465,6 +1465,9 @@ class VcaniTradeApp:
         self.peak_balance = float(config.CURRENT_BALANCE)
         self.max_drawdown = 0.0
         self.trades_today = 0
+        self.session_peak_pnl = 0.0
+        self.protected_session_pnl = 0.0
+        self.daily_profit_ladder_triggered = False
         self.positions = []
         self.locked_tickers = {}
         self.rpa_execution_enabled = True
@@ -1652,6 +1655,9 @@ class VcaniTradeApp:
         self.max_drawdown = 0.0
         self.trades_today = 0
         self.daily_wins = 0
+        self.session_peak_pnl = 0.0
+        self.protected_session_pnl = 0.0
+        self.daily_profit_ladder_triggered = False
         self.positions = []  # Live positions
 
         # Trading settings
@@ -4028,6 +4034,26 @@ class VcaniTradeApp:
             position["profit_giveback_usd"] = 0.0
             position["profit_giveback_pct"] = 0.0
 
+    def _profit_ladder_floor(self, peak_profit: float) -> float:
+        """Return the locked profit floor for the current high-water mark."""
+        if not bool(getattr(config, "PROFIT_LADDER_SHIELD_ENABLED", True)):
+            return 0.0
+
+        ladder_text = str(getattr(config, "PROFIT_LADDER_STEPS_USD", "") or "")
+        floor = 0.0
+        for raw_step in ladder_text.split(","):
+            if ":" not in raw_step:
+                continue
+            trigger_text, floor_text = raw_step.split(":", 1)
+            try:
+                trigger = float(trigger_text.strip())
+                candidate_floor = float(floor_text.strip())
+            except ValueError:
+                continue
+            if peak_profit >= trigger:
+                floor = max(floor, candidate_floor)
+        return floor
+
     def _profit_giveback_should_exit(self, position: dict) -> bool:
         if not bool(getattr(config, "PROFIT_GIVEBACK_SHIELD_ENABLED", True)):
             return False
@@ -4040,21 +4066,34 @@ class VcaniTradeApp:
         if peak < min_profit:
             return False
 
+        ladder_floor = self._profit_ladder_floor(peak)
+        position["profit_ladder_floor_usd"] = ladder_floor
+        if ladder_floor > 0 and pnl <= ladder_floor:
+            position["profit_shield_exit_reason"] = (
+                f"ladder floor ${ladder_floor:.2f} after peak ${peak:.2f}"
+            )
+            return True
+
         max_retrace = float(getattr(config, "PROFIT_GIVEBACK_MAX_RETRACE_PCT", 35.0))
         min_lock = float(getattr(config, "PROFIT_GIVEBACK_MIN_LOCK_USD", 50.0))
         giveback_pct = float(position.get("profit_giveback_pct", 0.0) or 0.0)
-        return giveback_pct >= max_retrace and pnl >= min_lock
+        if giveback_pct >= max_retrace and pnl >= min_lock:
+            position["profit_shield_exit_reason"] = (
+                f"{giveback_pct:.1f}% giveback from peak ${peak:.2f}"
+            )
+            return True
+        return False
 
     def _execute_profit_giveback_exit(self, position: dict) -> bool:
         asset = position.get("asset", "unknown")
         peak = float(position.get("peak_pnl", 0.0) or 0.0)
         pnl = float(position.get("pnl", 0.0) or 0.0)
         giveback_pct = float(position.get("profit_giveback_pct", 0.0) or 0.0)
-        position["profit_shield_triggered"] = True
-        position["profit_shield_ts"] = time.time()
+        exit_reason = str(position.get("profit_shield_exit_reason", "") or "").strip()
         self.cmd.log(
             f'<span style="color:#F0B90B;font-weight:bold">[PROFIT SHIELD]</span> '
-            f'{asset} peak=${peak:.2f}, now=${pnl:.2f}, gave back {giveback_pct:.1f}% - protecting profit'
+            f'{asset} peak=${peak:.2f}, now=${pnl:.2f}, gave back {giveback_pct:.1f}%'
+            f'{f" ({exit_reason})" if exit_reason else ""} - protecting profit'
         )
 
         if not bool(getattr(config, "PROFIT_GIVEBACK_AUTO_FLATTEN", True)):
@@ -4086,6 +4125,8 @@ class VcaniTradeApp:
             success = False
 
         if success:
+            position["profit_shield_triggered"] = True
+            position["profit_shield_ts"] = time.time()
             self._close_position(position, "Profit Giveback Shield")
             return True
 
@@ -4094,6 +4135,37 @@ class VcaniTradeApp:
             f'Flatten attempt failed for {asset}; check TradingView position manually'
         )
         return False
+
+    def _update_daily_profit_ladder(self, live_positions_pnl: float) -> None:
+        """Pause fresh entries if the day's high-water profit gives back too much."""
+        if not bool(getattr(config, "DAILY_PROFIT_LADDER_SHIELD_ENABLED", True)):
+            return
+        if self.daily_profit_ladder_triggered:
+            return
+
+        session_pnl = float(getattr(self, "protected_session_pnl", 0.0) or 0.0) + float(live_positions_pnl or 0.0)
+        self.session_peak_pnl = max(float(getattr(self, "session_peak_pnl", 0.0) or 0.0), session_pnl)
+        floor = self._profit_ladder_floor(self.session_peak_pnl)
+        if floor <= 0 or session_pnl > floor:
+            return
+
+        self.daily_profit_ladder_triggered = True
+        self.cmd.log(
+            f'<span style="color:#F0B90B;font-weight:bold">[DAILY LADDER]</span> '
+            f'Session peak ${self.session_peak_pnl:.2f}, now ${session_pnl:.2f}; '
+            f'locking the board above ${floor:.2f}'
+        )
+        self.ai_narrator.add_activity(
+            "[LOCK]",
+            f"Daily ladder protected ${floor:.0f}+; fresh entries paused",
+        )
+        if bool(getattr(config, "DAILY_PROFIT_LADDER_PAUSE_ON_TRIGGER", True)):
+            self.can_trade = False
+            self.rpa_execution_enabled = False
+            try:
+                self.ai_narrator.set_rpa_execution_enabled(False)
+            except Exception:
+                pass
 
     def _update_positions(self):
         """Update live positions with current prices and check TP/SL."""
@@ -4197,6 +4269,7 @@ class VcaniTradeApp:
         self.positions = updated_positions
         self.cmd.update_positions(self.positions)
         live_positions_pnl = sum(p.get("pnl", 0.0) for p in self.positions)
+        self._update_daily_profit_ladder(live_positions_pnl)
         self.profit_lock.update_balance(self.balance + live_positions_pnl)
         self.ai_narrator.update_live_pnl(self.total_pnl + live_positions_pnl, len(self.positions))
         self._refresh_live_ledger()
@@ -4764,6 +4837,7 @@ class VcaniTradeApp:
         self.balance += pnl
         self.daily_pnl += pnl
         self.total_pnl += pnl
+        self.protected_session_pnl = float(getattr(self, "protected_session_pnl", 0.0) or 0.0) + float(pnl or 0.0)
 
         # Update peak balance and drawdown
         if self.balance > self.peak_balance:
@@ -5537,6 +5611,11 @@ class VcaniTradeApp:
             )
             self.cmd.log(f"[WARN] No valid entry price for {ticker} - cannot execute trade")
             self.ai_narrator.notify_error(f"No entry price for {ticker}")
+            return
+
+        if not self.rpa_execution_enabled and not force_execute:
+            self.cmd.log(f"[NO_ENTRY] RPA hand paused - blocked cloud execution for {action} {ticker}")
+            self._on_ticker_status_update(ticker, "trade_rejected")
             return
 
         # Fast focus/duplicate gate: reject parked symbols before expensive audits,
@@ -6674,6 +6753,12 @@ class VcaniTradeApp:
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">[BLOCKED]</span> '
                 f'Unsupported trade action: {action or "EMPTY"}'
+            )
+            return False
+        if not self.rpa_execution_enabled:
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[NO_ENTRY]</span> '
+                f'RPA hand paused - blocked Hunter execution for {action} {symbol}'
             )
             return False
 
