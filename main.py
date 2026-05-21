@@ -18,9 +18,15 @@ Architecture:
 import sys
 import os
 import io
+import faulthandler
 
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
+    # Qt can hard-crash on some Windows desktop/RDP/admin DPI transitions.
+    # Set these before importing PyQt so the UI uses the most stable path.
+    os.environ.setdefault('QT_QPA_PLATFORM', 'windows:dpiawareness=0')
+    os.environ.setdefault('QT_OPENGL', 'software')
+    os.environ.setdefault('QT_QUICK_BACKEND', 'software')
     try:
         sys.stdout = io.TextIOWrapper(
             sys.stdout.buffer, encoding='ascii', errors='ignore', line_buffering=True
@@ -30,6 +36,13 @@ if sys.platform == 'win32':
         )
     except AttributeError:
         pass
+
+try:
+    _startup_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "startup_log.txt")
+    _startup_crash_log = open(_startup_log_path, "a", encoding="utf-8", buffering=1)
+    faulthandler.enable(file=_startup_crash_log, all_threads=True)
+except Exception:
+    pass
 
 import signal
 import socket
