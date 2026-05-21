@@ -62,6 +62,7 @@ DAILY_LOSS_KILL = MAX_DAILY_LOSS
 # MAX_TRADES_PER_DAY: Maximum number of trades allowed per day
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "20"))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
+SINGLE_TRADE_FOCUS_MODE = os.getenv("SINGLE_TRADE_FOCUS_MODE", "true").lower() == "true"
 COOLDOWN_AFTER_STOP = int(os.getenv("COOLDOWN_AFTER_STOP", "300"))
 KILL_SWITCH = False
 

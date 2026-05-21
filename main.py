@@ -6471,6 +6471,20 @@ class VcaniTradeApp:
         """Block brand-new entries when the configured position cap is full."""
         if self._has_same_symbol_position(ticker):
             return True, "existing_symbol"
+        if bool(getattr(config, "SINGLE_TRADE_FOCUS_MODE", True)) and self.positions:
+            focus_asset = self.positions[0].get("asset", "active trade")
+            logger.info(
+                "[FOCUS] %s %s blocked while focusing on open position %s",
+                ticker,
+                action,
+                focus_asset,
+            )
+            self.cmd.log(
+                f'<span style="color:#58A6FF;font-weight:bold">[FOCUS MODE]</span> '
+                f'{action} {ticker} blocked - managing {focus_asset} until it closes'
+            )
+            self.ai_narrator.add_activity("[FOCUS]", f"Managing {focus_asset}; new entries paused")
+            return False, "single_trade_focus_active"
         max_positions = int(getattr(config, "MAX_OPEN_POSITIONS", 3) or 3)
         if len(self.positions) >= max_positions:
             logger.info(
