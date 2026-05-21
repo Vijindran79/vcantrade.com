@@ -3780,6 +3780,90 @@ class VcaniTradeApp:
             take_profit = entry_price * (1 + take_pct / 100.0)
         return float(stop_loss), float(take_profit)
 
+    def _resolve_trade_entry_price(self, ticker: str, fallback_price: float = 0.0) -> float:
+        """Resolve a live-ish entry price for simple BUY/SELL paths."""
+        if fallback_price and fallback_price > 0:
+            return float(fallback_price)
+
+        try:
+            mt5_price = self._fetch_mt5_price_for_m6(ticker)
+            if mt5_price and mt5_price > 0:
+                return float(mt5_price)
+        except Exception as exc:
+            logger.debug("[PRICE] MT5 price lookup failed for %s: %s", ticker, exc)
+
+        try:
+            scanner = getattr(self, "cloud_scanner", None)
+            cache = getattr(scanner, "market_data_cache", {}) if scanner else {}
+            for (ticker_key, _, _), df in cache.items():
+                if str(ticker_key).upper() != str(ticker).upper() or df is None or df.empty:
+                    continue
+                close = df.get("Close")
+                if close is not None and not close.dropna().empty:
+                    return float(close.dropna().iloc[-1])
+        except Exception as exc:
+            logger.debug("[PRICE] scanner cache lookup failed for %s: %s", ticker, exc)
+
+        try:
+            import yfinance as yf
+            market_ticker = self._canonical_market_ticker(ticker)
+            history = yf.Ticker(market_ticker).history(period="1d", interval="1m")
+            if not history.empty and "Close" in history and not history["Close"].dropna().empty:
+                return float(history["Close"].dropna().iloc[-1])
+        except Exception as exc:
+            logger.debug("[PRICE] yfinance price lookup failed for %s: %s", ticker, exc)
+
+        return 0.0
+
+    def _build_simple_execution_plan(
+        self,
+        symbol: str,
+        action: str,
+        reason: str = "",
+        entry_price: float = 0.0,
+    ) -> dict:
+        """Build a minimal protected trade plan for direct Hunter BUY/SELL execution."""
+        side = str(action or "").upper()
+        if side not in {"BUY", "SELL"}:
+            return {"ok": False, "reason": f"Unsupported action: {action}"}
+
+        entry = self._resolve_trade_entry_price(symbol, entry_price)
+        if entry <= 0:
+            return {
+                "ok": False,
+                "reason": "No live entry price available; refusing naked order.",
+            }
+
+        atr_proxy = max(entry * 0.005, 0.01)
+        stop_distance = atr_proxy * float(getattr(config, "ATR_STOP_MULTIPLIER", 1.5))
+        target_distance = atr_proxy * float(getattr(config, "ATR_TP_MULTIPLIER", 3.0))
+
+        if side == "BUY":
+            stop_loss = entry - stop_distance
+            take_profit = entry + target_distance
+        else:
+            stop_loss = entry + stop_distance
+            take_profit = entry - target_distance
+
+        if stop_loss <= 0 or take_profit <= 0:
+            return {"ok": False, "reason": "Risk plan produced invalid stop/target."}
+
+        quantity = float(getattr(config, "MT5_VOLUME", 0.1) or 0.1)
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "action": side,
+            "entry_price": float(entry),
+            "stop_loss": float(stop_loss),
+            "take_profit": float(take_profit),
+            "quantity": quantity,
+            "reason": reason or "Predator/Hunter protected execution plan.",
+            "risk_text": (
+                f"{side} {symbol} @ ${entry:.2f} | "
+                f"SL=${stop_loss:.2f} | TP=${take_profit:.2f} | R:R=2.0:1"
+            ),
+        }
+
     def _derive_structure_stop_loss(
         self,
         action: str,
@@ -5577,7 +5661,31 @@ class VcaniTradeApp:
         # FORCE GHOSTEXECUTOR: When enabled, never use RPA mouse movement
         if getattr(self._ghost_executor, "enabled", False):
             logger.info("EXEC_CLOUD: Using GhostExecutor (JS injection) for %s %s", action, ticker)
-            success = self._ghost_executor.execute_trade(action, ticker, entry_price)
+            success = False
+            try:
+                browser_loop = getattr(self, "_browser_loop", None)
+                if browser_loop is not None and not browser_loop.is_closed():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._ghost_executor.execute_trade(
+                            ticker,
+                            action,
+                            volume=float(quantity or config.MT5_VOLUME),
+                        ),
+                        browser_loop,
+                    )
+                    success = bool(future.result(timeout=5.0))
+                else:
+                    success = bool(
+                        asyncio.run(
+                            self._ghost_executor.execute_trade(
+                                ticker,
+                                action,
+                                volume=float(quantity or config.MT5_VOLUME),
+                            )
+                        )
+                    )
+            except Exception as exc:
+                logger.exception("EXEC_CLOUD: GhostExecutor failed for %s %s: %s", action, ticker, exc)
             if success:
                 logger.info("EXEC_CLOUD: GhostExecutor successfully executed %s %s", action, ticker)
             return success
@@ -6281,6 +6389,14 @@ class VcaniTradeApp:
         Routes to MT5 or TradingView (RPA) based on active mode.
         Returns True if execution succeeded.
         """
+        action = str(action or "").upper()
+        if action not in {"BUY", "SELL"}:
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">[BLOCKED]</span> '
+                f'Unsupported trade action: {action or "EMPTY"}'
+            )
+            return False
+
         from core.market_sessions import is_crypto_ticker, is_futures_ticker
         is_always_on = is_crypto_ticker(symbol) or is_futures_ticker(symbol)
         if not self.can_trade and not is_always_on:
@@ -6289,6 +6405,20 @@ class VcaniTradeApp:
                 f'Trade execution blocked: Apex gate or safety stop active'
             )
             return False
+
+        plan = self._build_simple_execution_plan(symbol, action, reason)
+        if not plan.get("ok"):
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">[BLOCKED]</span> '
+                f'{action} {symbol}: {plan.get("reason", "invalid trade plan")}'
+            )
+            logger.warning("[EXECUTION] Refused unprotected %s %s: %s", action, symbol, plan.get("reason"))
+            return False
+
+        self.cmd.log(
+            f'<span style="color:#58A6FF;font-weight:bold">[RISK PLAN]</span> '
+            f'{plan["risk_text"]}'
+        )
 
         # Position Safety Check: Close-and-Reverse or skip duplicate
         should_exec, conflict_note = self._check_position_conflict(symbol, action)
@@ -6305,13 +6435,19 @@ class VcaniTradeApp:
                 return False
             self.cmd.log(
                 f'<span style="color:#00D4FF;font-weight:bold">[MT5]</span> '
-                f'Sending {action} {symbol} to MetaTrader 5'
+                f'Sending protected {action} {symbol} to MetaTrader 5'
             )
-            success = mt5_executor.execute_trade(symbol, action)
+            success = mt5_executor.execute_trade(
+                symbol,
+                action,
+                volume=plan["quantity"],
+                stop_loss=plan["stop_loss"],
+                take_profit=plan["take_profit"],
+            )
             if success:
                 self.cmd.log(
                     f'<span style="color:#3FB950;font-weight:bold">[MT5 OK]</span> '
-                    f'{action} {symbol} executed on MT5'
+                    f'{action} {symbol} executed on MT5 | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
                 )
                 self.ai_narrator.add_activity("[MT5]", f"{action} {symbol}")
             else:
@@ -6327,11 +6463,11 @@ class VcaniTradeApp:
                 trade = TradeRecord(
                     asset=symbol,
                     action=SignalAction.BUY if action == "BUY" else SignalAction.SELL,
-                    entry_price=0.0,
-                    stop_loss=0.0,
-                    take_profit=0.0,
+                    entry_price=plan["entry_price"],
+                    stop_loss=plan["stop_loss"],
+                    take_profit=plan["take_profit"],
                     confidence=ConfidenceLevel.MEDIUM,
-                    ai_reason=reason,
+                    ai_reason=plan["reason"],
                     mode="HUNTER",
                     status="OPEN",
                 )
@@ -6343,7 +6479,7 @@ class VcaniTradeApp:
                 if success:
                     self.cmd.log(
                         f'<span style="color:#3FB950;font-weight:bold">[OK]</span> '
-                        f'RPA executed {action} {symbol}'
+                        f'RPA executed {action} {symbol} | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
                     )
                     self.ai_narrator.add_activity("[OK]", f"RPA {action} {symbol}")
                 else:
