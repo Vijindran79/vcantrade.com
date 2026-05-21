@@ -117,6 +117,52 @@ PREDATOR_SYSTEM_INSTRUCTION = (
 )
 
 
+def _extract_signal_line(raw: Any, default_confidence: int = 65) -> Optional[dict]:
+    """Parse Predator's compact SIGNAL line even when it adds light wrapper text."""
+    text = str(raw or "").strip()
+    if not text or "SIGNAL" not in text.upper():
+        return None
+
+    signal_match = re.search(r"\bSIGNAL\s*[:=\-]\s*(BUY|SELL|NONE|HOLD|WAIT)\b", text, re.IGNORECASE)
+    if not signal_match:
+        return None
+
+    signal = signal_match.group(1).upper()
+    if signal in {"HOLD", "WAIT"}:
+        signal = "NONE"
+
+    confidence_match = re.search(
+        r"\bCONFIDENCE\s*[:=\-]\s*(\d{1,3})(?:\s*%|\b)",
+        text,
+        re.IGNORECASE,
+    )
+    confidence = int(confidence_match.group(1)) if confidence_match else default_confidence
+    confidence = max(0, min(100, confidence))
+
+    threat_match = re.search(r"\bTHREAT\s*[:=\-]\s*(LOW|MEDIUM|HIGH)\b", text, re.IGNORECASE)
+    threat = threat_match.group(1).upper() if threat_match else "MEDIUM"
+
+    reason_match = re.search(
+        r"\bREASON\s*[:=\-]\s*(.+?)(?=\s*\|\s*\b(?:SIGNAL|CONFIDENCE|THREAT)\b\s*[:=\-]|\n|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    reason = reason_match.group(1).strip(" \t\r\n|") if reason_match else ""
+    if not reason:
+        # Keep the Hunter log short and useful, never the full moondream paragraph.
+        verdict_line = next((line.strip() for line in text.splitlines() if "SIGNAL" in line.upper()), text)
+        reason = verdict_line[:220].strip()
+
+    return {
+        "signal": signal,
+        "confidence": confidence,
+        "threat": threat,
+        "reason": reason,
+        "content": text,
+        "raw": text,
+    }
+
+
 def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = None) -> dict:
     """
     Simple wrapper to call local Ollama brain.
@@ -179,6 +225,11 @@ def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = No
             logger.warning("[WARN] Ollama returned JSON with an empty response field")
             return {"error": "Ollama returned empty response text"}
         
+        signal_line = _extract_signal_line(raw_response)
+        if signal_line:
+            logger.info("[OK] Local brain responded with SIGNAL line")
+            return signal_line
+
         logger.info(f"[OK] Local brain responded successfully")
         return parse_json_response(raw_response)
     except requests.exceptions.ConnectionError:
@@ -218,7 +269,7 @@ def analyze_chart_with_vision(
     if getattr(config, "OLLAMA_API_KEY", ""):
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
 
-    chosen_model = model or config.MULTI_ASSET_VISION_MODEL
+    chosen_model = model or getattr(config, "FAST_CHART_VISION_MODEL", None) or config.MULTI_ASSET_VISION_MODEL
     is_valid, model_err = _validate_vision_model(chosen_model)
     if not is_valid:
         logger.error("[VISION] %s", model_err)
@@ -323,21 +374,71 @@ def analyze_chart_with_vision(
 
         logger.info("[VISION] %s analysis received (%s chars)", symbol, len(content))
 
-        # Parse SIGNAL, CONFIDENCE, THREAT, and REASON
-        signal_match = re.search(r"SIGNAL:\s*(BUY|SELL|NONE)", content, re.IGNORECASE)
-        signal = signal_match.group(1).upper() if signal_match else "NONE"
+        # Two-stage architecture (user's custom setup):
+        # moondream = eyes (good at describing charts)
+        # predator  = brain (your custom model makes the final trading decision)
+        vision_model_used = chosen_model or getattr(config, "FAST_CHART_VISION_MODEL", "")
+        if "moondream" in str(vision_model_used).lower():
+            brain_prompt = (
+                f"You are a professional futures trader. "
+                f"Here is a detailed description of the {symbol} chart from a vision model:\n\n"
+                f"{content}\n\n"
+                "Return ONLY a single line in this exact format, nothing else:\n"
+                "SIGNAL: BUY|SELL|NONE | CONFIDENCE: 0-100 | THREAT: LOW|MEDIUM|HIGH | REASON: one short sentence"
+            )
+            # Force predator (user's custom model) for the final trading decision
+            # This is the critical step that turns the moondream description into a real SIGNAL
+            brain_out = call_local_brain(brain_prompt, model="predator:latest", timeout=90)
+            predator_text = str(
+                brain_out.get("content")
+                or brain_out.get("raw")
+                or brain_out.get("response")
+                or ""
+            ).strip()
+            predator_signal = (
+                {
+                    "signal": brain_out.get("signal"),
+                    "confidence": brain_out.get("confidence"),
+                    "threat": brain_out.get("threat"),
+                    "reason": brain_out.get("reason"),
+                    "raw": predator_text,
+                }
+                if brain_out.get("signal")
+                else _extract_signal_line(predator_text, default_confidence=70)
+            )
 
-        confidence_match = re.search(r"CONFIDENCE:\s*(\d{1,3})", content, re.IGNORECASE)
-        confidence = int(confidence_match.group(1)) if confidence_match else 50
-        confidence = max(0, min(100, confidence))
+            if predator_signal:
+                predator_signal["signal"] = str(predator_signal.get("signal") or "NONE").upper()
+                predator_signal["confidence"] = max(0, min(100, int(predator_signal.get("confidence") or 70)))
+                predator_signal["threat"] = str(predator_signal.get("threat") or "MEDIUM").upper()
+                predator_signal["reason"] = str(predator_signal.get("reason") or "Predator signal accepted.").strip()
+                predator_signal["raw"] = predator_text or str(brain_out)
+                logger.info(
+                    "[BRAIN] Predator final decision for %s: %s %s%% threat=%s",
+                    symbol,
+                    predator_signal["signal"],
+                    predator_signal["confidence"],
+                    predator_signal["threat"],
+                )
+                return predator_signal
 
-        threat_match = re.search(r"THREAT:\s*(LOW|MEDIUM|HIGH)", content, re.IGNORECASE)
-        threat = threat_match.group(1).upper() if threat_match else "MEDIUM"
+            if "error" in brain_out:
+                logger.warning("[BRAIN] Predator final decision unavailable for %s: %s", symbol, brain_out["error"])
+            elif predator_text:
+                content = predator_text
+                logger.warning("[BRAIN] Predator response for %s had no SIGNAL line; falling back to vision parse", symbol)
 
-        reason_match = re.search(r"REASON:\s*(.+?)(?:\n|$)", content, re.IGNORECASE)
-        reason = reason_match.group(1).strip() if reason_match else content[:240].strip()
+        parsed_signal = _extract_signal_line(content)
+        if parsed_signal:
+            return parsed_signal
 
-        return {"signal": signal, "confidence": confidence, "threat": threat, "reason": reason, "raw": content}
+        return {
+            "signal": "NONE",
+            "confidence": 50,
+            "threat": "MEDIUM",
+            "reason": "No structured predator signal found.",
+            "raw": content,
+        }
 
     except requests.exceptions.ConnectionError:
         logger.error(
@@ -371,7 +472,7 @@ def detect_symbol_from_chart(
     if getattr(config, "OLLAMA_API_KEY", ""):
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
 
-    chosen_model = model or config.MULTI_ASSET_VISION_MODEL
+    chosen_model = model or getattr(config, "FAST_CHART_VISION_MODEL", None) or config.MULTI_ASSET_VISION_MODEL
     is_valid, model_err = _validate_vision_model(chosen_model)
     if not is_valid:
         logger.error("[VISION] %s", model_err)
@@ -497,6 +598,10 @@ def parse_json_response(raw: str) -> dict:
     # Remove dollar signs from numbers
     raw = raw.replace('$', '')
 
+    signal_line = _extract_signal_line(raw)
+    if signal_line:
+        return signal_line
+
     # Try to parse JSON
     try:
         return json.loads(raw)
@@ -508,7 +613,7 @@ def parse_json_response(raw: str) -> dict:
             json_str = raw[start:end]
             return json.loads(json_str)
         except (ValueError, json.JSONDecodeError):
-            logger.warning(f"Invalid JSON from LLM: {raw[:300]}")
+            logger.debug(f"Non-JSON LLM response (non-critical): {raw[:200]}")  # many swarm agents still use small models
             return {"error": "Invalid JSON", "raw": raw}
 
 
@@ -752,15 +857,16 @@ Return JSON only:
             async def _run_vision():
                 if not chart_image_base64:
                     return None, "", "Vision agent: no chart image supplied."
+                fast_vision_model = getattr(config, "FAST_CHART_VISION_MODEL", None) or config.MULTI_ASSET_VISION_MODEL
                 vr = await asyncio.to_thread(
                     analyze_chart_with_vision,
                     chart_image_base64, market_data.asset,
-                    config.MULTI_ASSET_VISION_MODEL, self.timeout,
+                    fast_vision_model, self.timeout,
                 )
                 ds = await asyncio.to_thread(
                     detect_symbol_from_chart,
                     chart_image_base64,
-                    config.MULTI_ASSET_VISION_MODEL, min(self.timeout, 60),
+                    fast_vision_model, min(self.timeout, 60),
                 )
                 if ds:
                     market_data.indicators["VISION_DETECTED_SYMBOL"] = ds
