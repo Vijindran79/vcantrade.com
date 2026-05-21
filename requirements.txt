@@ -4,7 +4,10 @@
 # ========================
 
 # --- Core Framework ---
-PyQt6>=6.6.0
+# PyQt6 6.11.0 is crashing in Qt6Core.dll on this Windows/RPA setup.
+# Keep the desktop runtime on the stable 6.7 line until this is re-tested.
+PyQt6==6.7.1
+PyQt6-Qt6==6.7.3
 aiohttp>=3.9.0
 requests>=2.31.0
 
@@ -22,6 +25,7 @@ pydantic>=2.5.0
 ccxt>=4.0.0
 holidays>=0.39
 yfinance>=0.2.40
+cffi>=2.0.0
 
 # --- Browser Automation (Cloud CDP) ---
 playwright>=1.40.0
