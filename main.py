@@ -5886,7 +5886,19 @@ class VcaniTradeApp:
             return
 
         # Position Safety Check for cloud RPA path
-        should_exec_rpa, conflict_note_rpa = self._check_position_conflict(ticker, action)
+        capacity_ok_rpa, capacity_note_rpa = self._check_position_capacity(ticker, action)
+        if not capacity_ok_rpa:
+            self.cmd.log(
+                f'<span style="color:#8B949E;font-weight:bold">[SKIP]</span> '
+                f'Cloud signal {action} {ticker} skipped: {capacity_note_rpa}'
+            )
+            return
+
+        should_exec_rpa, conflict_note_rpa = self._check_position_conflict(
+            ticker,
+            action,
+            confidence_score=confidence_score,
+        )
         if not should_exec_rpa:
             self.cmd.log(
                 f'<span style="color:#8B949E;font-weight:bold">[SKIP]</span> '
@@ -6452,7 +6464,84 @@ class VcaniTradeApp:
         if self.ai_narrator:
             self.ai_narrator.add_activity(icon, message)
 
-    def _check_position_conflict(self, ticker: str, action: str, is_closing: bool = False) -> tuple[bool, str]:
+    def _has_same_symbol_position(self, ticker: str) -> bool:
+        return any(pos.get("asset") == ticker for pos in self.positions)
+
+    def _check_position_capacity(self, ticker: str, action: str) -> tuple[bool, str]:
+        """Block brand-new entries when the configured position cap is full."""
+        if self._has_same_symbol_position(ticker):
+            return True, "existing_symbol"
+        max_positions = int(getattr(config, "MAX_OPEN_POSITIONS", 3) or 3)
+        if len(self.positions) >= max_positions:
+            logger.info(
+                "[POSITION] %s %s blocked: max open positions reached %s/%s",
+                ticker,
+                action,
+                len(self.positions),
+                max_positions,
+            )
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[POSITION CAP]</span> '
+                f'{action} {ticker} blocked: max open positions {len(self.positions)}/{max_positions}'
+            )
+            self.ai_narrator.add_activity("[LOCK]", f"Max positions reached: {len(self.positions)}/{max_positions}")
+            return False, "max_open_positions"
+        return True, "capacity_ok"
+
+    def _flatten_profitable_opposite_position(
+        self,
+        position: dict,
+        ticker: str,
+        action: str,
+        confidence_score: float,
+    ) -> bool:
+        """Competition mode: bank a profitable opposite position before a strong reversal."""
+        if not bool(getattr(config, "COMPETITION_REVERSAL_FLATTEN_ENABLED", True)):
+            return False
+
+        min_confidence = float(getattr(config, "COMPETITION_REVERSAL_MIN_CONFIDENCE", 75.0))
+        if float(confidence_score or 0.0) < min_confidence:
+            return False
+
+        open_profit = float(position.get("pnl", 0.0) or 0.0)
+        min_profit = float(getattr(config, "COMPETITION_REVERSAL_MIN_OPEN_PROFIT_USD", 50.0))
+        if open_profit < min_profit:
+            return False
+
+        flatten = getattr(self.rpa_hand, "flatten_position", None)
+        if not callable(flatten):
+            return False
+
+        current_side = str(position.get("side", "") or "").upper()
+        self.cmd.log(
+            f'<span style="color:#F0B90B;font-weight:bold">[REVERSAL SHIELD]</span> '
+            f'{ticker} has profitable {current_side} (${open_profit:.2f}); flattening before {action}'
+        )
+        try:
+            success = bool(flatten(ticker))
+        except Exception as exc:
+            logger.error("[REVERSAL SHIELD] Flatten failed for %s: %s", ticker, exc)
+            success = False
+
+        if not success:
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">[REVERSAL SHIELD]</span> '
+                f'Could not flatten {ticker}; opposite {action} remains blocked'
+            )
+            return False
+
+        self._close_position(position, "Competition Reversal Flatten")
+        self.positions = [pos for pos in self.positions if pos is not position]
+        self.cmd.update_positions(self.positions)
+        return True
+
+    def _check_position_conflict(
+        self,
+        ticker: str,
+        action: str,
+        is_closing: bool = False,
+        confidence_score: float = 0.0,
+    ) -> tuple[bool, str]:
         """
         Position Safety Check: If we already hold an opposing position,
         decide whether to close it first (Close-and-Reverse) or block.
@@ -6465,6 +6554,8 @@ class VcaniTradeApp:
                 current_side = str(pos.get("side", "")).upper()
                 if current_side and current_side != action and not is_closing:
                     if not bool(getattr(config, "AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED", False)):
+                        if self._flatten_profitable_opposite_position(pos, ticker, action, confidence_score):
+                            return True, "competition_reversal_flattened"
                         logger.info(
                             "[POSITION] %s already %s | Opposite %s blocked by close-and-reverse safety",
                             ticker,
@@ -6584,7 +6675,15 @@ class VcaniTradeApp:
             )
 
         # Position Safety Check: Close-and-Reverse or skip duplicate
-        should_exec, conflict_note = self._check_position_conflict(symbol, action)
+        capacity_ok, capacity_note = self._check_position_capacity(symbol, action)
+        if not capacity_ok:
+            return False
+
+        should_exec, conflict_note = self._check_position_conflict(
+            symbol,
+            action,
+            confidence_score=float(getattr(config, "COMPETITION_REVERSAL_MIN_CONFIDENCE", 75.0)),
+        )
         if not should_exec:
             return False
 
@@ -6636,7 +6735,11 @@ class VcaniTradeApp:
                     status="OPEN",
                 )
                 # Position Safety Check for Hunter RPA path
-                should_exec_hunter, _ = self._check_position_conflict(symbol, action)
+                should_exec_hunter, _ = self._check_position_conflict(
+                    symbol,
+                    action,
+                    confidence_score=float(getattr(config, "COMPETITION_REVERSAL_MIN_CONFIDENCE", 75.0)),
+                )
                 if not should_exec_hunter:
                     return False
                 success = self.rpa_hand.execute_trade(trade)
