@@ -3974,6 +3974,98 @@ class VcaniTradeApp:
         if chosen_update:
             self._apply_managed_stop_update(position, chosen_update)
 
+    def _calculate_position_pnl(self, position: dict, current_price: float) -> tuple[float, float]:
+        """Calculate open P&L using futures contract point values when known."""
+        entry = float(position.get("entry", 0.0) or 0.0)
+        if entry <= 0 or current_price <= 0:
+            return 0.0, 0.0
+
+        pnl_usd = self.profit_lock.calculate_open_profit(position, current_price)
+        side = str(position.get("side", "") or "").upper()
+        if side == "SELL":
+            pnl_pct = ((entry - current_price) / entry) * 100.0
+        else:
+            pnl_pct = ((current_price - entry) / entry) * 100.0
+        return pnl_usd, pnl_pct
+
+    def _track_peak_open_profit(self, position: dict, pnl_usd: float) -> None:
+        peak = max(float(position.get("peak_pnl", 0.0) or 0.0), float(pnl_usd))
+        position["peak_pnl"] = peak
+        if peak > 0:
+            giveback = max(0.0, peak - float(pnl_usd))
+            position["profit_giveback_usd"] = giveback
+            position["profit_giveback_pct"] = (giveback / peak) * 100.0
+        else:
+            position["profit_giveback_usd"] = 0.0
+            position["profit_giveback_pct"] = 0.0
+
+    def _profit_giveback_should_exit(self, position: dict) -> bool:
+        if not bool(getattr(config, "PROFIT_GIVEBACK_SHIELD_ENABLED", True)):
+            return False
+        if position.get("profit_shield_triggered"):
+            return False
+
+        peak = float(position.get("peak_pnl", 0.0) or 0.0)
+        pnl = float(position.get("pnl", 0.0) or 0.0)
+        min_profit = float(getattr(config, "PROFIT_GIVEBACK_MIN_PROFIT_USD", 150.0))
+        if peak < min_profit:
+            return False
+
+        max_retrace = float(getattr(config, "PROFIT_GIVEBACK_MAX_RETRACE_PCT", 35.0))
+        min_lock = float(getattr(config, "PROFIT_GIVEBACK_MIN_LOCK_USD", 50.0))
+        giveback_pct = float(position.get("profit_giveback_pct", 0.0) or 0.0)
+        return giveback_pct >= max_retrace and pnl >= min_lock
+
+    def _execute_profit_giveback_exit(self, position: dict) -> bool:
+        asset = position.get("asset", "unknown")
+        peak = float(position.get("peak_pnl", 0.0) or 0.0)
+        pnl = float(position.get("pnl", 0.0) or 0.0)
+        giveback_pct = float(position.get("profit_giveback_pct", 0.0) or 0.0)
+        position["profit_shield_triggered"] = True
+        position["profit_shield_ts"] = time.time()
+        self.cmd.log(
+            f'<span style="color:#F0B90B;font-weight:bold">[PROFIT SHIELD]</span> '
+            f'{asset} peak=${peak:.2f}, now=${pnl:.2f}, gave back {giveback_pct:.1f}% - protecting profit'
+        )
+
+        if not bool(getattr(config, "PROFIT_GIVEBACK_AUTO_FLATTEN", True)):
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[PROFIT SHIELD]</span> '
+                f'Auto-flatten disabled for {asset}; manual close recommended'
+            )
+            return False
+
+        now = time.time()
+        cooldown = int(getattr(config, "PROFIT_GIVEBACK_COOLDOWN_SECONDS", 120))
+        last_attempt = float(position.get("last_profit_shield_exit_attempt", 0.0) or 0.0)
+        if now - last_attempt < cooldown:
+            return False
+        position["last_profit_shield_exit_attempt"] = now
+
+        flatten = getattr(self.rpa_hand, "flatten_position", None)
+        if not callable(flatten):
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">[PROFIT SHIELD]</span> '
+                f'No RPA flatten method available for {asset}'
+            )
+            return False
+
+        try:
+            success = bool(flatten(asset))
+        except Exception as e:
+            logger.error("[PROFIT SHIELD] Flatten failed for %s: %s", asset, e)
+            success = False
+
+        if success:
+            self._close_position(position, "Profit Giveback Shield")
+            return True
+
+        self.cmd.log(
+            f'<span style="color:#F85149;font-weight:bold">[PROFIT SHIELD]</span> '
+            f'Flatten attempt failed for {asset}; check TradingView position manually'
+        )
+        return False
+
     def _update_positions(self):
         """Update live positions with current prices and check TP/SL."""
         import yfinance as yf
@@ -4014,16 +4106,11 @@ class VcaniTradeApp:
 
                 pos["current"] = current_price
 
-                # Calculate P&L
-                if pos["side"] == "BUY":
-                    pnl_pct = ((current_price - pos["entry"]) / pos["entry"]) * 100
-                    pnl_usd = (current_price - pos["entry"]) * pos["quantity"]
-                else:  # SELL
-                    pnl_pct = ((pos["entry"] - current_price) / pos["entry"]) * 100
-                    pnl_usd = (pos["entry"] - current_price) * pos["quantity"]
-
+                # Calculate P&L using contract point values where known.
+                pnl_usd, pnl_pct = self._calculate_position_pnl(pos, current_price)
                 pos["pnl"] = pnl_usd
                 pos["pnl_pct"] = pnl_pct
+                self._track_peak_open_profit(pos, pnl_usd)
 
                 # MANUAL TRADE PROTECTION
                 if not pos.get("bot_opened"):
@@ -4035,6 +4122,10 @@ class VcaniTradeApp:
                     continue
 
                 self._manage_position_stop(pos, None)
+
+                if self._profit_giveback_should_exit(pos):
+                    if self._execute_profit_giveback_exit(pos):
+                        continue
 
                 # Check Take Profit
                 if pos.get("tp_price", 0) > 0:
@@ -6008,9 +6099,11 @@ class VcaniTradeApp:
             "quantity": quantity,
             "tp_price": tp_price,
             "sl_price": sl_price,
-            "initial_risk_amount": abs(entry_price - sl_price) * quantity,
+            "point_value": self.profit_lock._point_value_for_asset(ticker),
+            "initial_risk_amount": abs(entry_price - sl_price) * quantity * self.profit_lock._point_value_for_asset(ticker),
             "break_even_locked": False,
             "last_trailing_check_ts": 0.0,
+            "peak_pnl": 0.0,
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "order_id": f"rpa_{ticker}_{int(datetime.now().timestamp())}",
@@ -6444,9 +6537,15 @@ class VcaniTradeApp:
                 "quantity": plan["quantity"],
                 "tp_price": plan["take_profit"],
                 "sl_price": plan["stop_loss"],
-                "initial_risk_amount": abs(plan["entry_price"] - plan["stop_loss"]) * plan["quantity"],
+                "point_value": self.profit_lock._point_value_for_asset(symbol),
+                "initial_risk_amount": (
+                    abs(plan["entry_price"] - plan["stop_loss"])
+                    * plan["quantity"]
+                    * self.profit_lock._point_value_for_asset(symbol)
+                ),
                 "break_even_locked": False,
                 "last_trailing_check_ts": 0.0,
+                "peak_pnl": 0.0,
                 "pnl": 0.0,
                 "pnl_pct": 0.0,
                 "order_id": f"hunter_{route}_{symbol}_{int(datetime.now().timestamp())}",
@@ -6641,9 +6740,11 @@ class VcaniTradeApp:
             "quantity": quantity,
             "tp_price": tp_price,
             "sl_price": sl_price,
-            "initial_risk_amount": abs(entry_price - sl_price) * quantity,
+            "point_value": self.profit_lock._point_value_for_asset(execution_ticker),
+            "initial_risk_amount": abs(entry_price - sl_price) * quantity * self.profit_lock._point_value_for_asset(execution_ticker),
             "break_even_locked": False,
             "last_trailing_check_ts": 0.0,
+            "peak_pnl": 0.0,
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "order_id": f"mt5_{execution_ticker}_{int(datetime.now().timestamp())}",

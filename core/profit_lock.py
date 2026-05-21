@@ -135,9 +135,36 @@ class ProfitLock:
     """
 
     POINT_VALUE_BY_ASSET = {
-        "NQ=F": 2.0,
+        "NQ": 20.0,
+        "NQ=F": 20.0,
+        "NQ1": 20.0,
         "MNQ": 2.0,
         "MNQ1": 2.0,
+        "MNQ=F": 2.0,
+        "CME_MINI:MNQ1": 2.0,
+        "ES": 50.0,
+        "ES=F": 50.0,
+        "ES1": 50.0,
+        "MES": 5.0,
+        "MES=F": 5.0,
+        "MES1": 5.0,
+        "CME_MINI:MES1": 5.0,
+        "CL": 1000.0,
+        "CL=F": 1000.0,
+        "CL1": 1000.0,
+        "NYMEX:CL1": 1000.0,
+        "MCL": 100.0,
+        "MCL=F": 100.0,
+        "MCL1": 100.0,
+        "NYMEX:MCL1": 100.0,
+        "GC": 100.0,
+        "GC=F": 100.0,
+        "GC1": 100.0,
+        "MGC": 10.0,
+        "MGC=F": 10.0,
+        "MGC1": 10.0,
+        "COMEX:MGC1": 10.0,
+        "XAUUSD": 10.0,
     }
 
     def __init__(
@@ -225,7 +252,7 @@ class ProfitLock:
 
     @classmethod
     def _point_value_for_asset(cls, asset: str) -> float:
-        normalized_asset = str(asset or "").strip().upper()
+        normalized_asset = str(asset or "").strip().upper().replace("!", "")
         return float(cls.POINT_VALUE_BY_ASSET.get(normalized_asset, 1.0))
 
     def _price_offset_for_dollars(self, position: Dict, dollars: float) -> float:

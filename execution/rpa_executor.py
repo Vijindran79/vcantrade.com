@@ -1150,6 +1150,107 @@ class RPAExecutor:
             logger.warning("[CONTROLLED-PAGE] Click failed: %s", e)
         return False
 
+    def _click_close_via_controlled_page(self, ticker: str = "") -> bool:
+        """Use the controlled page to click a close/flatten control when visible."""
+        page = getattr(self, "_controlled_page", None)
+        if not page or page.is_closed():
+            return False
+        try:
+            if ticker and not self._verify_chart_landmark(page, ticker):
+                logger.warning("[CONTROLLED-PAGE] Refusing close because chart landmark does not match %s", ticker)
+                return False
+
+            async def _do_close():
+                selectors = [
+                    "button:has-text('Close position')",
+                    "button:has-text('Close Position')",
+                    "button:has-text('Flatten')",
+                    "[data-name*='close-position']",
+                    "[data-name*='flatten']",
+                    "[aria-label*='Close position']",
+                    "[aria-label*='Flatten']",
+                ]
+                for sel in selectors:
+                    btn = page.locator(sel).first
+                    count = await btn.count()
+                    if count > 0:
+                        await btn.click(timeout=4000, force=True)
+                        return sel
+
+                clicked = await page.evaluate("""() => {
+                    const nodes = Array.from(document.querySelectorAll(
+                        'button, div[role="button"], span[role="button"], [data-name], [data-testid], [aria-label]'
+                    ));
+                    let best = null;
+                    let bestScore = 0;
+                    for (const el of nodes) {
+                        const text = ((el.textContent || el.innerText || '') + ' ' +
+                            (el.getAttribute('aria-label') || '') + ' ' +
+                            (el.getAttribute('data-name') || '') + ' ' +
+                            (el.getAttribute('data-testid') || '')).toLowerCase();
+                        let score = 0;
+                        if (text.includes('close position')) score += 30;
+                        if (text.includes('flatten')) score += 28;
+                        if (text.includes('close') && !text.includes('cancel')) score += 16;
+                        if (text.includes('buy') || text.includes('sell')) score -= 30;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 10 && rect.height > 10) score += 5;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            best = el;
+                        }
+                    }
+                    if (!best || bestScore < 18) return false;
+                    const rect = best.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        best.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+                    }
+                    return true;
+                }""")
+                return "dom-close" if clicked else None
+
+            result = self._run_async(_do_close())
+            if result:
+                logger.info("[CONTROLLED-PAGE] Clicked close/flatten for %s via %s", ticker or "active chart", result)
+                return True
+        except Exception as e:
+            logger.warning("[CONTROLLED-PAGE] Close/flatten click failed: %s", e)
+        return False
+
+    def flatten_position(self, ticker_hint: str = "") -> bool:
+        """Best-effort TradingView position flatten used by profit protection."""
+        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
+        if surface == "TRADINGVIEW":
+            logger.info("[CHAIN-LOCK] Pre-flatten TV account verification for %s", ticker_hint or "active chart")
+            if not self._micro_verify_account():
+                logger.error("[ALARM] FLATTEN ABORTED: TV account chain-lock failed for %s", ticker_hint)
+                return False
+
+        if self._click_close_via_controlled_page(ticker_hint):
+            return True
+
+        window = self._get_browser_window(ticker_hint)
+        if not window:
+            logger.error("[FLATTEN] Could not find TradingView window for %s", ticker_hint)
+            return False
+        try:
+            window.activate()
+            time.sleep(0.2)
+        except Exception:
+            pass
+
+        try:
+            target_x, target_y = config.FALLBACK_COORDS.get("flatten_button", (960, 620))
+            pyautogui.moveTo(target_x, target_y, duration=0.1)
+            pyautogui.click()
+            logger.info("[FLATTEN] Clicked configured flatten button for %s at (%d, %d)", ticker_hint, target_x, target_y)
+            return True
+        except Exception as e:
+            logger.error("[FLATTEN] Flatten click failed for %s: %s", ticker_hint, e)
+            return False
+
     def _tradingview_strike_sequence(self, target_key, ticker):
         """The 'Lion Strike' adapted for TradingView: find blue Buy or red Sell button and click it."""
         if time.time() < self.trading_stalled_until:

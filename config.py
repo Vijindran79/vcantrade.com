@@ -552,6 +552,15 @@ AUTONOMOUS_BREAK_EVEN_PLUS_USD = float(os.getenv("AUTONOMOUS_BREAK_EVEN_PLUS_USD
 AUTONOMOUS_TRAILING_LOOKBACK_BARS = 3
 AUTONOMOUS_TRAILING_UPDATE_SECONDS = 60
 
+# Protect open winners from round-tripping. Once a position reaches the minimum
+# open profit, the bot tracks peak profit and exits if too much is given back.
+PROFIT_GIVEBACK_SHIELD_ENABLED = os.getenv("PROFIT_GIVEBACK_SHIELD_ENABLED", "true").lower() == "true"
+PROFIT_GIVEBACK_MIN_PROFIT_USD = float(os.getenv("PROFIT_GIVEBACK_MIN_PROFIT_USD", "150.0"))
+PROFIT_GIVEBACK_MAX_RETRACE_PCT = float(os.getenv("PROFIT_GIVEBACK_MAX_RETRACE_PCT", "35.0"))
+PROFIT_GIVEBACK_MIN_LOCK_USD = float(os.getenv("PROFIT_GIVEBACK_MIN_LOCK_USD", "50.0"))
+PROFIT_GIVEBACK_AUTO_FLATTEN = os.getenv("PROFIT_GIVEBACK_AUTO_FLATTEN", "true").lower() == "true"
+PROFIT_GIVEBACK_COOLDOWN_SECONDS = int(os.getenv("PROFIT_GIVEBACK_COOLDOWN_SECONDS", "120"))
+
 # ===== LOGGING =====
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = "vcani_trade.log"
