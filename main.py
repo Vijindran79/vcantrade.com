@@ -4707,11 +4707,31 @@ class VcaniTradeApp:
         except Exception as e:
             logger.warning("Live balance sync failed: %s", e)
 
+    def _close_reentry_lockout_seconds(self, reason: str, pnl: float) -> int:
+        """Keep loss cooldown strict while allowing faster reversal after wins."""
+        base_seconds = int(float(getattr(config, "RE_ENTRY_LOCKOUT_MINUTES", 5)) * 60)
+        reason_text = str(reason or "").lower()
+        if "stop" in reason_text or pnl < 0:
+            return base_seconds
+        if "profit" in reason_text or "take" in reason_text:
+            return min(base_seconds, int(os.getenv("PROFIT_EXIT_REENTRY_LOCKOUT_SECONDS", "30")))
+        return min(base_seconds, int(os.getenv("WIN_EXIT_REENTRY_LOCKOUT_SECONDS", "60")))
+
+    def _apply_close_reentry_lockout(self, asset: str, reason: str, pnl: float) -> None:
+        lockout_seconds = max(0, self._close_reentry_lockout_seconds(reason, pnl))
+        if lockout_seconds <= 0:
+            self.locked_tickers.pop(asset, None)
+            return
+
+        base_seconds = max(1, int(float(getattr(config, "RE_ENTRY_LOCKOUT_MINUTES", 5)) * 60))
+        adjusted_started_at = time.time() - max(0, base_seconds - lockout_seconds)
+        self.locked_tickers[asset] = adjusted_started_at
+
     def _close_position(self, position: dict, reason: str):
         """Close a position and update P&L."""
         self._ensure_balance_state()
         pnl = position.get("pnl", 0)
-        self.locked_tickers[position["asset"]] = time.time()
+        self._apply_close_reentry_lockout(position["asset"], reason, pnl)
         self.balance += pnl
         self.daily_pnl += pnl
         self.total_pnl += pnl
