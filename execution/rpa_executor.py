@@ -262,28 +262,42 @@ class RPAExecutor:
         """VISUAL LANDMARK: Ensure the chart header/title shows the expected symbol.
         Prevents 'Wrong Asset' trades if the bot is on the wrong chart."""
         try:
+            import urllib.parse
+
+            expected_tv = self._map_ticker_to_tv(expected_symbol).upper()
+            expected_terms = {term.upper() for term in self._ticker_window_terms(expected_tv)}
+            expected_terms.update(term.upper() for term in self._ticker_window_terms(expected_symbol))
+
             # Strategy 0: Check URL symbol parameter — hard guard against false positives
-            current_url = (page.url or "").lower()
-            if "?symbol=" in current_url:
-                url_symbol = current_url.split("?symbol=")[1].split("&")[0].upper()
-                if url_symbol and url_symbol != expected_symbol.upper():
+            current_url = str(page.url or "")
+            lowered_url = current_url.lower()
+            if "?symbol=" in lowered_url:
+                raw_symbol = lowered_url.split("?symbol=", 1)[1].split("&", 1)[0]
+                url_symbol = urllib.parse.unquote(raw_symbol).upper()
+                url_terms = {term.upper() for term in self._ticker_window_terms(url_symbol)}
+                if url_symbol and not (url_terms & expected_terms):
                     logger.warning(
                         "[LANDMARK] URL symbol mismatch: URL=%s, expected=%s — force navigating",
                         url_symbol, expected_symbol,
                     )
                     return False
-                if url_symbol == expected_symbol.upper():
+                if url_terms & expected_terms:
                     logger.info("[LANDMARK] URL symbol confirms: %s", expected_symbol)
                     return True
 
             # Strategy 1: Check page title
-            title = page.title() or ""
-            if expected_symbol in title:
+            title = page.title()
+            if inspect.isawaitable(title):
+                title = self._run_async(title)
+            title = str(title or "")
+            if any(term and term in title.upper() for term in expected_terms):
                 logger.info("[LANDMARK] Chart title confirms symbol: %s", expected_symbol)
                 return True
 
             # Strategy 2: Check DOM for symbol label (common in TradingView header)
+            terms_js = list(expected_terms)
             js_check = f"""() => {{
+                const terms = {terms_js!r};
                 const selectors = [
                     '[class*="symbol-name"]',
                     '[class*="chart-header"]',
@@ -293,13 +307,17 @@ class RPAExecutor:
                 ];
                 for (const sel of selectors) {{
                     const el = document.querySelector(sel);
-                    if (el && el.innerText && el.innerText.includes('{expected_symbol}')) {{
+                    const text = ((el && (el.innerText || el.textContent)) || '').toUpperCase();
+                    if (terms.some(term => term && text.includes(term))) {{
                         return true;
                     }}
                 }}
-                return document.body.innerText.includes('{expected_symbol}');
+                const body = (document.body.innerText || '').toUpperCase();
+                return terms.some(term => term && body.includes(term));
             }}"""
             found = page.evaluate(js_check)
+            if inspect.isawaitable(found):
+                found = self._run_async(found)
             if found:
                 logger.info("[LANDMARK] DOM confirms symbol: %s", expected_symbol)
                 return True
@@ -307,8 +325,8 @@ class RPAExecutor:
             logger.warning("[LANDMARK] Symbol %s NOT found on current chart — aborting click", expected_symbol)
             return False
         except Exception as e:
-            logger.warning("[LANDMARK] Verification error for %s: %s — proceeding with caution", expected_symbol, e)
-            return True  # Fail-open: if check itself fails, don't block the trade
+            logger.warning("[LANDMARK] Verification error for %s: %s — blocking HTML click", expected_symbol, e)
+            return False
 
     def _click_via_html(self, action, page):
         """Click Buy/Sell via Playwright MOUSE ONLY. No keyboard shortcuts.
@@ -1043,13 +1061,17 @@ class RPAExecutor:
         logger.error("[TV-RPA] All 3 attempts failed for %s %s", action, trade.asset)
         return False
 
-    def _click_via_controlled_page(self, target_key: str) -> bool:
+    def _click_via_controlled_page(self, target_key: str, ticker: str = "") -> bool:
         """Use the controlled Playwright page for reliable clicking (preferred method).
         Bridges sync->async via the stored browser event loop."""
         page = getattr(self, "_controlled_page", None)
         if not page or page.is_closed():
             return False
         try:
+            if ticker and not self._verify_chart_landmark(page, ticker):
+                logger.warning("[CONTROLLED-PAGE] Refusing HTML click because chart landmark does not match %s", ticker)
+                return False
+
             async def _do_click():
                 if target_key == "buy_button":
                     selectors = [
@@ -1075,13 +1097,53 @@ class RPAExecutor:
                     if count > 0:
                         await btn.click(timeout=4000, force=True)
                         return sel
+
+                action_word = "Buy" if target_key == "buy_button" else "Sell"
+                clicked = await page.evaluate("""(actionWord) => {
+                    const action = String(actionWord || '').toLowerCase();
+                    const nodes = Array.from(document.querySelectorAll(
+                        'button, div[role="button"], span[role="button"], [data-name], [data-testid]'
+                    ));
+                    let best = null;
+                    let bestScore = 0;
+                    for (const el of nodes) {
+                        const text = ((el.textContent || el.innerText || '') + ' ' +
+                            (el.getAttribute('aria-label') || '') + ' ' +
+                            (el.getAttribute('data-name') || '') + ' ' +
+                            (el.getAttribute('data-testid') || '')).toLowerCase();
+                        let score = 0;
+                        if (text.includes(action)) score += 20;
+                        if (text.includes(`${action} market`) || text.includes(`${action} mkt`)) score += 10;
+                        if (text.includes('close') || text.includes('cancel')) score -= 25;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 10 && rect.height > 10) score += 5;
+                        const style = window.getComputedStyle(el);
+                        const bg = style.backgroundColor || '';
+                        if (action === 'buy' && /41,\\s*98,\\s*255|0,\\s*255|green/i.test(bg)) score += 4;
+                        if (action === 'sell' && /247,\\s*82,\\s*95|255,\\s*0|red/i.test(bg)) score += 4;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            best = el;
+                        }
+                    }
+                    if (!best || bestScore < 15) return false;
+                    const rect = best.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                        best.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+                    }
+                    return true;
+                }""", action_word)
+                if clicked:
+                    return "dom-mouseevent"
                 return None
 
             result = self._run_async(_do_click())
             if result:
                 import random
                 time.sleep(random.uniform(0.1, 0.4))  # Stealth micro-delay
-                logger.info("[CONTROLLED-PAGE] Clicked %s via Playwright (%s)", target_key, result)
+                logger.info("[CONTROLLED-PAGE] Clicked %s for %s via HTML/Playwright (%s)", target_key, ticker or "active chart", result)
                 return True
             logger.warning("[CONTROLLED-PAGE] No matching button found for %s", target_key)
         except Exception as e:
@@ -1095,8 +1157,11 @@ class RPAExecutor:
             logger.critical("[SYSTEM ALARM] TRADING STALLED FOR %s MORE SECONDS", remaining)
             return False
 
-        # Controlled-page path disabled until async handling is fixed.
-        # Using proven PyAutoGUI mouse path for now.
+        # Machine-gun cascade: HTML/Playwright click first, physical mouse fallback second.
+        if self._click_via_controlled_page(target_key, ticker):
+            logger.info("[TV-STRIKE] %s clicked on TradingView for %s via HTML/Playwright", target_key.upper(), ticker)
+            return True
+
         window = self._get_browser_window(ticker)
         if not window:
             logger.error("[FAIL] Could not find TradingView window for %s", ticker)
