@@ -86,14 +86,14 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 # ===== OPTIONAL SYMBOL SAFETY LISTS =====
 # These are only used by legacy broker-specific paths. TradingView and MT5 route
 # through their own execution handlers and should not be blocked by a prop firm list.
-FUTURES_WHITELIST = ["CL=F", "CL1!", "NQM6", "ESM6", "MGC"]
+FUTURES_WHITELIST = ["CL=F", "MCL1!", "NQM6", "ESM6", "MGC"]
 # Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
 # ===== SYMBOL BRIDGE (TradingView → MT5 Broker) =====
 # TradingView chart symbols can differ from broker-specific MT5 names.
 # Override any value with an environment variable if your broker labels differ.
-TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "CL1!", "MGC")
+TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "MCL1!", "MGC")
 # TradingView is the sole charting surface. No legacy aliases remain.
 
 # Muted tickers: scanner will NEVER scan these.
@@ -143,6 +143,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # OpenAI-compatible v1 endpoint (for /v1/chat/completions with vision)
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
+# Your custom built model for all final reasoning / swarm decisions
 MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "predator:latest")
 OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL",
@@ -201,7 +202,14 @@ JSON_OUTPUT = True
 # ===== VISION / VLM CONFIGURATION =====
 # 1. Enable Vision & Screen capturing
 USE_VISION = True
-VLM_MODEL = os.getenv("VLM_MODEL", "llama3.2-vision:latest")
+VLM_MODEL = os.getenv("VLM_MODEL", "moondream:latest")
+
+# ===== MACHINE-GUN FAST CHART VISION (your custom models) =====
+# predator:latest   → Your custom main brain / reasoning / swarm (final trade decisions)
+# moondream:latest  → Specialized chart vision + OCR (reading candles, prices, levels from screenshots)
+FAST_CHART_VISION_MODEL = os.getenv("FAST_CHART_VISION_MODEL", "moondream:latest")
+FAST_CHART_OCR_MODEL    = os.getenv("FAST_CHART_OCR_MODEL", "moondream:latest")
+
 VISION_TIMEOUT = 120
 SAVE_DEBUG_SCREENSHOTS = True
 
@@ -289,25 +297,28 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MNQ=F": "NQM6",
     "ES=F":  "ESM6",
     "MES=F": "ESM6",
-    "CL=F":  "CL1!",
+    # Oil is intentionally forced to Micro Crude. Full CL is $10/tick.
+    "CL=F":  "MCL1!",
     "MCL=F": "MCL1!",
     # Canonical short forms (F stripped by candidate generator)
     "NQ":  "NQM6",
     "MNQ": "NQM6",
     "ES":  "ESM6",
     "MES": "ESM6",
-    "CL":  "CL1!",
+    "CL":  "MCL1!",
     "MCL": "MCL1!",
     # TradingView futures contract codes.
     "CME_MINI:MNQ1!": "NQM6",
     "CME_MINI:MES1!": "ESM6",
-    "NYMEX:CL1!": "CL1!",
-    "NYMEX:CLM26!": "CL1!",  # Legacy alias only
+    "NYMEX:CL1!": "MCL1!",
+    "NYMEX:CLM26!": "MCL1!",  # Legacy alias only
+    "NYMEX:MCL1!": "MCL1!",
     # Bare TradingView contract codes (user-specified analysis tickers)
     "MNQ1!": "NQM6",
     "MES1!": "ESM6",
-    "CL1!": "CL1!",
-    "CLM26!": "CL1!",  # Legacy alias only
+    "CL1!": "MCL1!",
+    "MCL1!": "MCL1!",
+    "CLM26!": "MCL1!",  # Legacy alias only
     # Gold (COMEX Micro Gold)
     "COMEX:MGC1!": "MGC",
     "GC=F": "MGC",
@@ -382,7 +393,7 @@ MT5_SYMBOL_MAP = {
     "NVDA": "NVDA",
     "AAPL": "AAPL",
 }
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llama3.2-vision:latest")
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "qwen3-vl:2b")
 MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====
@@ -396,6 +407,10 @@ TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_DESKTOP")
 # "TRADINGVIEW" = Physical mouse clicks on TradingView web/paper interface
 # "MT5" = Native MetaTrader 5 order execution
 ACTIVE_EXECUTION_SURFACE = os.getenv("ACTIVE_EXECUTION_SURFACE", "TRADINGVIEW").upper().strip()
+
+# Hybrid mode: Use MT5 for live market data / ticks / structure even when executing on TradingView
+# This was your preferred old setting: MT5 data → brain (predator), execution on TV chart
+USE_MT5_AS_DATA_FEED = os.getenv("USE_MT5_AS_DATA_FEED", "true").lower() == "true"
 
 # TradingView account label to verify before clicking (e.g., "Paper Trading", "Live")
 TRADINGVIEW_ACCOUNT_LABEL = os.getenv("TRADINGVIEW_ACCOUNT_LABEL", "Paper Trading").strip()
@@ -412,6 +427,13 @@ BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9222").strip()
 TV_DESKTOP_CDP_URL = os.getenv("TV_DESKTOP_CDP_URL", "http://127.0.0.1:9222").strip()
 # How long (seconds) to wait for TradingView Desktop to be ready after launch
 TV_DESKTOP_CONNECT_TIMEOUT = int(os.getenv("TV_DESKTOP_CONNECT_TIMEOUT", "15"))
+
+# ===== CDP / BROWSER AGENT RESILIENCE (for flaky Electron / TV Desktop) =====
+# These make the connection "machine-gun tolerant" — long patience, many retries
+CDP_MAX_CONNECT_RETRIES = int(os.getenv("CDP_MAX_CONNECT_RETRIES", "15"))
+CDP_RETRY_DELAY_SECONDS = int(os.getenv("CDP_RETRY_DELAY_SECONDS", "8"))
+CDP_PAGE_WAIT_SECONDS = int(os.getenv("CDP_PAGE_WAIT_SECONDS", "45"))  # wait for chart tab to appear after WS connect
+CDP_CONNECT_TIMEOUT_MS = int(os.getenv("CDP_CONNECT_TIMEOUT_MS", "240000"))  # 4 minutes — generous for Electron
 LOW_LATENCY_EXECUTION_ENABLED = os.getenv("LOW_LATENCY_EXECUTION_ENABLED", "true").lower() == "true"
 HYBRID_GATEWAY_PRIMARY = os.getenv("HYBRID_GATEWAY_PRIMARY", "broker_ws").lower().strip()
 BROKER_WS_URL = os.getenv("BROKER_WS_URL", "").strip()
@@ -483,6 +505,9 @@ MTF_STRUCTURE_PROXIMITY_PCT = float(os.getenv("MTF_STRUCTURE_PROXIMITY_PCT", "0.
 SIGNAL_COOLDOWN_SECONDS = int(os.getenv("SIGNAL_COOLDOWN_SECONDS", "300"))
 MT5_REQUIRE_PROTECTIVE_STOP = os.getenv("MT5_REQUIRE_PROTECTIVE_STOP", "true").lower() == "true"
 AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED = os.getenv("AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED", "false").lower() == "true"
+COMPETITION_REVERSAL_FLATTEN_ENABLED = os.getenv("COMPETITION_REVERSAL_FLATTEN_ENABLED", "true").lower() == "true"
+COMPETITION_REVERSAL_MIN_CONFIDENCE = float(os.getenv("COMPETITION_REVERSAL_MIN_CONFIDENCE", "75.0"))
+COMPETITION_REVERSAL_MIN_OPEN_PROFIT_USD = float(os.getenv("COMPETITION_REVERSAL_MIN_OPEN_PROFIT_USD", "50.0"))
 AI_OVERLAY_START_PINNED = os.getenv("AI_OVERLAY_START_PINNED", "false").lower() == "true"
 
 # ===== CLOUD SCANNER =====

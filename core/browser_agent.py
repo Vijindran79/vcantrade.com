@@ -15,6 +15,7 @@ Features:
 import asyncio
 import logging
 import base64
+import re
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
@@ -376,8 +377,9 @@ class BrowserAgent:
             logger.warning("Browser agent already running")
             return
 
-        MAX_CDP_RETRIES = 5
-        CDP_RETRY_DELAY = 5
+        MAX_CDP_RETRIES = getattr(config, "CDP_MAX_CONNECT_RETRIES", 15)
+        CDP_RETRY_DELAY = getattr(config, "CDP_RETRY_DELAY_SECONDS", 8)
+        PAGE_WAIT = getattr(config, "CDP_PAGE_WAIT_SECONDS", 45)
 
         for attempt in range(1, MAX_CDP_RETRIES + 1):
             try:
@@ -385,22 +387,43 @@ class BrowserAgent:
 
                 # ALWAYS try CDP first (user's existing Chrome with --remote-debugging-port=9222)
                 cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222")
-                logger.info("[CDP] Attempting connection to existing Chrome at %s", cdp_url)
-                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url)
-                contexts = self.browser.contexts
-                if not contexts:
-                    raise RuntimeError(f"No contexts in Chrome CDP connection: {cdp_url}")
+                logger.info("[CDP] Attempting connection to existing Chrome at %s (attempt %d/%d)", cdp_url, attempt, MAX_CDP_RETRIES)
 
-                # Pick the most recent page (user's current TradingView chart)
+                # Use generous timeout from config (Electron / TV Desktop can be slow to expose contexts)
+                connect_timeout = getattr(config, "CDP_CONNECT_TIMEOUT_MS", 240000)
+                self.browser = await self.playwright.chromium.connect_over_cdp(
+                    cdp_url, timeout=connect_timeout
+                )
+
+                # --- Resilient page acquisition (the part that was timing out) ---
+                contexts = self.browser.contexts or []
                 selected_page = None
                 selected_context = None
+
+                # First quick pass: any page already open?
                 for ctx in reversed(contexts):
-                    pages = ctx.pages
+                    pages = ctx.pages or []
                     if pages:
                         selected_context = ctx
                         selected_page = pages[-1]
                         break
 
+                # If no page yet (common with fresh TV Desktop / Electron), wait patiently
+                if not selected_page and contexts:
+                    logger.info("[CDP] Connected to browser but no pages yet — waiting up to %ds for chart tab...", PAGE_WAIT)
+                    deadline = asyncio.get_event_loop().time() + PAGE_WAIT
+                    while asyncio.get_event_loop().time() < deadline and not selected_page:
+                        await asyncio.sleep(1.5)
+                        contexts = self.browser.contexts or []
+                        for ctx in reversed(contexts):
+                            pages = ctx.pages or []
+                            if pages:
+                                selected_context = ctx
+                                selected_page = pages[-1]
+                                logger.info("[CDP] Chart tab appeared after wait: %s", selected_page.url[:80])
+                                break
+
+                # Final selection + attach
                 if selected_page:
                     self.context = selected_context
                     self.page = selected_page
@@ -409,22 +432,30 @@ class BrowserAgent:
                     logger.info("[OK] Connected to existing Chrome tab: %s", self.page.url[:80])
                     return
 
-                # No pages at all — create one in the existing context
-                self.context = contexts[0]
-                chart_url = getattr(config, "TRADINGVIEW_URL", "https://www.tradingview.com/chart/")
-                self.page = await self.context.new_page()
-                self._install_safe_dialog_handler()
-                await self.page.goto(chart_url, wait_until="domcontentloaded")
-                self.is_running = True
-                logger.info("[OK] Created new tab in existing Chrome: %s", chart_url)
-                return
+                # Absolute fallback: create tab if we have at least one context
+                if contexts:
+                    self.context = contexts[0]
+                    chart_url = getattr(config, "TRADINGVIEW_URL", "https://www.tradingview.com/chart/")
+                    self.page = await self.context.new_page()
+                    self._install_safe_dialog_handler()
+                    await self.page.goto(chart_url, wait_until="domcontentloaded", timeout=30000)
+                    self.is_running = True
+                    logger.info("[OK] Created new tab in existing Chrome: %s", chart_url)
+                    return
+
+                # No contexts at all after connect — treat as transient and retry
+                raise RuntimeError("CDP connected but browser returned zero contexts (transient Electron state)")
 
             except Exception as e:
                 err_text = str(e).lower()
-                is_conn_refused = "econnrefused" in err_text or "10061" in err_text or "connection refused" in err_text
+                is_transient = any(x in err_text for x in [
+                    "econnrefused", "10061", "connection refused",
+                    "timeout", "timed out", "context", "no contexts", "transient"
+                ])
 
-                if is_conn_refused and attempt < MAX_CDP_RETRIES:
-                    logger.warning("[CDP] Connection refused (attempt %d/%d) — retrying in %ds", attempt, MAX_CDP_RETRIES, CDP_RETRY_DELAY)
+                if is_transient and attempt < MAX_CDP_RETRIES:
+                    logger.warning("[CDP] Transient CDP issue (attempt %d/%d) — retrying in %ds: %s",
+                                   attempt, MAX_CDP_RETRIES, CDP_RETRY_DELAY, str(e)[:120])
                     try:
                         await self.playwright.stop()
                     except Exception:
@@ -434,7 +465,7 @@ class BrowserAgent:
 
                 logger.error("[CDP] Failed to connect to existing Chrome on %s: %s", cdp_url, e)
                 if attempt >= MAX_CDP_RETRIES:
-                    logger.error("[CDP] All retries exhausted. No browser connection available.")
+                    logger.error("[CDP] All retries exhausted after %d attempts. No browser connection available.", MAX_CDP_RETRIES)
                     raise RuntimeError("Could not connect to Chrome on port 9222. Please launch Chrome with --remote-debugging-port=9222 first.")
 
     async def _handle_login_wait(self):
@@ -590,13 +621,184 @@ class BrowserAgent:
                     terms.append(prefix)
         return terms
 
+    @staticmethod
+    def _tradingview_search_symbol(symbol: str) -> str:
+        """Return the exact symbol text to type into TradingView's symbol search.
+
+        Apex/TradingView funded flows should stay on one chart tab. These aliases
+        let the bot change the active chart instead of hunting through many tabs.
+        """
+        raw = str(symbol or "").strip()
+        if not raw:
+            return raw
+        upper = raw.upper()
+        exact = {
+            "CME_MINI:MNQ1!": "CME_MINI:MNQ1!",
+            "MNQ1!": "CME_MINI:MNQ1!",
+            "MNQ=F": "CME_MINI:MNQ1!",
+            "MNQ": "CME_MINI:MNQ1!",
+            "NQM6": "CME_MINI:MNQ1!",
+            "CME_MINI:MES1!": "CME_MINI:MES1!",
+            "MES1!": "CME_MINI:MES1!",
+            "MES=F": "CME_MINI:MES1!",
+            "MES": "CME_MINI:MES1!",
+            "ESM6": "CME_MINI:MES1!",
+            "CL=F": "NYMEX:MCL1!",
+            "CL1!": "NYMEX:MCL1!",
+            "NYMEX:CL1!": "NYMEX:MCL1!",
+            "MCL1!": "NYMEX:MCL1!",
+            "NYMEX:MCL1!": "NYMEX:MCL1!",
+            "GC=F": "COMEX:MGC1!",
+            "COMEX:MGC1!": "COMEX:MGC1!",
+            "MGC1!": "COMEX:MGC1!",
+            "MGC": "COMEX:MGC1!",
+            "XAUUSD": "COMEX:MGC1!",
+        }
+        if upper in exact:
+            return exact[upper]
+        configured = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {}) or {}
+        mapped = configured.get(raw) or configured.get(upper)
+        return str(mapped or raw).strip()
+
+    @staticmethod
+    def _root_symbol_terms(symbol: str) -> list:
+        search = BrowserAgent._tradingview_search_symbol(symbol).lower()
+        pieces = [search, search.split(":", 1)[-1], str(symbol or "").lower()]
+        roots = []
+        for piece in pieces:
+            clean = piece.replace("=f", "").replace("!", "")
+            clean = re.sub(r"[^a-z0-9]", "", clean)
+            clean = re.sub(r"\d+$", "", clean)
+            if clean and clean not in roots:
+                roots.append(clean)
+        return roots
+
+    async def _get_active_tradingview_page(self) -> Optional[Page]:
+        """Return the current TradingView page without requiring per-symbol tabs."""
+        candidates = []
+        if self.page:
+            candidates.append(self.page)
+        if self.browser:
+            for ctx in self.browser.contexts:
+                candidates.extend(ctx.pages)
+        seen = set()
+        for page in candidates:
+            if id(page) in seen:
+                continue
+            seen.add(id(page))
+            try:
+                url = (page.url or "").lower()
+                title = ""
+                try:
+                    title = (await page.title()).lower()
+                except Exception:
+                    pass
+                if "tradingview.com/chart" in url or "tradingview" in title:
+                    return page
+            except Exception:
+                continue
+        return self.page
+
+    async def _active_chart_matches_symbol(self, page: Page, symbol: str) -> bool:
+        roots = self._root_symbol_terms(symbol)
+        try:
+            url = (page.url or "").lower()
+            title = (await page.title()).lower()
+            combined = f"{url} {title}"
+            return any(root and root in combined for root in roots)
+        except Exception:
+            return False
+
+    async def _switch_active_chart_symbol(self, symbol: str) -> bool:
+        """Change the symbol on the current TradingView chart instead of tab hopping."""
+        page = await self._get_active_tradingview_page()
+        if not page:
+            return False
+
+        target = self._tradingview_search_symbol(symbol)
+        if not target:
+            return False
+
+        try:
+            await page.bring_to_front()
+            self.page = page
+            if hasattr(self, '_on_page_switched') and callable(self._on_page_switched):
+                self._on_page_switched(self.page)
+            self._install_safe_dialog_handler()
+            await self._close_blocking_popups()
+
+            if await self._active_chart_matches_symbol(page, symbol):
+                logger.info("[NAV] Active TradingView chart already matches %s", symbol)
+                return True
+
+            logger.info("[NAV] Single-tab TradingView switch: %s -> %s", symbol, target)
+
+            # TradingView opens Symbol Search when typing directly on a focused chart.
+            # Escape first so no text field keeps focus, then type the exact exchange symbol.
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.15)
+            await page.keyboard.type(target, delay=20)
+            await asyncio.sleep(0.35)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(2.0)
+            await self._close_blocking_popups()
+
+            if await self._active_chart_matches_symbol(page, symbol):
+                logger.info("[NAV] Active chart switched to %s", target)
+                return True
+
+            # Fallback: click the visible symbol label/title area, then type again.
+            clicked = await page.evaluate("""() => {
+                const selectors = [
+                    '[data-name="legend-source-title"]',
+                    '[data-name="symbol-title"]',
+                    '[class*="legend"] [class*="title"]',
+                    'button[aria-label*="symbol" i]',
+                    'button[title*="symbol" i]'
+                ];
+                for (const sel of selectors) {
+                    for (const el of document.querySelectorAll(sel)) {
+                        const box = el.getBoundingClientRect();
+                        if (box.width > 20 && box.height > 10 && box.top >= 0 && box.left >= 0) {
+                            el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""")
+            if clicked:
+                await asyncio.sleep(0.3)
+                await page.keyboard.press("Control+A")
+                await page.keyboard.type(target, delay=20)
+                await asyncio.sleep(0.35)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(2.0)
+                if await self._active_chart_matches_symbol(page, symbol):
+                    logger.info("[NAV] Active chart switched via symbol label to %s", target)
+                    return True
+
+            logger.warning("[NAV] Single-tab symbol switch could not confirm %s", target)
+            return False
+        except Exception as e:
+            logger.warning("[NAV] Single-tab symbol switch failed for %s: %s", symbol, e)
+            return False
+
     async def navigate_to_symbol(self, symbol: str) -> bool:
-        """Switch to the browser tab whose TradingView chart matches this symbol."""
+        """Switch the active TradingView chart to this symbol.
+
+        Apex funded accounts should not rely on multiple TradingView tabs. In
+        TradingView mode, use one chart tab and change the ticker inside it.
+        """
         if self._is_passive_observer_mode():
             self._observer_log(symbol)
             return True
         if not self.browser or not self.is_running:
             return False
+        if await self._switch_active_chart_symbol(symbol):
+            return True
+
+        # Legacy fallback for old multi-tab sessions. Kept as a backup only.
         terms = self._symbol_search_terms(symbol)
         best_page = None
         best_score = 0
