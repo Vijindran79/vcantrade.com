@@ -163,7 +163,12 @@ def _extract_signal_line(raw: Any, default_confidence: int = 65) -> Optional[dic
     }
 
 
-def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = None) -> dict:
+def call_local_brain(
+    prompt: str,
+    model: str = None,
+    timeout: Optional[int] = None,
+    num_predict: Optional[int] = None,
+) -> dict:
     """
     Simple wrapper to call local Ollama brain.
     This is the core "brain" function that runs locally.
@@ -188,7 +193,7 @@ def call_local_brain(prompt: str, model: str = None, timeout: Optional[int] = No
         "stream": False,
         "options": {
             "temperature": 0.1,  # Very low = consistent JSON, no rambling
-            "num_predict": 256,  # Reduced from 512 for faster responses
+            "num_predict": int(num_predict or 256),  # keep general swarm roomy; chart verdicts override lower
             "top_p": 0.9,
             "top_k": 40,
         }
@@ -388,7 +393,12 @@ def analyze_chart_with_vision(
             )
             # Force predator (user's custom model) for the final trading decision
             # This is the critical step that turns the moondream description into a real SIGNAL
-            brain_out = call_local_brain(brain_prompt, model="predator:latest", timeout=90)
+            brain_out = call_local_brain(
+                brain_prompt,
+                model="predator:latest",
+                timeout=60,
+                num_predict=96,
+            )
             predator_text = str(
                 brain_out.get("content")
                 or brain_out.get("raw")

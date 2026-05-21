@@ -917,7 +917,7 @@ class MultiAssetHunterThread(QThread):
     """
 
     status_update = pyqtSignal(str, str, str)  # symbol, status, message
-    trade_signal = pyqtSignal(str, str, str)    # symbol, action, reason
+    trade_signal = pyqtSignal(str, str, str, int, str)  # symbol, action, reason, confidence, threat
     narrator_update = pyqtSignal(str, str)      # icon, message (thread-safe Activity Feed)
 
     def __init__(self, app, symbols=None, interval_sec=None):
@@ -1148,7 +1148,7 @@ class MultiAssetHunterThread(QThread):
                         "[HUNTER] %s SIGNAL: %s | Confidence: %d%% | Threat: %s | %s",
                         symbol, signal, confidence, threat, reason
                     )
-                    self.trade_signal.emit(symbol, signal, reason)
+                    self.trade_signal.emit(symbol, signal, reason, int(confidence), str(threat))
                 else:
                     logger.info(
                         "[HUNTER] %s %s signal REJECTED | Confidence %d%% < threshold %d%% | %s",
@@ -6897,19 +6897,26 @@ class VcaniTradeApp:
         except Exception as e:
             logger.error("[APEX] check_apex_closing_time error: %s", e)
 
-    def _on_hunter_trade_signal(self, symbol: str, action: str, reason: str):
+    def _on_hunter_trade_signal(
+        self,
+        symbol: str,
+        action: str,
+        reason: str,
+        confidence: int = 50,
+        threat: str = "MEDIUM",
+    ):
         """Execute a trade when the Cloud Brain returns BUY/SELL from vision analysis."""
+        confidence_score = max(0.0, min(100.0, float(confidence or 50)))
         self.cmd.log(
             f'<span style="color:#00D4FF;font-weight:bold">[HUNTER]</span> '
-            f'Vision signal: {action} {symbol}'
+            f'Vision signal: {action} {symbol} | {confidence_score:.0f}% | Threat: {threat}'
         )
         self.ai_narrator.add_activity("[HUNTER]", f"{action} {symbol}")
-        # Trigger the green border blink — this is the missing feature!
-        self.ai_narrator.notify_signal_detected(symbol, action, 0.85)
-        self._announce_signal_alert(symbol, action, 85.0, source="hunter")
+        self.ai_narrator.notify_signal_detected(symbol, action, confidence_score / 100.0)
+        self._announce_signal_alert(symbol, action, confidence_score, source="hunter")
 
         if config.TEACHER_MODE:
-            self.cmd.log(f"[TEACHER] Would execute {action} {symbol} | {reason}")
+            self.cmd.log(f"[TEACHER] Would execute {action} {symbol} ({confidence_score:.0f}%) | {reason}")
             return
 
         self._dispatch_trade_execution(symbol, action, reason)
