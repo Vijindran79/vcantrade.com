@@ -87,14 +87,21 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 # ===== OPTIONAL SYMBOL SAFETY LISTS =====
 # These are only used by legacy broker-specific paths. TradingView and MT5 route
 # through their own execution handlers and should not be blocked by a prop firm list.
-FUTURES_WHITELIST = ["CL=F", "MCL1!", "NQM6", "ESM6", "MGC"]
+FUTURES_WHITELIST = [
+    "MNQ1!", "MES1!", "MCL1!", "MGC1!", "MYM1!",
+    "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!",
+    "NQM6", "ESM6", "MGC",
+]
 # Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
 # ===== SYMBOL BRIDGE (TradingView → MT5 Broker) =====
 # TradingView chart symbols can differ from broker-specific MT5 names.
 # Override any value with an environment variable if your broker labels differ.
-TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "MCL1!", "MGC")
+TRADINGVIEW_TICKERS = (
+    "MNQ1!", "MES1!", "MCL1!", "MGC1!", "MYM1!",
+    "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!",
+)
 # TradingView is the sole charting surface. No legacy aliases remain.
 
 # Muted tickers: scanner will NEVER scan these.
@@ -238,7 +245,18 @@ CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
 SCAN_INTERVAL = 15  # Reduced from 5 — less DOM polling = less detection
 WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "3.0"))
-CLOUD_TICKERS = ["CME_MINI:MNQ1!", "CME_MINI:MES1!", "CL=F"]
+CLOUD_TICKERS = [
+    "CME_MINI:MNQ1!",
+    "CME_MINI:MES1!",
+    "NYMEX:MCL1!",
+    "COMEX:MGC1!",
+    "CBOT_MINI:MYM1!",
+    "CME_MINI:M2K1!",
+    "CME:M6A1!",
+    "CME:M6E1!",
+    "CME:MBT1!",
+    "CME:MET1!",
+]
 
 # yfinance requires dashed crypto symbols. Keep chart/broker symbols separate.
 YFINANCE_SYMBOL_MAP = {
@@ -266,12 +284,37 @@ YFINANCE_SYMBOL_MAP = {
     "NYMEX:CLM26!": "CL=F",
     "CLM26": "CL=F",
     "CLM26!": "CL=F",
+    "MCL1!": "CL=F",
+    "NYMEX:MCL1!": "CL=F",
+    "MYM1!": "MYM=F",
+    "CBOT_MINI:MYM1!": "MYM=F",
+    "M2K1!": "M2K=F",
+    "CME_MINI:M2K1!": "M2K=F",
+    "M6A1!": "6A=F",
+    "CME:M6A1!": "6A=F",
+    "M6E1!": "6E=F",
+    "CME:M6E1!": "6E=F",
+    "MBT1!": "BTC-USD",
+    "CME:MBT1!": "BTC-USD",
+    "MET1!": "ETH-USD",
+    "CME:MET1!": "ETH-USD",
 }
 
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
-MULTI_ASSET_TICKERS = ["CL=F", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"]
+MULTI_ASSET_TICKERS = [
+    "CME_MINI:MNQ1!",
+    "CME_MINI:MES1!",
+    "NYMEX:MCL1!",
+    "COMEX:MGC1!",
+    "CBOT_MINI:MYM1!",
+    "CME_MINI:M2K1!",
+    "CME:M6A1!",
+    "CME:M6E1!",
+    "CME:MBT1!",
+    "CME:MET1!",
+]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
@@ -280,9 +323,24 @@ SYMBOL_TO_YAHOO_MAP = {
     "CME_MINI:MES1!": "MES=F",
     "CL=F": "CL=F",
     "CL1!": "CL=F",
+    "MCL1!": "CL=F",
     "NYMEX:CL1!": "CL=F",
+    "NYMEX:MCL1!": "CL=F",
     "NYMEX:CLM26!": "CL=F",  # Legacy alias only
     "COMEX:MGC1!": "GC=F",
+    "MGC1!": "GC=F",
+    "CBOT_MINI:MYM1!": "MYM=F",
+    "MYM1!": "MYM=F",
+    "CME_MINI:M2K1!": "M2K=F",
+    "M2K1!": "M2K=F",
+    "CME:M6A1!": "6A=F",
+    "M6A1!": "6A=F",
+    "CME:M6E1!": "6E=F",
+    "M6E1!": "6E=F",
+    "CME:MBT1!": "BTC-USD",
+    "MBT1!": "BTC-USD",
+    "CME:MET1!": "ETH-USD",
+    "MET1!": "ETH-USD",
 }
 # Merge TradingView-side aliases into the canonical SYMBOL_MAP without
 # overwriting the broker (MT5) entries already defined above.
@@ -298,6 +356,12 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MNQ=F": "NQM6",
     "ES=F":  "ESM6",
     "MES=F": "ESM6",
+    "MYM=F": "MYM1!",
+    "M2K=F": "M2K1!",
+    "6A=F": "M6A1!",
+    "6E=F": "M6E1!",
+    "BTC-USD": "MBT1!",
+    "ETH-USD": "MET1!",
     # Oil is intentionally forced to Micro Crude. Full CL is $10/tick.
     "CL=F":  "MCL1!",
     "MCL=F": "MCL1!",
@@ -306,11 +370,23 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MNQ": "NQM6",
     "ES":  "ESM6",
     "MES": "ESM6",
+    "MYM": "MYM1!",
+    "M2K": "M2K1!",
+    "M6A": "M6A1!",
+    "M6E": "M6E1!",
+    "MBT": "MBT1!",
+    "MET": "MET1!",
     "CL":  "MCL1!",
     "MCL": "MCL1!",
     # TradingView futures contract codes.
     "CME_MINI:MNQ1!": "NQM6",
     "CME_MINI:MES1!": "ESM6",
+    "CBOT_MINI:MYM1!": "MYM1!",
+    "CME_MINI:M2K1!": "M2K1!",
+    "CME:M6A1!": "M6A1!",
+    "CME:M6E1!": "M6E1!",
+    "CME:MBT1!": "MBT1!",
+    "CME:MET1!": "MET1!",
     "NYMEX:CL1!": "MCL1!",
     "NYMEX:CLM26!": "MCL1!",  # Legacy alias only
     "NYMEX:MCL1!": "MCL1!",
@@ -319,12 +395,19 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MES1!": "ESM6",
     "CL1!": "MCL1!",
     "MCL1!": "MCL1!",
+    "MYM1!": "MYM1!",
+    "M2K1!": "M2K1!",
+    "M6A1!": "M6A1!",
+    "M6E1!": "M6E1!",
+    "MBT1!": "MBT1!",
+    "MET1!": "MET1!",
     "CLM26!": "MCL1!",  # Legacy alias only
     # Gold (COMEX Micro Gold)
     "COMEX:MGC1!": "MGC",
     "GC=F": "MGC",
     "GC": "MGC",
     "MGC": "MGC",
+    "MGC1!": "MGC",
     "XAUUSD": "MGC",
 }
 
@@ -340,10 +423,23 @@ MT5_SYMBOL_MAP = {
     "NQM6": "NAS100_SB",
     "ESM6": "US500_SB",
     "MGC": "Gold_SB",
+    "MYM1!": "MYM1!",
+    "M2K1!": "M2K1!",
+    "M6A1!": "M6A1!",
+    "M6E1!": "M6E1!",
+    "MBT1!": "MBT1!",
+    "MET1!": "MET1!",
     # CME / NYMEX prefixes -> Pepperstone exact terminal name
     "CME_MINI:MNQ1!": "NAS100_SB",
     "CME_MINI:MES1!": "US500_SB",
+    "CBOT_MINI:MYM1!": "MYM1!",
+    "CME_MINI:M2K1!": "M2K1!",
+    "CME:M6A1!": "M6A1!",
+    "CME:M6E1!": "M6E1!",
+    "CME:MBT1!": "MBT1!",
+    "CME:MET1!": "MET1!",
     "NYMEX:CL1!": "Crude_SB",
+    "NYMEX:MCL1!": "Crude_SB",
     "NYMEX:CLM26!": "Crude_SB",  # Legacy alias only
     "CLM26!": "Crude_SB",  # Legacy alias only
     # Yahoo-style aliases -> Pepperstone
@@ -353,6 +449,10 @@ MT5_SYMBOL_MAP = {
     "NQ=F": "NAS100_SB",
     "ES=F": "US500_SB",
     "GC=F": "Gold_SB",
+    "MYM=F": "MYM1!",
+    "M2K=F": "M2K1!",
+    "6A=F": "M6A1!",
+    "6E=F": "M6E1!",
     "SI=F": "XAGUSD",
     "YM=F": "YM1!",
     "RTY=F": "M2K1!",
@@ -367,6 +467,12 @@ MT5_SYMBOL_MAP = {
     "GC": "Gold_SB",
     "SI": "XAGUSD",
     "YM": "YM1!",
+    "MYM": "MYM1!",
+    "M2K": "M2K1!",
+    "M6A": "M6A1!",
+    "M6E": "M6E1!",
+    "MBT": "MBT1!",
+    "MET": "MET1!",
     # Gold / Silver
     "XAUUSD": "XAUUSD_SB",
     "Gold_SB": "XAUUSD_SB",

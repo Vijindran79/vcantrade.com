@@ -5676,16 +5676,8 @@ class VcaniTradeApp:
 
         per_unit_risk = abs(entry_price - sl_price)
 
-        # Micro futures contract multipliers ($ per price unit) — MUST match rpa_executor mapping
-        contract_multipliers = {
-            "NQ=F": 2.0,    # MNQ: $2 per point
-            "ES=F": 5.0,    # MES: $5 per point
-            "CL=F": 100.0,  # Micro Crude Oil: $100 per $1.00 move ($1 per 0.01 tick)
-            "MCL=F": 100.0,  # Micro Crude Oil: $100 per $1.00 move ($1 per 0.01 tick)
-            "GC=F": 10.0,   # MGC: $10 per point
-            "SI=F": 10.0,   # Micro Silver: $10 per point
-        }
-        multiplier = contract_multipliers.get(ticker, 1.0)
+        # Shared futures point values keep risk sizing aligned with execution symbols.
+        multiplier = self.profit_lock._point_value_for_asset(ticker)
         dollar_risk_per_contract = per_unit_risk * multiplier
 
         risk_dollar = max(float(risk_eval.get("risk_amount") or 0.0), self.balance * 0.01)

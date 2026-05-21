@@ -1358,6 +1358,8 @@ class RPAExecutor:
         alias_map = {
             "MNQ1": "MNQ", "MES1": "MES", "MCL1": "CL", "MGC1": "GC",
             "NQ1": "NQ", "ES1": "ES", "CL1": "CL", "GC1": "GC",
+            "MYM1": "MYM", "M2K1": "M2K", "M6A1": "M6A", "M6E1": "M6E",
+            "MBT1": "MBT", "MET1": "MET",
             "CLF": "CL", "GCF": "GC",
         }
         if base in alias_map:
@@ -1374,7 +1376,12 @@ class RPAExecutor:
             {"MES", "ES"},
             {"MCL", "CL"},
             {"MGC", "GC", "XAUUSD", "GOLD"},
+            {"MYM", "YM"},
             {"M2K", "RTY"},
+            {"M6A", "6A", "AUD"},
+            {"M6E", "6E", "EUR"},
+            {"MBT", "BTC", "BITCOIN"},
+            {"MET", "ETH", "ETHER"},
         ]
         for group in groups:
             if any(token in text for token in group):
@@ -1387,7 +1394,11 @@ class RPAExecutor:
             return False
         title_up = str(title or "").upper()
         expected = self._ticker_contract_family(ticker_hint)
-        known_roots = {"MNQ", "NQ", "MES", "ES", "MCL", "CL", "MGC", "GC", "M2K", "RTY"}
+        known_roots = {
+            "MNQ", "NQ", "MES", "ES", "MCL", "CL", "MGC", "GC",
+            "MYM", "YM", "M2K", "RTY", "M6A", "6A", "M6E", "6E",
+            "MBT", "BTC", "MET", "ETH",
+        }
         present = {root for root in known_roots if root in title_up}
         if not present:
             return False
