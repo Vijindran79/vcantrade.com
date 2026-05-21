@@ -1,6 +1,7 @@
 import time
 import random
 import re
+import inspect
 import threading
 import pyautogui
 import pygetwindow as gw
@@ -508,10 +509,14 @@ class RPAExecutor:
                 """Find a label by regex, then look at sibling / parent / next row for the value."""
                 try:
                     locator = page.locator(f"text=/{regex_pattern}/i")
-                    if locator.count() == 0:
+                    count = locator.count()
+                    if inspect.isawaitable(count):
+                        count = self._run_async(count)
+                    if count == 0:
                         return None
 
-                    result = locator.first.evaluate("""(el) => {
+                    first = locator.first
+                    result = first.evaluate("""(el) => {
                         const out = { labelText: el.textContent || '', valueText: '', coords: null };
                         const rect = el.getBoundingClientRect();
                         out.coords = { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
@@ -546,6 +551,8 @@ class RPAExecutor:
                         }
                         return out;
                     }""")
+                    if inspect.isawaitable(result):
+                        result = self._run_async(result)
 
                     label_text = result.get("labelText", "")
                     value_text = result.get("valueText", "")
@@ -1094,6 +1101,15 @@ class RPAExecutor:
         if not window:
             logger.error("[FAIL] Could not find TradingView window for %s", ticker)
             return False
+        window_title = getattr(window, "title", "")
+        if self._window_title_conflicts_with_ticker(window_title, ticker):
+            logger.critical(
+                "[ALARM] TRADE ABORTED: window title '%s' does not match requested ticker %s",
+                window_title,
+                ticker,
+            )
+            self.last_failure_reason = f"Window/ticker mismatch: {window_title} vs {ticker}"
+            return False
 
         try:
             window.activate()
@@ -1184,6 +1200,33 @@ class RPAExecutor:
             terms.add(alias_map[root])
         return [t.lower() for t in terms if t and len(t) >= 2]
 
+    def _ticker_contract_family(self, ticker):
+        """Return acceptable contract roots for a requested ticker."""
+        text = str(ticker or "").upper()
+        groups = [
+            {"MNQ", "NQ"},
+            {"MES", "ES"},
+            {"MCL", "CL"},
+            {"MGC", "GC", "XAUUSD", "GOLD"},
+            {"M2K", "RTY"},
+        ]
+        for group in groups:
+            if any(token in text for token in group):
+                return group
+        return set(self._ticker_window_terms(ticker))
+
+    def _window_title_conflicts_with_ticker(self, title: str, ticker_hint) -> bool:
+        """Detect when a browser title clearly belongs to a different futures contract."""
+        if not ticker_hint:
+            return False
+        title_up = str(title or "").upper()
+        expected = self._ticker_contract_family(ticker_hint)
+        known_roots = {"MNQ", "NQ", "MES", "ES", "MCL", "CL", "MGC", "GC", "M2K", "RTY"}
+        present = {root for root in known_roots if root in title_up}
+        if not present:
+            return False
+        return not bool(present & expected)
+
     def _get_browser_window(self, ticker_hint=None):
         """Find the active broker/browser window using config hints and ticker titles."""
         default_hints = ["TradingView", "Google Chrome", "Chrome", "Brave", "Microsoft Edge", "Edge"]
@@ -1204,6 +1247,13 @@ class RPAExecutor:
                     continue
                 title = (getattr(window, "title", "") or "").strip()
                 if not title:
+                    continue
+                if self._window_title_conflicts_with_ticker(title, ticker_hint):
+                    logger.warning(
+                        "[WINDOW] Rejecting browser window for %s because title is a different contract: %s",
+                        ticker_hint,
+                        title,
+                    )
                     continue
                 lowered = title.lower()
                 score = 0
@@ -1234,9 +1284,18 @@ class RPAExecutor:
             try:
                 windows = [w for w in gw.getWindowsWithTitle(hint) if getattr(w, "visible", True)]
                 if windows:
-                    logger.info("[WINDOW] Selected browser window by hint '%s': %s", hint, windows[0].title)
+                    window = windows[0]
+                    title = getattr(window, "title", "")
+                    if self._window_title_conflicts_with_ticker(title, ticker_hint):
+                        logger.error(
+                            "[WINDOW] Refusing hint-selected window for %s; title is %s",
+                            ticker_hint,
+                            title,
+                        )
+                        continue
+                    logger.info("[WINDOW] Selected browser window by hint '%s': %s", hint, title)
                     self.consecutive_window_failures = 0
-                    return windows[0]
+                    return window
             except Exception as hint_err:
                 logger.debug("[WINDOW] Error searching by hint '%s': %s", hint, hint_err)
                 continue
@@ -1325,6 +1384,8 @@ class RPAExecutor:
                     }
                     return '';
                 }""")
+                if inspect.isawaitable(current):
+                    current = self._run_async(current)
                 if current and target_label.lower() in current.lower():
                     logger.info("[CHAIN-LOCK] TradingView account verified: %s", current)
                     return True
