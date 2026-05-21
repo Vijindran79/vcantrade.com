@@ -6417,8 +6417,39 @@ class VcaniTradeApp:
 
         self.cmd.log(
             f'<span style="color:#58A6FF;font-weight:bold">[RISK PLAN]</span> '
-            f'{plan["risk_text"]}'
+                f'{plan["risk_text"]}'
         )
+
+        def _record_hunter_position(route: str) -> None:
+            amount = plan["quantity"] * plan["entry_price"]
+            position = {
+                "asset": symbol,
+                "side": action,
+                "entry": plan["entry_price"],
+                "current": plan["entry_price"],
+                "amount": amount,
+                "quantity": plan["quantity"],
+                "tp_price": plan["take_profit"],
+                "sl_price": plan["stop_loss"],
+                "initial_risk_amount": abs(plan["entry_price"] - plan["stop_loss"]) * plan["quantity"],
+                "break_even_locked": False,
+                "last_trailing_check_ts": 0.0,
+                "pnl": 0.0,
+                "pnl_pct": 0.0,
+                "order_id": f"hunter_{route}_{symbol}_{int(datetime.now().timestamp())}",
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "bot_opened": True,
+                "source": "HUNTER",
+                "ai_reason": plan["reason"],
+            }
+            self.positions.append(position)
+            self.cmd.update_positions(self.positions)
+            self.cmd.add_trade_log(symbol, action, amount, 0, "Open")
+            self.ai_narrator.update_live_pnl(self.total_pnl + sum(p.get("pnl", 0.0) for p in self.positions), len(self.positions))
+            self.cmd.log(
+                f'<span style="color:#3FB950;font-weight:bold">[TRACKED]</span> '
+                f'Hunter position tracked: {action} {symbol} | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
+            )
 
         # Position Safety Check: Close-and-Reverse or skip duplicate
         should_exec, conflict_note = self._check_position_conflict(symbol, action)
@@ -6450,6 +6481,7 @@ class VcaniTradeApp:
                     f'{action} {symbol} executed on MT5 | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
                 )
                 self.ai_narrator.add_activity("[MT5]", f"{action} {symbol}")
+                _record_hunter_position("mt5")
             else:
                 self.cmd.log(
                     f'<span style="color:#F85149;font-weight:bold">[MT5 FAIL]</span> '
@@ -6482,6 +6514,7 @@ class VcaniTradeApp:
                         f'RPA executed {action} {symbol} | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
                     )
                     self.ai_narrator.add_activity("[OK]", f"RPA {action} {symbol}")
+                    _record_hunter_position("rpa")
                 else:
                     failure = getattr(self.rpa_hand, "last_failure_reason", "RPA hand failed")
                     self.cmd.log(
