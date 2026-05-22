@@ -31,8 +31,8 @@ MAX_DAILY_LOSS = float(
     os.getenv("MAX_DAILY_LOSS", "100.00")
 )  # Maximum loss per day in account currency
 MAX_OPEN_POSITIONS = int(
-    os.getenv("MAX_OPEN_POSITIONS", "3")
-)  # Maximum concurrent trades
+    os.getenv("MAX_OPEN_POSITIONS", "1")  # Reduced from 3 to 1 for focused trading
+)  # Maximum concurrent trades - REDUCED to prevent overload
 COOLDOWN_AFTER_STOP = int(
     os.getenv("COOLDOWN_AFTER_STOP", "300")
 )  # Seconds to wait after hitting stop loss (5 min)
@@ -104,6 +104,24 @@ SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "False").lower() ==
 SCAN_INTERVAL = 10  # Seconds between market scans
 WATCHLIST_INTERVAL = 60  # Seconds between watchlist scans (slower)
 
+# ===== SYMBOL PRIORITY SYSTEM - REDUCE OVERLOAD =====
+# Limit active symbols to prevent system overload and improve execution speed
+MAX_ACTIVE_SYMBOLS = int(os.getenv("MAX_ACTIVE_SYMBOLS", "4"))  # Maximum symbols to monitor per cycle
+
+# Priority tiers: lower number = higher priority (analyzed first)
+PRIORITY_SYMBOLS = {
+    # Tier 1: Primary focus (analyze every cycle)
+    "GC=F": 1,      # Gold - high liquidity
+    "CL=F": 1,      # Crude Oil - high volatility
+    
+    # Tier 2: Secondary (analyze every 2nd cycle if system loaded)
+    "CME_MINI:MNQ1!": 2,   # Nasdaq
+    "CME_MINI:MES1!": 2,   # S&P 500
+    
+    # Tier 3: Tertiary (only when system has capacity)
+    "YM=F": 3,      # Dow Jones
+}
+
 # Optional sniper override. Leave empty to let the live dashboard watchlist drive the session.
 # Format from env: "BTC-USD,ES=F,NQ=F".
 _active_scan_raw = os.getenv("ACTIVE_SCAN_LIST", "").strip()
@@ -132,6 +150,18 @@ SMA_FAST = 20  # Fast SMA period
 SMA_SLOW = 50  # Slow SMA period
 SWARM_CONFIDENCE_THRESHOLD = 0.50  # Minimum confidence to trigger trade (0.0-1.0) for testing the live execution path
 MIN_CONFIDENCE_THRESHOLD = 50.0  # Minimum execution confidence score (0-100) before the RPA hand is allowed to click
+
+# ===== ENTRY CONFIDENCE THRESHOLDS - PREDATOR CLASS =====
+# Lower threshold for faster entries, higher for position sizing
+ENTRY_CONFIDENCE_THRESHOLD = int(os.getenv("ENTRY_CONFIDENCE_THRESHOLD", "70"))  # 70% for fast entries
+HIGH_CONFIDENCE_THRESHOLD = int(os.getenv("HIGH_CONFIDENCE_THRESHOLD", "85"))   # 85% for pyramiding/larger size
+
+# ===== MARKET REGIME FILTERS - RUSH HOUR PROTECTION =====
+# Prevent trades in choppy conditions, adapt to volatility
+ALLOW_TRADES_IN_CHOP = False  # Block trades in choppy markets (CHOP regime)
+CHOP_MAX_POSITION_SIZE = 0.5  # If allowed, max 50% size in chop
+TREND_FULL_SIZE = True        # Full size in trending markets
+HOT_VOLATILITY_SIZE_ADJUST = 0.7  # Reduce to 70% size in HOT volatility
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_ENABLED = True  # Enable local market scanning
@@ -163,13 +193,17 @@ HOTKEY_CLOSE = "<ctrl>+x"  # Close position hotkey
 POSITION_OPEN_IMAGE = os.getenv("POSITION_OPEN_IMAGE", "assets/tv_position_open_label.png")
 
 # ===== SLIPPAGE GUARD (Execution Safety) =====
-# Relaxed for crypto volatility - was 0.50/0.10
+# Increased for volatile futures like CL=F, GC=F - was 2.50%
 MAX_SLIPPAGE_PERCENT = float(
-    os.getenv("MAX_SLIPPAGE_PERCENT", "2.50")
-)  # Max 2.5% price movement allowed (crypto-friendly)
+    os.getenv("MAX_SLIPPAGE_PERCENT", "5.0")  # Increased from 2.50% to 5.0% for volatile markets
+)  # Max 5.0% price movement allowed (futures-friendly)
 MAX_SPREAD_PERCENT = float(
     os.getenv("MAX_SPREAD_PERCENT", "0.30")
 )  # Max 0.3% bid-ask spread allowed (thin market tolerant)
+
+# Volatile assets get even higher slippage tolerance
+VOLATILE_ASSETS = ["CL=F", "NG=F", "BTCUSD", "ETHUSD", "XAUUSD"]
+MAX_SLIPPAGE_VOLATILE = float(os.getenv("MAX_SLIPPAGE_VOLATILE", "8.0"))  # 8% for high volatility
 
 # ===== AUTONOMOUS RISK MANAGEMENT =====
 # Fixed TP/SL percent targets are intentionally disabled. Entries now rely on
