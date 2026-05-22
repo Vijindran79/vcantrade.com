@@ -85,5 +85,7 @@ class LLMAnalyzer:
                 asset=market_data.asset,
                 confidence=ConfidenceLevel.LOW,
                 reason="All analysis pipelines failed. Standing aside.",
+                market_regime=None,
+                volatility_state=None,
             )
             return output, None

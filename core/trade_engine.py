@@ -74,6 +74,14 @@ class TradeEngine:
         Process trading signal from LLM analyzer
         Returns TradeRecord if trade executed, None otherwise
         """
+        # Check market regime filter (CHOPPY market protection)
+        if signal.market_regime and signal.market_regime.upper() == "CHOP":
+            if not config.ALLOW_TRADES_IN_CHOP:
+                logger.warning(
+                    f"🚫 CHOPPY MARKET BLOCKED: {signal.asset} | Regime={signal.market_regime} | Volatility={signal.volatility_state or 'N/A'}"
+                )
+                return None
+        
         # Check safety controls
         if not self._check_safety():
             logger.warning(f"Trade blocked by safety controls: {signal.asset}")
