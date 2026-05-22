@@ -1468,6 +1468,7 @@ class VcaniTradeApp:
         self.session_peak_pnl = 0.0
         self.protected_session_pnl = 0.0
         self.daily_profit_ladder_triggered = False
+        self._tv_no_position_confirmations = 0
         self.positions = []
         self.locked_tickers = {}
         self.rpa_execution_enabled = True
@@ -1658,6 +1659,7 @@ class VcaniTradeApp:
         self.session_peak_pnl = 0.0
         self.protected_session_pnl = 0.0
         self.daily_profit_ladder_triggered = False
+        self._tv_no_position_confirmations = 0
         self.positions = []  # Live positions
 
         # Trading settings
@@ -4186,10 +4188,71 @@ class VcaniTradeApp:
             except Exception:
                 pass
 
+    def _tradingview_has_open_positions(self) -> Optional[bool]:
+        """Return TradingView's open-position state, or None when it cannot be verified."""
+        if not bool(getattr(config, "MANUAL_CLOSE_SYNC_ENABLED", True)):
+            return None
+
+        ghost = getattr(self, "_ghost_executor", None)
+        page = getattr(getattr(self, "browser_agent", None), "page", None)
+        loop = getattr(self, "_browser_loop", None)
+        if ghost is None or page is None or loop is None or loop.is_closed():
+            return None
+
+        try:
+            ghost.set_page(page)
+            future = asyncio.run_coroutine_threadsafe(ghost.has_open_positions(), loop)
+            return bool(future.result(timeout=3))
+        except Exception as exc:
+            logger.debug("[SYNC] TradingView position query unavailable: %s", exc)
+            return None
+
+    def _sync_manual_tradingview_close(self) -> bool:
+        """Clear internal focus lock after the user manually closes the TV position."""
+        if not self.positions:
+            self._tv_no_position_confirmations = 0
+            return False
+
+        has_open = self._tradingview_has_open_positions()
+        if has_open is None:
+            return False
+        if has_open:
+            self._tv_no_position_confirmations = 0
+            return False
+
+        self._tv_no_position_confirmations += 1
+        required = max(1, int(getattr(config, "MANUAL_CLOSE_CONFIRMATIONS", 2)))
+        if self._tv_no_position_confirmations < required:
+            logger.info(
+                "[SYNC] TradingView reports no open positions (%s/%s confirmations)",
+                self._tv_no_position_confirmations,
+                required,
+            )
+            return False
+
+        closing = list(self.positions)
+        self.cmd.log(
+            f'<span style="color:#3FB950;font-weight:bold">[SYNC]</span> '
+            f'TradingView position closed manually; releasing focus lock for next opportunity'
+        )
+        for pos in closing:
+            self._close_position(pos, "Manual Close Sync")
+
+        self.positions = []
+        self._tv_no_position_confirmations = 0
+        self.cmd.update_positions(self.positions)
+        self.profit_lock.open_positions = []
+        self.ai_narrator.update_live_pnl(self.total_pnl, 0)
+        self._refresh_live_ledger()
+        return True
+
     def _update_positions(self):
         """Update live positions with current prices and check TP/SL."""
         import yfinance as yf
         import concurrent.futures
+
+        if self._sync_manual_tradingview_close():
+            return
 
         updated_positions = []
         for pos in self.positions:
