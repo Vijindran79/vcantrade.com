@@ -40,6 +40,8 @@ class LLMAnalysisOutput(BaseModel):
         ..., max_length=500, description="Brief explanation of the signal"
     )
     timestamp: Optional[str] = Field(None, description="ISO timestamp of analysis")
+    market_regime: Optional[str] = Field(None, description="Market regime: TREND, CHOP, BREAKOUT, MEAN_REVERT")
+    volatility_state: Optional[str] = Field(None, description="Volatility state: CALM, NORMAL, HOT")
 
 
 class TradeRecord(BaseModel):

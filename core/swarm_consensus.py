@@ -258,6 +258,8 @@ Return JSON only:
             stop_loss=result.get("stop_loss", market_data.price * 0.99),
             take_profit=result.get("take_profit", market_data.price * 1.01),
             reason=result.get("reason", "Qwen 2.5 analysis based on technical indicators"),
+            market_regime=vibe_result.get("market_regime"),
+            volatility_state=vibe_result.get("volatility_state"),
         )
 
         signal_label = "WAIT" if output.action == SignalAction.HOLD else output.action.value

@@ -2420,6 +2420,86 @@ class VcaniTradeApp:
 
         return float(risk_eval.get("stop_loss") or 0.0)
 
+    def _calculate_liquidity_based_tp(
+        self,
+        action: str,
+        entry_price: float,
+        sl_price: float,
+        signal_data: dict,
+    ) -> float:
+        """
+        PREDATOR-CLASS TAKE PROFIT: Calculate TP based on nearest liquidity zone.
+        
+        Philosophy: Exit where liquidity rests, not at arbitrary R:R.
+        
+        For BUY: Target nearest resistance/liquidity ABOVE entry
+        For SELL: Target nearest support/liquidity BELOW entry
+        
+        Fallback: 2:1 R:R if no liquidity zones found
+        """
+        if entry_price <= 0 or sl_price <= 0:
+            return 0.0
+        
+        side = str(action or "").upper()
+        risk_distance = abs(entry_price - sl_price)
+        
+        # Get liquidity zones and structure levels from signal
+        liquidity_zone = signal_data.get("liquidity_zone", {})
+        resistances = signal_data.get("resistance_levels", [])
+        supports = signal_data.get("support_levels", [])
+        
+        if side == "BUY":
+            # For LONG positions: Find nearest resistance/liquidity ABOVE entry
+            # Priority 1: Resistance levels above entry
+            tp_candidates = [r for r in resistances if r > entry_price]
+            if tp_candidates:
+                nearest_resistance = min(tp_candidates)
+                # Add small buffer (0.1%) to ensure we hit the zone
+                tp_price = nearest_resistance * 1.001
+                self.cmd.log(f'🎯 TP SET: Resistance @ ${tp_price:.2f} (nearest: ${nearest_resistance:.2f})')
+                return tp_price
+            
+            # Priority 2: Liquidity zone high above entry
+            zone_high = float(liquidity_zone.get("high", 0.0) or 0.0)
+            if zone_high > entry_price:
+                tp_price = zone_high * 1.001
+                self.cmd.log(f'🎯 TP SET: Liquidity zone @ ${tp_price:.2f}')
+                return tp_price
+            
+            # Fallback: 2:1 R:R
+            tp_price = entry_price + (risk_distance * 2.0)
+            self.cmd.log(f'🎯 TP SET: 2:1 R:R fallback @ ${tp_price:.2f}')
+            return tp_price
+            
+        elif side == "SELL":
+            # For SHORT positions: Find nearest support/liquidity BELOW entry
+            # Priority 1: Support levels below entry
+            tp_candidates = [s for s in supports if s < entry_price]
+            if tp_candidates:
+                nearest_support = max(tp_candidates)
+                # Subtract small buffer (0.1%) to ensure we hit the zone
+                tp_price = nearest_support * 0.999
+                self.cmd.log(f'🎯 TP SET: Support @ ${tp_price:.2f} (nearest: ${nearest_support:.2f})')
+                return tp_price
+            
+            # Priority 2: Liquidity zone low below entry
+            zone_low = float(liquidity_zone.get("low", 0.0) or 0.0)
+            if zone_low > 0 and zone_low < entry_price:
+                tp_price = zone_low * 0.999
+                self.cmd.log(f'🎯 TP SET: Liquidity zone @ ${tp_price:.2f}')
+                return tp_price
+            
+            # Fallback: 2:1 R:R
+            tp_price = entry_price - (risk_distance * 2.0)
+            self.cmd.log(f'🎯 TP SET: 2:1 R:R fallback @ ${tp_price:.2f}')
+            return tp_price
+        
+        # Default: 2:1 R:R
+        if side == "BUY":
+            return entry_price + (risk_distance * 2.0)
+        else:
+            return entry_price - (risk_distance * 2.0)
+
     def _pick_more_protective_stop(self, position: dict, updates: list[dict]) -> Optional[dict]:
         """Choose the stop update that protects more profit for the current side."""
         if not updates:
@@ -3231,6 +3311,36 @@ class VcaniTradeApp:
                 f'bypassing confidence gate for {action} {ticker} at {confidence_score:.0f}%'
             )
 
+        # ── Market Regime Gate (Rush Hour Protection) ─────────────────────
+        vibe_context = dict(signal_data.get("vibe_context") or {})
+        market_regime = vibe_context.get("market_regime", "TREND")
+        volatility_state = vibe_context.get("volatility_state", "NORMAL")
+        
+        if market_regime == "CHOP" and not config.ALLOW_TRADES_IN_CHOP and not force_execute:
+            logger.info("EXEC_CLOUD: blocked by choppy market regime for %s", ticker)
+            self._log_gatekeeper_abort(
+                "Market Regime",
+                f"{action} {ticker} | CHOP detected, trading disabled in choppy conditions"
+            )
+            self.cmd.log(
+                f'<span style="color:#F85149;font-weight:bold">🛑 CHOPPY MARKET BLOCKED</span>: '
+                f'{ticker} | Market lacks clear direction - wait for trend'
+            )
+            self.ai_narrator.add_activity("🛑", f"CHOP blocked - {ticker}")
+            self._on_ticker_status_update(ticker, "trade_rejected")
+            return
+        elif market_regime == "CHOP" and config.ALLOW_TRADES_IN_CHOP:
+            self.cmd.log(
+                f'<span style="color:#D29922">⚠️ CHOPPY MARKET WARNING</span>: '
+                f'{ticker} | Reducing position size to {int(config.CHOP_MAX_POSITION_SIZE * 100)}%'
+            )
+        
+        if volatility_state == "HOT" and not force_execute:
+            self.cmd.log(
+                f'<span style="color:#D29922">🔥 HOT VOLATILITY</span>: '
+                f'{ticker} | Reducing size to {int(config.HOT_VOLATILITY_SIZE_ADJUST * 100)}% due to elevated volatility'
+            )
+
         if action not in ["BUY", "SELL"]:
             logger.info("EXEC_CLOUD: unsupported action %s for %s", action, ticker)
             self.cmd.log(f"⚠️ Unsupported action for execution: {action}")
@@ -3314,6 +3424,15 @@ class VcaniTradeApp:
         per_unit_risk = abs(entry_price - sl_price)
         risk_dollar = max(float(risk_eval.get("risk_amount") or 0.0), self.balance * 0.01)
         quantity = (risk_dollar / per_unit_risk) if per_unit_risk > 0 else 0.0
+
+        # Apply market regime position sizing adjustments
+        if market_regime == "CHOP" and config.ALLOW_TRADES_IN_CHOP:
+            quantity *= config.CHOP_MAX_POSITION_SIZE
+            logger.info("EXEC_CLOUD: reduced quantity for CHOP regime (%.0f%% size)", config.CHOP_MAX_POSITION_SIZE * 100)
+        
+        if volatility_state == "HOT":
+            quantity *= config.HOT_VOLATILITY_SIZE_ADJUST
+            logger.info("EXEC_CLOUD: reduced quantity for HOT volatility (%.0f%% size)", config.HOT_VOLATILITY_SIZE_ADJUST * 100)
 
         if quantity <= 0 and force_execute:
             fallback_amount = float(signal_data.get("investment_amount", self.default_investment) or self.default_investment or 1000.0)
@@ -3410,7 +3529,8 @@ class VcaniTradeApp:
                 f'bypassing MTF gate for {action} {ticker} {mtf_votes}'
             )
 
-        tp_price = 0.0
+        # ── Calculate Take Profit: Use nearest liquidity zone OR 2:1 R:R fallback ──
+        tp_price = self._calculate_liquidity_based_tp(action, entry_price, sl_price, signal_data)
         signal_data["stop_loss"] = sl_price
         signal_data["take_profit"] = tp_price
         signal_data["liquidity_label"] = self._format_liquidity_label(signal_data)
