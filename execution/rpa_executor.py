@@ -1050,9 +1050,8 @@ class RPAExecutor:
                 if verified:
                     logger.info("[TV-RPA] %s %s executed and verified", action, trade.asset)
                     return True
-                # More lenient: if click succeeded, don't rollback immediately
-                logger.warning("[TV-RPA] Click succeeded but verification failed for %s (will not rollback)", trade.asset)
-                return True  # treat as success to avoid false negatives
+                logger.warning("[TV-RPA] Click sent but order was not verified for %s; treating as failed", trade.asset)
+                return False
             if attempt < 3:
                 backoff = 2 ** (attempt - 1)
                 logger.info("[TV-RPA] Retrying in %ss...", backoff)
@@ -1282,41 +1281,42 @@ class RPAExecutor:
             if self.human_latency_enabled:
                 time.sleep(_weighted_hesitation(0.3, 1.2))
 
-            # AUTO-DETECT: scan left portion of window for TradingView button colors
-            screenshot = pyautogui.screenshot(
-                region=(window.left, window.top, window.width, window.height)
-            )
-            img_data = np.array(screenshot)
+            target_x = target_y = None
+            if bool(getattr(config, "TRADINGVIEW_COLOR_SCAN_FALLBACK_ENABLED", False)):
+                # AUTO-DETECT: optional and disabled by default. It can confuse
+                # candle/label colors for buttons on dense TradingView layouts.
+                screenshot = pyautogui.screenshot(
+                    region=(window.left, window.top, window.width, window.height)
+                )
+                img_data = np.array(screenshot)
 
-            # TradingView button colors (approximate — configurable via config)
-            tv_colors = {
-                "buy_button":  {"rgb": getattr(config, "TV_BUY_RGB",  (41, 98, 255)),  "tol": 40},  # #2962FF
-                "sell_button": {"rgb": getattr(config, "TV_SELL_RGB", (247, 82, 95)),  "tol": 40},  # #F7525F
-            }
+                tv_colors = {
+                    "buy_button":  {"rgb": getattr(config, "TV_BUY_RGB",  (41, 98, 255)),  "tol": 40},
+                    "sell_button": {"rgb": getattr(config, "TV_SELL_RGB", (247, 82, 95)),  "tol": 40},
+                }
 
-            target_rgb = tv_colors.get(target_key, {}).get("rgb", (0, 255, 0))
-            tol = tv_colors.get(target_key, {}).get("tol", 40)
+                target_rgb = tv_colors.get(target_key, {}).get("rgb", (0, 255, 0))
+                tol = tv_colors.get(target_key, {}).get("tol", 40)
+                scan_width = max(1, int(img_data.shape[1] * 0.35))
+                scan_height = max(1, int(img_data.shape[0] * 0.55))
+                candidates = []
+                for y in range(0, scan_height, 3):
+                    for x in range(0, scan_width, 3):
+                        pixel = img_data[y, x]
+                        if all(abs(int(p) - int(t)) <= tol for p, t in zip(pixel[:3], target_rgb)):
+                            candidates.append((x, y))
 
-            # Scan left 35% of window where TradingView order panel lives
-            scan_width = max(1, int(img_data.shape[1] * 0.35))
-            candidates = []
-            for y in range(0, img_data.shape[0], 3):
-                for x in range(0, scan_width, 3):
-                    pixel = img_data[y, x]
-                    if all(abs(int(p) - int(t)) <= tol for p, t in zip(pixel[:3], target_rgb)):
-                        candidates.append((x, y))
+                if candidates:
+                    center_x = int(np.median([c[0] for c in candidates]))
+                    center_y = int(np.median([c[1] for c in candidates]))
+                    target_x = window.left + center_x
+                    target_y = window.top + center_y
+                    logger.info("[TV-STRIKE] %s auto-detected at (%d, %d) via color scan", target_key, target_x, target_y)
 
-            if candidates:
-                center_x = int(np.median([c[0] for c in candidates]))
-                center_y = int(np.median([c[1] for c in candidates]))
-                target_x = window.left + center_x
-                target_y = window.top + center_y
-                logger.info("[TV-STRIKE] %s auto-detected at (%d, %d) via color scan", target_key, target_x, target_y)
-            else:
-                # Fallback to configured coordinates
+            if target_x is None or target_y is None:
                 fallback = config.FALLBACK_COORDS.get(target_key, (960, 540))
                 target_x, target_y = fallback
-                logger.warning("[TV-STRIKE] Color auto-detect failed — using fallback (%d, %d)", target_x, target_y)
+                logger.warning("[TV-STRIKE] Using configured fallback for %s at (%d, %d)", target_key, target_x, target_y)
 
             # Bezier mouse movement
             move_duration = random.uniform(0.4, 0.9) if self.human_latency_enabled else 0.1
@@ -1771,15 +1771,20 @@ class RPAExecutor:
                         logger.info("[VERIFY] Order toast confirmed: %s", str(detail)[:60])
                     return True
 
-                logger.info("[VERIFY] DOM scan found no confirmation for %s — trusting click", ticker)
-                return True  # Lenient: trust the click if DOM doesn't deny it
+                if bool(getattr(config, "TRADINGVIEW_TRUST_UNVERIFIED_CLICK", False)):
+                    logger.warning("[VERIFY] DOM scan found no confirmation for %s — trusting click by config", ticker)
+                    return True
+                logger.warning("[VERIFY] DOM scan found no confirmation for %s — treating click as failed", ticker)
+                return False
 
             except Exception as exc:
                 logger.debug("[VERIFY] DOM verification error: %s", exc)
 
-        # No controlled page available — trust the click
-        logger.info("[VERIFY] No CDP page for DOM check — trusting click success for %s", ticker)
-        return True
+        if bool(getattr(config, "TRADINGVIEW_TRUST_UNVERIFIED_CLICK", False)):
+            logger.warning("[VERIFY] No CDP page for DOM check — trusting click by config for %s", ticker)
+            return True
+        logger.warning("[VERIFY] No CDP page for DOM check — treating %s click as unverified", ticker)
+        return False
 
     def assert_permissions_or_die(self):
         """Check permissions for mouse control."""

@@ -1987,6 +1987,7 @@ class VcaniTradeApp:
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "opened_ts": time.time(),
             "order_id": result.order_id,
             "bot_opened": True,
         }
@@ -4213,6 +4214,16 @@ class VcaniTradeApp:
             self._tv_no_position_confirmations = 0
             return False
 
+        newest_open_ts = 0.0
+        for pos in self.positions:
+            try:
+                newest_open_ts = max(newest_open_ts, float(pos.get("opened_ts", 0.0) or 0.0))
+            except Exception:
+                continue
+        min_age = max(0, int(getattr(config, "MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS", 60)))
+        if newest_open_ts and time.time() - newest_open_ts < min_age:
+            return False
+
         has_open = self._tradingview_has_open_positions()
         if has_open is None:
             return False
@@ -6353,6 +6364,7 @@ class VcaniTradeApp:
             "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "opened_ts": time.time(),
             "bot_opened": True,
         }
 
@@ -6891,6 +6903,7 @@ class VcaniTradeApp:
                 "pnl_pct": 0.0,
                 "order_id": f"hunter_{route}_{symbol}_{int(datetime.now().timestamp())}",
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "opened_ts": time.time(),
                 "bot_opened": True,
                 "source": "HUNTER",
                 "ai_reason": plan["reason"],
@@ -7105,6 +7118,7 @@ class VcaniTradeApp:
             "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "opened_ts": time.time(),
             "bot_opened": True,
         }
 
