@@ -34,12 +34,12 @@ POSITION_OPEN_IMAGE = os.path.join(
 # ---------------------------------------------------------------------------
 
 # Mouse movement duration range (seconds) — humans don't move instantly
-MOUSE_MOVE_MIN = 0.25
-MOUSE_MOVE_MAX = 0.65
+MOUSE_MOVE_MIN = 0.15  # Reduced from 0.25 for faster execution
+MOUSE_MOVE_MAX = 0.35  # Reduced from 0.65 for faster execution
 
 # Jitter delays between actions (seconds)
-ACTION_JITTER_MIN = 0.3
-ACTION_JITTER_MAX = 0.8
+ACTION_JITTER_MIN = 0.15  # Reduced from 0.3 for faster execution
+ACTION_JITTER_MAX = 0.35  # Reduced from 0.8 for faster execution
 
 # Keystroke typing delay per character (seconds)
 TYPE_DELAY_MIN = 0.02
@@ -52,8 +52,8 @@ BEZIER_CONTROL_OFFSET = 80
 WINDOW_SETTLE_DELAY = 1.5
 
 # Predator-Class Stealth: Extended reaction delay for Apex/TopStep stealth
-REACTION_DELAY_MIN = 0.8  # Minimum human reaction time (seconds)
-REACTION_DELAY_MAX = 1.6  # Maximum human reaction time (seconds)
+REACTION_DELAY_MIN = 0.3  # Reduced from 0.8 for faster execution
+REACTION_DELAY_MAX = 0.6  # Reduced from 1.6 for faster execution
 
 
 # ---------------------------------------------------------------------------
@@ -886,14 +886,34 @@ class RPAExecutor:
         return self.move_human_like(x, y)
 
     def _execute_entry_with_retry(self, button_point: str, trade: TradeRecord) -> bool:
-        for attempt in range(2):
+        """Enhanced retry with window refocus between attempts."""
+        max_attempts = 3
+        
+        for attempt in range(max_attempts):
+            logger.info(f"Execution attempt {attempt + 1}/{max_attempts} for {trade.asset}")
+            
+            # Refocus window before each attempt (except first)
+            if attempt > 0:
+                logger.warning(f"Refocusing window after failed attempt {attempt}")
+                time.sleep(0.3)
+                self.bring_tradingview_to_front(ticker_hint=trade.asset)
+            
             if not self._mouse_click_with_input(button_point, trade, fill_sl=True, fill_tp=True):
+                logger.warning(f"Attempt {attempt + 1} failed for {trade.asset}")
+                time.sleep(0.5)  # Brief pause before retry
                 continue
-            time.sleep(1.0)
+                
+            # Wait for position confirmation
+            time.sleep(1.5)  # Increased from 1.0s
+            
             if self._position_open_visible():
-                logger.info("Position-open verification succeeded for %s on attempt %s", trade.asset, attempt + 1)
+                logger.info(f"Position verified for {trade.asset} on attempt {attempt + 1}")
                 return True
-            logger.warning("Position-open verification failed for %s on attempt %s", trade.asset, attempt + 1)
+                
+            logger.warning(f"Position verification failed for {trade.asset} on attempt {attempt + 1}")
+        
+        logger.error(f"All {max_attempts} attempts failed for {trade.asset}")
+        self.last_failure_reason = f"Failed after {max_attempts} attempts"
         return False
 
     def _execute_buy(self, trade: TradeRecord) -> bool:
@@ -1068,6 +1088,11 @@ class RPAExecutor:
             logger.error("Mouse execution not available")
             return False
 
+        # FORCE window focus before ANY action - critical for reliability
+        if not self._verify_window_visible(ticker_hint=trade.asset):
+            logger.error(f"Cannot execute {button_point} - window not visible for {trade.asset}")
+            return False
+
         if button_point == "sell_button":
             logger.info("Bearish execution path confirmed - using sell_button coordinates")
 
@@ -1075,8 +1100,8 @@ class RPAExecutor:
         if not self._mouse_click(button_point, ticker_hint=trade.asset):
             return False
 
-        # Human pause — waiting for order dialog to open
-        time.sleep(random.uniform(0.4, 0.9))
+        # Human pause — waiting for order dialog to open (reduced from 0.4-0.9s)
+        time.sleep(random.uniform(0.2, 0.5))
 
         # Step 2: Fill Stop Loss
         if fill_sl and trade.stop_loss:
