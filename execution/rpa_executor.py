@@ -1024,8 +1024,7 @@ class RPAExecutor:
         return False
 
     def _execute_trade_tradingview(self, trade):
-        """Active TradingView execution: physically click the Buy/Sell buttons.
-        Uses color-based auto-detection (blue Buy / red Sell) with FALLBACK_COORDS fallback."""
+        """Active TradingView execution: HTML/Playwright first, physical mouse fallback second."""
         action = self._normalize_action(trade.action)
         target_key = "buy_button" if action == "BUY" else "sell_button" if action == "SELL" else None
         if not target_key:
@@ -1050,8 +1049,11 @@ class RPAExecutor:
                 if verified:
                     logger.info("[TV-RPA] %s %s executed and verified", action, trade.asset)
                     return True
-                logger.warning("[TV-RPA] Click sent but order was not verified for %s; treating as failed", trade.asset)
-                return False
+                logger.warning(
+                    "[TV-RPA] Click sent but order was not verified for %s; retrying cascade from HTML",
+                    trade.asset,
+                )
+                success = False
             if attempt < 3:
                 backoff = 2 ** (attempt - 1)
                 logger.info("[TV-RPA] Retrying in %ss...", backoff)
