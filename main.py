@@ -3956,14 +3956,33 @@ class VcaniTradeApp:
         if new_stop <= 0:
             return False
 
+        now_ts = time.time()
+        cooldown = max(5, int(getattr(config, "STOP_UPDATE_RETRY_COOLDOWN_SECONDS", 60)))
+        fail_key = f"{reason}:{new_stop:.4f}"
+        last_fail_key = str(position.get("last_stop_update_fail_key", "") or "")
+        last_fail_ts = float(position.get("last_stop_update_fail_ts", 0.0) or 0.0)
+        if last_fail_key == fail_key and now_ts - last_fail_ts < cooldown:
+            logger.debug(
+                "[SHIELD] Stop update retry suppressed for %s %s -> %.4f",
+                position.get("asset", "unknown"),
+                reason,
+                new_stop,
+            )
+            return False
+
         if not self.rpa_hand.update_stop_loss(new_stop, ticker_hint=position["asset"]):
+            position["last_stop_update_fail_key"] = fail_key
+            position["last_stop_update_fail_ts"] = now_ts
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">[WARN] STOP UPDATE FAILED</span>: '
-                f'{position["asset"]} {reason} -> ${new_stop:.4f}'
+                f'{position["asset"]} {reason} -> ${new_stop:.4f} '
+                f'(retrying in {cooldown}s; virtual profit shield still active)'
             )
             return False
 
         position["sl_price"] = new_stop
+        position.pop("last_stop_update_fail_key", None)
+        position.pop("last_stop_update_fail_ts", None)
         if stop_update.get("break_even_locked"):
             position["break_even_locked"] = True
         position["last_stop_update_reason"] = reason
