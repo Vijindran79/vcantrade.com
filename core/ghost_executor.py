@@ -19,6 +19,8 @@ import logging
 import asyncio
 from typing import Optional
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,38 +55,64 @@ class GhostExecutor:
             cdp_url = self._cdp_url
             logger.info("[GHOST] Connecting to TradingView Desktop at %s", cdp_url)
 
+            # Use the same generous timeout as browser_agent for Electron / TV Desktop
+            connect_timeout = getattr(config, "CDP_CONNECT_TIMEOUT_MS", 240000)
             try:
-                self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    cdp_url, timeout=connect_timeout
+                )
             except Exception as conn_err:
                 logger.error(
                     "[GHOST] Cannot connect to TradingView Desktop at %s. "
                     "Ensure it is running with --remote-debugging-port=9222. "
-                    "Launch via: .\\scripts\\launch_tv_debug_bat.bat | Error: %s",
+                    "Error: %s",
                     cdp_url, conn_err
                 )
                 await self._playwright.stop()
                 self._playwright = None
                 return False
 
-            # Find the TradingView page
-            contexts = self._browser.contexts
-            for ctx in contexts:
-                for pg in ctx.pages:
-                    url = (pg.url or "").lower()
-                    if "tradingview" in url:
-                        self._page = pg
-                        logger.info("[GHOST] Connected to TradingView Desktop tab: %s", pg.url[:80])
-                        self._connected = True
-                        return True
+            # --- Tolerant page acquisition (wait for chart tab like browser_agent does) ---
+            contexts = self._browser.contexts or []
+            page_wait = getattr(config, "CDP_PAGE_WAIT_SECONDS", 45)
+            selected = None
 
-            # If no TV tab found, use the first available page
-            if contexts and contexts[0].pages:
-                self._page = contexts[0].pages[0]
-                logger.info("[GHOST] Connected to first available page: %s", self._page.url[:80])
+            # quick pass
+            for ctx in reversed(contexts):
+                for pg in (ctx.pages or []):
+                    if "tradingview" in (pg.url or "").lower():
+                        selected = pg
+                        break
+                if selected:
+                    break
+
+            # patient wait (Electron often needs time)
+            if not selected and contexts:
+                logger.info("[GHOST] Browser connected but no TradingView tab yet — waiting up to %ds...", page_wait)
+                deadline = asyncio.get_event_loop().time() + page_wait
+                while asyncio.get_event_loop().time() < deadline and not selected:
+                    await asyncio.sleep(1.2)
+                    contexts = self._browser.contexts or []
+                    for ctx in reversed(contexts):
+                        for pg in (ctx.pages or []):
+                            if "tradingview" in (pg.url or "").lower():
+                                selected = pg
+                                logger.info("[GHOST] TradingView tab appeared: %s", selected.url[:80])
+                                break
+                        if selected:
+                            break
+
+            if not selected and contexts and contexts[0].pages:
+                selected = contexts[0].pages[0]
+                logger.info("[GHOST] Using first available page: %s", selected.url[:80])
+
+            if selected:
+                self._page = selected
                 self._connected = True
+                logger.info("[GHOST] Connected to TradingView Desktop tab: %s", selected.url[:80])
                 return True
 
-            logger.error("[GHOST] No pages found in TradingView Desktop")
+            logger.error("[GHOST] No usable pages found in TradingView Desktop after wait")
             await self._playwright.stop()
             self._playwright = None
             return False

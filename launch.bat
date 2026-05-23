@@ -8,7 +8,7 @@ REM ===========================================================================
 title VcanTrade AI
 
 REM --- Go to the bot folder ---
-cd /d "C:\Users\vijin\vcantrade.com-4"
+cd /d "C:\Users\vijin\vcantrade.com-3"
 
 REM --- Kill any old bot still running ---
 taskkill /F /IM python.exe 2>nul >nul

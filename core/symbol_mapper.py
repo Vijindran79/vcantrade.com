@@ -183,6 +183,9 @@ def normalize_yfinance_symbol(raw_symbol: str | None) -> str:
     if compact in _CRYPTO_YAHOO_ALIASES:
         return _CRYPTO_YAHOO_ALIASES[compact]
 
+    if re.fullmatch(r"[A-Z]{1,4}=F\d+", upper):
+        return re.sub(r"\d+$", "", upper)
+
     crypto_match = re.fullmatch(r"(BTC|ETH|SOL|XRP|DOGE|ADA|BNB|LTC|BCH|DOT|AVAX|LINK)(?:USD|USDT)?", compact)
     if crypto_match:
         return f"{crypto_match.group(1)}-USD"

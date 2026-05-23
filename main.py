@@ -1185,7 +1185,14 @@ class MultiAssetHunterThread(QThread):
 
             # 6. Execute if BUY/SELL AND confidence meets threshold
             if signal in ("BUY", "SELL"):
-                if confidence >= config.MIN_CONFIDENCE_THRESHOLD:
+                hunter_threshold = float(
+                    getattr(
+                        config,
+                        "HUNTER_EXECUTION_CONFIDENCE_PCT",
+                        getattr(config, "MIN_CONFIDENCE_THRESHOLD", 80.0),
+                    )
+                )
+                if confidence >= hunter_threshold:
                     logger.critical(
                         "[HUNTER] %s SIGNAL: %s | Confidence: %d%% | Threat: %s | %s",
                         symbol, signal, confidence, threat, reason
@@ -1194,11 +1201,11 @@ class MultiAssetHunterThread(QThread):
                 else:
                     logger.info(
                         "[HUNTER] %s %s signal REJECTED | Confidence %d%% < threshold %d%% | %s",
-                        symbol, signal, confidence, config.MIN_CONFIDENCE_THRESHOLD, reason
+                        symbol, signal, confidence, hunter_threshold, reason
                     )
                     self.status_update.emit(
                         symbol, "SKIPPED_LOW_CONFIDENCE",
-                        f"Confidence {confidence}% below {config.MIN_CONFIDENCE_THRESHOLD}%"
+                        f"Confidence {confidence}% below {hunter_threshold:.0f}%"
                     )
             else:
                 logger.info("[HUNTER] %s no trade setup | %s", symbol, reason)
@@ -1537,6 +1544,7 @@ class VcaniTradeApp:
         self._vibe_strategy_worker = None
         self.session_detector = MarketSessionDetector()
         self.slippage_guard = SlippageGuard()
+        self._last_pretrade_market_prices = {}
         self.support_resistance_levels = {}
         self.latest_confidence_score = 0.0
         self.analysis_mode_status = "READY"
@@ -1886,6 +1894,12 @@ class VcaniTradeApp:
                 f'{ticker} live=${current_market_price:.2f} | setup=${entry_price:.2f} | '
                 f'slippage={slippage_pct:.3f}% | spread={spread_pct:.3f}%'
             )
+            self._last_pretrade_market_prices[ticker] = {
+                "price": float(current_market_price),
+                "setup_price": float(entry_price),
+                "slippage_pct": float(slippage_pct),
+                "ts": time.time(),
+            }
 
             if not slippage_ok:
                 self._log_gatekeeper_abort(
@@ -3843,17 +3857,9 @@ class VcaniTradeApp:
         except Exception as exc:
             logger.debug("[PRICE] MT5 price lookup failed for %s: %s", ticker, exc)
 
-        try:
-            scanner = getattr(self, "cloud_scanner", None)
-            cache = getattr(scanner, "market_data_cache", {}) if scanner else {}
-            for (ticker_key, _, _), df in cache.items():
-                if str(ticker_key).upper() != str(ticker).upper() or df is None or df.empty:
-                    continue
-                close = df.get("Close")
-                if close is not None and not close.dropna().empty:
-                    return float(close.dropna().iloc[-1])
-        except Exception as exc:
-            logger.debug("[PRICE] scanner cache lookup failed for %s: %s", ticker, exc)
+        closes = self._scanner_cached_closes(ticker, min_points=1)
+        if closes is not None and not closes.empty:
+            return float(closes.iloc[-1])
 
         try:
             import yfinance as yf
@@ -3865,6 +3871,152 @@ class VcaniTradeApp:
             logger.debug("[PRICE] yfinance price lookup failed for %s: %s", ticker, exc)
 
         return 0.0
+
+    def _scanner_cached_closes(self, symbol: str, min_points: int = 4):
+        """Return recent scanner candles for a symbol from the live CloudScanner cache."""
+        df = self._scanner_cached_ohlcv(symbol, min_points=min_points)
+        if df is None or getattr(df, "empty", True) or "Close" not in df:
+            return None
+        closes = df["Close"].dropna()
+        return closes if len(closes) >= min_points else None
+
+    def _scanner_cached_ohlcv(self, symbol: str, min_points: int = 4):
+        """Return the best cached OHLCV frame for a symbol from the live CloudScanner."""
+        try:
+            scanner_thread = getattr(self, "cloud_scanner", None)
+            scanner = getattr(scanner_thread, "scanner", scanner_thread)
+            cache = getattr(scanner, "market_data_cache", {}) if scanner else {}
+            if not cache:
+                return None
+
+            requested = str(symbol or "").upper()
+            requested_yf = normalize_yfinance_symbol(requested).upper()
+            best = None
+            best_score = -1
+            for key, df in cache.items():
+                if df is None or getattr(df, "empty", True) or "Close" not in df:
+                    continue
+                ticker_key = str(key[0] if isinstance(key, tuple) and key else key).upper()
+                ticker_yf = normalize_yfinance_symbol(ticker_key).upper()
+                if ticker_key != requested and ticker_yf != requested_yf and not root_matches(ticker_key, requested):
+                    continue
+                if not {"Open", "High", "Low", "Close"}.issubset(set(df.columns)):
+                    continue
+                clean = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+                if len(clean) < min_points:
+                    continue
+                interval = str(key[1] if isinstance(key, tuple) and len(key) > 1 else "")
+                score = len(clean)
+                if interval in {"1m", "1min", "60s"}:
+                    score += 10000
+                if score > best_score:
+                    best = clean
+                    best_score = score
+            return best
+        except Exception as exc:
+            logger.debug("[PRICE] scanner cached OHLCV lookup failed for %s: %s", symbol, exc)
+            return None
+
+    def _resample_ohlcv_frame(self, df, rule: str):
+        """Resample cached 1m candles into 2m/5m/15m price-action frames."""
+        try:
+            if df is None or getattr(df, "empty", True):
+                return None
+            frame = df.copy()
+            if not hasattr(frame.index, "tz") and "Datetime" in frame.columns:
+                frame = frame.set_index("Datetime")
+            if not hasattr(frame.index, "inferred_type") or "date" not in str(frame.index.inferred_type):
+                return None
+            out = frame.resample(rule).agg({
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+            })
+            if "Volume" in frame.columns:
+                out["Volume"] = frame["Volume"].resample(rule).sum()
+            return out.dropna(subset=["Open", "High", "Low", "Close"])
+        except Exception as exc:
+            logger.debug("[PRICE ACTION] Resample %s failed: %s", rule, exc)
+            return None
+
+    def _candle_strength(self, row) -> tuple[float, float, float]:
+        """Return body/range, upper-wick/range, lower-wick/range."""
+        open_price = float(row.get("Open", 0.0) or 0.0)
+        high = float(row.get("High", 0.0) or 0.0)
+        low = float(row.get("Low", 0.0) or 0.0)
+        close = float(row.get("Close", 0.0) or 0.0)
+        candle_range = max(high - low, 0.0001)
+        body = abs(close - open_price) / candle_range
+        upper = (high - max(open_price, close)) / candle_range
+        lower = (min(open_price, close) - low) / candle_range
+        return body, upper, lower
+
+    def _price_action_gate(self, symbol: str, action: str) -> tuple[bool, str]:
+        """15m bias, 5m setup, 2m trigger gate for Hunter entries."""
+        if not bool(getattr(config, "PRICE_ACTION_GATE_ENABLED", True)):
+            return True, "price-action gate disabled"
+
+        side = str(action or "").upper()
+        base = self._scanner_cached_ohlcv(symbol, min_points=20)
+        if base is None or len(base) < 20:
+            if bool(getattr(config, "PRICE_ACTION_GATE_REQUIRE_DATA", True)):
+                return False, "no candle data for 15m/5m/2m price-action gate"
+            return True, "price-action data unavailable; gate configured fail-open"
+
+        frames = {
+            "15m": self._resample_ohlcv_frame(base, "15min"),
+            "5m": self._resample_ohlcv_frame(base, "5min"),
+            "2m": self._resample_ohlcv_frame(base, "2min"),
+        }
+        if any(frame is None or len(frame) < 3 for frame in frames.values()):
+            if bool(getattr(config, "PRICE_ACTION_GATE_REQUIRE_DATA", True)):
+                return False, "not enough 15m/5m/2m candles yet"
+            return True, "partial price-action data; gate configured fail-open"
+
+        f15 = frames["15m"].tail(4)
+        f5 = frames["5m"].tail(4)
+        f2 = frames["2m"].tail(3)
+
+        close15_now = float(f15["Close"].iloc[-1])
+        close15_then = float(f15["Close"].iloc[0])
+        high15_now = float(f15["High"].iloc[-1])
+        low15_now = float(f15["Low"].iloc[-1])
+        high15_prev = float(f15["High"].iloc[-2])
+        low15_prev = float(f15["Low"].iloc[-2])
+
+        if side == "BUY":
+            bias_ok = close15_now > close15_then and (low15_now >= low15_prev or high15_now > high15_prev)
+        else:
+            bias_ok = close15_now < close15_then and (high15_now <= high15_prev or low15_now < low15_prev)
+        if not bias_ok:
+            return False, f"15m bias disagrees with {side}"
+
+        last5 = f5.iloc[-1]
+        prev5 = f5.iloc[-2]
+        body5, upper5, lower5 = self._candle_strength(last5)
+        close5 = float(last5["Close"])
+        open5 = float(last5["Open"])
+        if side == "BUY":
+            setup_ok = close5 > open5 and close5 >= float(prev5["Close"]) and lower5 >= upper5 * 0.8
+        else:
+            setup_ok = close5 < open5 and close5 <= float(prev5["Close"]) and upper5 >= lower5 * 0.8
+        if not setup_ok:
+            return False, f"5m setup not confirmed for {side}"
+
+        last2 = f2.iloc[-1]
+        prev2 = f2.iloc[-2]
+        body2, upper2, lower2 = self._candle_strength(last2)
+        close2 = float(last2["Close"])
+        open2 = float(last2["Open"])
+        if side == "BUY":
+            trigger_ok = close2 > open2 and close2 >= float(prev2["Close"]) and body2 >= 0.25
+        else:
+            trigger_ok = close2 < open2 and close2 <= float(prev2["Close"]) and body2 >= 0.25
+        if not trigger_ok:
+            return False, f"2m trigger not ready for {side}"
+
+        return True, f"15m bias + 5m setup + 2m trigger confirmed for {side}"
 
     def _build_simple_execution_plan(
         self,
@@ -3915,6 +4067,41 @@ class VcaniTradeApp:
             ),
         }
 
+    def _hunter_direction_sanity_check(self, symbol: str, action: str) -> tuple[bool, str]:
+        """Block Hunter only when live cached candles clearly disagree."""
+        side = str(action or "").upper()
+        if side not in {"BUY", "SELL"}:
+            return False, "unsupported action"
+
+        try:
+            closes = self._scanner_cached_closes(symbol, min_points=4)
+            source = "scanner cache"
+            if closes is None or closes.empty:
+                import yfinance as yf
+                market_ticker = self._canonical_market_ticker(symbol)
+                history = yf.Ticker(market_ticker).history(period="30m", interval="1m")
+                if history is not None and not history.empty and "Close" in history:
+                    closes = history["Close"].dropna()
+                    source = "market data"
+
+            if closes is None or len(closes) < 4:
+                return False, "direction data unavailable; waiting for scanner confirmation"
+
+            latest = float(closes.iloc[-1])
+            previous = float(closes.iloc[-2])
+            recent_avg = float(closes.tail(4).mean())
+            rising = latest > previous and latest >= recent_avg
+            falling = latest < previous and latest <= recent_avg
+
+            if side == "BUY" and not rising:
+                return False, f"live price is not rising ({previous:.2f} -> {latest:.2f})"
+            if side == "SELL" and not falling:
+                return False, f"live price is not falling ({previous:.2f} -> {latest:.2f})"
+            return True, f"{source} direction agrees ({previous:.2f} -> {latest:.2f})"
+        except Exception as exc:
+            logger.debug("[HUNTER] Direction sanity check failed for %s: %s", symbol, exc)
+            return False, "direction check unavailable; waiting for scanner confirmation"
+
     def _derive_structure_stop_loss(
         self,
         action: str,
@@ -3942,6 +4129,45 @@ class VcaniTradeApp:
                     return candidate
 
         return float(risk_eval.get("stop_loss") or 0.0)
+
+    def _derive_structure_take_profit(
+        self,
+        action: str,
+        entry_price: float,
+        signal_data: dict,
+        levels: dict,
+    ) -> float:
+        """Place targets just inside nearby structure to improve fill odds."""
+        if entry_price <= 0:
+            return 0.0
+
+        liquidity_zone = signal_data.get("liquidity_zone") or {}
+        zone_low = float(liquidity_zone.get("low", 0.0) or 0.0)
+        zone_high = float(liquidity_zone.get("high", 0.0) or 0.0)
+        zone_level = float(liquidity_zone.get("level", 0.0) or 0.0)
+        side = str(action or "").upper()
+
+        if side == "BUY":
+            candidates = [
+                float(level or 0.0)
+                for level in list(levels.get("resistances", []) or []) + [zone_high, zone_level]
+                if float(level or 0.0) > entry_price
+            ]
+            if candidates:
+                tp_price = min(candidates) * 0.999
+                return tp_price if tp_price > entry_price else 0.0
+
+        elif side == "SELL":
+            candidates = [
+                float(level or 0.0)
+                for level in list(levels.get("supports", []) or []) + [zone_low, zone_level]
+                if 0 < float(level or 0.0) < entry_price
+            ]
+            if candidates:
+                tp_price = max(candidates) * 1.001
+                return tp_price if 0 < tp_price < entry_price else 0.0
+
+        return 0.0
 
     def _pick_more_protective_stop(self, position: dict, updates: list[dict]) -> Optional[dict]:
         """Choose the stop update that protects more profit for the current side."""
@@ -4906,6 +5132,8 @@ class VcaniTradeApp:
         """Keep loss cooldown strict while allowing faster reversal after wins."""
         base_seconds = int(float(getattr(config, "RE_ENTRY_LOCKOUT_MINUTES", 5)) * 60)
         reason_text = str(reason or "").lower()
+        if "manual close" in reason_text:
+            return base_seconds
         if "stop" in reason_text or pnl < 0:
             return base_seconds
         if "profit" in reason_text or "take" in reason_text:
@@ -5754,6 +5982,20 @@ class VcaniTradeApp:
         if not self._run_pretrade_market_audit(ticker, entry_price, force_execute=force_execute):
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
+        audit_snapshot = getattr(self, "_last_pretrade_market_prices", {}).get(ticker) or {}
+        audited_entry_price = float(audit_snapshot.get("price") or 0.0)
+        audit_age = time.time() - float(audit_snapshot.get("ts") or 0.0)
+        if audited_entry_price > 0 and audit_age <= 10:
+            original_entry_price = entry_price
+            entry_price = audited_entry_price
+            signal_data["setup_entry_price"] = original_entry_price
+            signal_data["entry_price"] = entry_price
+            if abs(entry_price - original_entry_price) > max(0.01, original_entry_price * 0.0001):
+                self.cmd.log(
+                    f'<span style="color:#D29922;font-weight:bold">[PRICE SYNC]</span> '
+                    f'{ticker} risk plan rebased from setup ${original_entry_price:.2f} '
+                    f'to live ${entry_price:.2f}'
+                )
 
         # Check if trading is paused due to news
         if self.financial_safety.trading_paused and not force_execute:
@@ -5847,7 +6089,8 @@ class VcaniTradeApp:
             else:
                 sl_price = atr_sl
 
-            tp_price = atr_tp
+            structure_tp = self._derive_structure_take_profit(action, entry_price, signal_data, levels)
+            tp_price = structure_tp if structure_tp > 0 else atr_tp
 
             # Log the ATR-driven risk plan
             rr_ratio = atr_tp_distance / max(atr_stop_distance, 0.0001)
@@ -5909,7 +6152,7 @@ class VcaniTradeApp:
         multiplier = self.profit_lock._point_value_for_asset(ticker)
         dollar_risk_per_contract = per_unit_risk * multiplier
 
-        risk_dollar = max(float(risk_eval.get("risk_amount") or 0.0), self.balance * 0.01)
+        risk_dollar = float(risk_eval.get("risk_amount") or 0.0)
         quantity = (risk_dollar / dollar_risk_per_contract) if dollar_risk_per_contract > 0 else 0.0
 
         logger.info(
@@ -6003,37 +6246,8 @@ class VcaniTradeApp:
         # -- TradingView UI path: execute through GhostExecutor/RPA.
         # Legacy broker-specific futures whitelists do not apply here.
 
-        # FORCE GHOSTEXECUTOR: When enabled, never use RPA mouse movement
-        if getattr(self._ghost_executor, "enabled", False):
-            logger.info("EXEC_CLOUD: Using GhostExecutor (JS injection) for %s %s", action, ticker)
-            success = False
-            try:
-                browser_loop = getattr(self, "_browser_loop", None)
-                if browser_loop is not None and not browser_loop.is_closed():
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._ghost_executor.execute_trade(
-                            ticker,
-                            action,
-                            volume=float(quantity or config.MT5_VOLUME),
-                        ),
-                        browser_loop,
-                    )
-                    success = bool(future.result(timeout=5.0))
-                else:
-                    success = bool(
-                        asyncio.run(
-                            self._ghost_executor.execute_trade(
-                                ticker,
-                                action,
-                                volume=float(quantity or config.MT5_VOLUME),
-                            )
-                        )
-                    )
-            except Exception as exc:
-                logger.exception("EXEC_CLOUD: GhostExecutor failed for %s %s: %s", action, ticker, exc)
-            if success:
-                logger.info("EXEC_CLOUD: GhostExecutor successfully executed %s %s", action, ticker)
-            return success
+        # GhostExecutor is routed through the hybrid gateway below so confirmed
+        # executions still pass through the normal journal and position tracker.
 
         # AGGRESSIVE BYPASS: High-strength liquidity signals execute immediately
         is_high_strength_liquidity = (
@@ -6865,6 +7079,55 @@ class VcaniTradeApp:
             )
             return False
 
+        if symbol in self.locked_tickers:
+            remaining = int((config.RE_ENTRY_LOCKOUT_MINUTES * 60) - (time.time() - self.locked_tickers[symbol]))
+            if remaining > 0:
+                self.cmd.log(
+                    f'<span style="color:#D29922;font-weight:bold">[WAIT]</span> '
+                    f'Hunter lockout: {symbol} cooling down for {remaining}s after the last close'
+                )
+                self.cmd.update_watchlist_status(
+                    symbol,
+                    f"[WAIT] LOCKOUT {remaining}s",
+                    confidence=0.0,
+                    last_signal=action,
+                )
+                self._refresh_lockout_timer()
+                return False
+
+        # Position Safety Check: do this before planning/logging so Hunter cannot
+        # queue a fresh symbol while the bot is already managing one open trade.
+        capacity_ok, capacity_note = self._check_position_capacity(symbol, action)
+        if not capacity_ok:
+            logger.info("[HUNTER] %s %s blocked by capacity: %s", symbol, action, capacity_note)
+            return False
+
+        direction_ok, direction_note = self._hunter_direction_sanity_check(symbol, action)
+        if not direction_ok:
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[VISION CHECK]</span> '
+                f'{action} {symbol} blocked - {direction_note}'
+            )
+            logger.info("[HUNTER] %s %s blocked by direction sanity check: %s", symbol, action, direction_note)
+            return False
+        self.cmd.log(
+            f'<span style="color:#3FB950;font-weight:bold">[VISION CHECK]</span> '
+            f'{action} {symbol} allowed - {direction_note}'
+        )
+
+        price_action_ok, price_action_note = self._price_action_gate(symbol, action)
+        if not price_action_ok:
+            self.cmd.log(
+                f'<span style="color:#D29922;font-weight:bold">[PRICE ACTION]</span> '
+                f'{action} {symbol} waiting - {price_action_note}'
+            )
+            logger.info("[HUNTER] %s %s blocked by price-action gate: %s", symbol, action, price_action_note)
+            return False
+        self.cmd.log(
+            f'<span style="color:#3FB950;font-weight:bold">[PRICE ACTION]</span> '
+            f'{action} {symbol} allowed - {price_action_note}'
+        )
+
         plan = self._build_simple_execution_plan(symbol, action, reason)
         if not plan.get("ok"):
             self.cmd.log(
@@ -6918,10 +7181,6 @@ class VcaniTradeApp:
             )
 
         # Position Safety Check: Close-and-Reverse or skip duplicate
-        capacity_ok, capacity_note = self._check_position_capacity(symbol, action)
-        if not capacity_ok:
-            return False
-
         should_exec, conflict_note = self._check_position_conflict(
             symbol,
             action,
@@ -7425,6 +7684,16 @@ class VcaniTradeApp:
             f'<span style="color:#00D4FF;font-weight:bold">[HUNTER]</span> '
             f'Vision signal: {action} {symbol} | {confidence_score:.0f}% | Threat: {threat}'
         )
+        if bool(getattr(config, "SINGLE_TRADE_FOCUS_MODE", True)) and self.positions:
+            focus_asset = self.positions[0].get("asset", "active trade")
+            if symbol != focus_asset:
+                self.cmd.log(
+                    f'<span style="color:#58A6FF;font-weight:bold">[FOCUS MODE]</span> '
+                    f'Hunter ignored {action} {symbol}; managing open {focus_asset} first'
+                )
+                logger.info("[HUNTER] Ignored %s %s while managing %s", action, symbol, focus_asset)
+                return
+
         self.ai_narrator.add_activity("[HUNTER]", f"{action} {symbol}")
         self.ai_narrator.notify_signal_detected(symbol, action, confidence_score / 100.0)
         self._announce_signal_alert(symbol, action, confidence_score, source="hunter")
@@ -7495,6 +7764,45 @@ class VcaniTradeApp:
         done = sum(1 for v in status.values() if v)
         total = len(status)
         self.cmd.update_calibration_status(cal.is_calibrated(), done, total)
+
+    def _warm_ollama_models(self):
+        """Preload local models so first Sunday signal is not a cold start."""
+        try:
+            from core.brain_swarm import call_local_brain
+            call_local_brain(
+                "Reply exactly: READY",
+                model=config.OLLAMA_MODEL,
+                timeout=60,
+                num_predict=8,
+            )
+            self.cmd.log(f"[BRAIN] Predator warm: {config.OLLAMA_MODEL}")
+        except Exception as exc:
+            logger.debug("[BRAIN] Predator warm-up skipped: %s", exc)
+
+        try:
+            import requests
+            from core.ollama_utils import build_ollama_url
+
+            model = getattr(config, "FAST_CHART_VISION_MODEL", "moondream:latest")
+            payload = {
+                "model": model,
+                "prompt": "ready",
+                "stream": False,
+                "keep_alive": getattr(config, "OLLAMA_KEEP_ALIVE", "30m"),
+                "options": {
+                    "num_predict": 4,
+                    "num_ctx": int(getattr(config, "OLLAMA_NUM_CTX", 2048)),
+                    "temperature": 0.0,
+                },
+            }
+            requests.post(
+                build_ollama_url(config.OLLAMA_BASE_URL, "api/generate"),
+                json=payload,
+                timeout=60,
+            )
+            self.cmd.log(f"[EYE] Vision warm: {model}")
+        except Exception as exc:
+            logger.debug("[VISION] Vision warm-up skipped: %s", exc)
 
     def run(self):
         """Start the application."""
@@ -7579,6 +7887,8 @@ class VcaniTradeApp:
             self.cmd.log("Mode: AUTONOMOUS - execution armed")
         else:
             self.cmd.log("Mode: TEACHER - execution disarmed")
+
+        QTimer.singleShot(2500, self._warm_ollama_models)
 
         logger.info("Application running")
         sys.exit(self.app.exec())

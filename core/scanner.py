@@ -117,14 +117,19 @@ class CloudScanner:
         self.eye_symbol_at: Optional[datetime] = None
         self.eye_ttl_seconds = 300  # Eye symbol expires after 5 min if not refreshed
 
-        # Initialize MT5 connection only when in MT5 mode
+        # Initialize MT5 for data feed if either:
+        # - We are in full MT5 mode, or
+        # - USE_MT5_AS_DATA_FEED is enabled (hybrid: MT5 data + TradingView execution/visual)
         self._mt5_initialized = False
         _active_mode = config.get_active_mode()
-        logger.info(f"[CLOUD] Active mode: {_active_mode}")
-        if _active_mode == "MT5":
+        use_mt5_data = getattr(config, "USE_MT5_AS_DATA_FEED", False)
+
+        if _active_mode == "MT5" or use_mt5_data:
             self._ensure_mt5()
+            if use_mt5_data and _active_mode != "MT5":
+                logger.info("[CLOUD] Hybrid mode: MT5 data feed enabled (execution remains on TradingView)")
         else:
-            logger.info("[CLOUD] TradingView mode detected — MT5 initialization skipped")
+            logger.info("[CLOUD] Pure TradingView mode — MT5 data feed disabled")
 
         logger.info("[CLOUD] Cloud Scanner initialized with Market Session Awareness")
         logger.info(
@@ -964,12 +969,17 @@ class CloudScanner:
             logger.warning("[WARN] Crypto data unavailable for %s - Skipping Cycle", ticker)
             return None
 
-        # Fast path: MT5 unavailable (UI mode or not installed) — skip directly to fallback
+        # Fast path: MT5 unavailable (intentional in pure TradingView / browser mode)
         if mt5_tf is None:
             fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
             if fallback is not None:
                 return fallback
-            logger.warning("[WARN] MT5 unavailable - Skipping Cycle for %s", ticker)
+            # Only warn if we are actually supposed to be in MT5 mode
+            surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper()
+            if "MT5" in surface:
+                logger.warning("[WARN] MT5 unavailable - Skipping Cycle for %s", ticker)
+            else:
+                logger.debug("[TV] Using browser/vision fallback for %s (MT5 not expected)", ticker)
             return None
 
         # Futures/Forex on weekends: markets are closed, skip MT5 noise entirely
@@ -1005,7 +1015,11 @@ class CloudScanner:
                     fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                     if fallback is not None:
                         return fallback
-                    logger.error("[WARN] MT5 not initialized - Skipping Cycle for %s", ticker)
+                    surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper()
+                    if "MT5" in surface:
+                        logger.error("[WARN] MT5 not initialized - Skipping Cycle for %s", ticker)
+                    else:
+                        logger.debug("[TV] MT5 not expected in this mode — using vision path for %s", ticker)
                     return None
 
                 _mt5 = _lazy_mt5()
@@ -1020,7 +1034,11 @@ class CloudScanner:
                     fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                     if fallback is not None:
                         return fallback
-                    logger.error("[WARN] Symbol %s unavailable in MT5 - Skipping Cycle", ticker)
+                    surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper()
+                    if "MT5" in surface:
+                        logger.error("[WARN] Symbol %s unavailable in MT5 - Skipping Cycle", ticker)
+                    else:
+                        logger.debug("[TV] Symbol not in MT5 (expected) — vision will handle %s", ticker)
                     return None
 
                 symbol_info = _mt5.symbol_info(selected_symbol)
@@ -1032,7 +1050,11 @@ class CloudScanner:
                     fallback = self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
                     if fallback is not None:
                         return fallback
-                    logger.error("[WARN] Symbol %s unavailable in MT5 - Skipping Cycle", ticker)
+                    surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "") or "").upper()
+                    if "MT5" in surface:
+                        logger.error("[WARN] Symbol %s unavailable in MT5 - Skipping Cycle", ticker)
+                    else:
+                        logger.debug("[TV] Symbol not in MT5 (expected) — vision will handle %s", ticker)
                     return None
 
                 if selected_symbol != market_ticker:

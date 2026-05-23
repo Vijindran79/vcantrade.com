@@ -32,6 +32,8 @@ from dotenv import load_dotenv
 # Load environment variables from .env file if it exists
 load_dotenv()
 
+INITIAL_ENTRY_BULLETS = int(os.getenv("INITIAL_ENTRY_BULLETS", "1"))  # First entry starts with one bullet
+
 # ===== PROP FIRM RULES (The "Professor") =====
 PROP_FIRM_ENABLED = os.getenv("PROP_FIRM_ENABLED", "True").lower() == "true"
 PROP_FIRM_NAME = os.getenv("PROP_FIRM_NAME", "Apex Trader Funding")
@@ -203,9 +205,15 @@ TARGET_ACCOUNTS = _parse_key_list(os.getenv("TARGET_ACCOUNTS", ""))
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 # Local execution settings
-LLM_TIMEOUT = 180  # Heavy local Qwen runs need more time to finish reliably
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
 OLLAMA_TIMEOUT = LLM_TIMEOUT  # Alias used by llm_analyzer swarm runner
 JSON_OUTPUT = True
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
+OLLAMA_BRAIN_NUM_PREDICT = int(os.getenv("OLLAMA_BRAIN_NUM_PREDICT", "96"))
+OLLAMA_VISION_NUM_PREDICT = int(os.getenv("OLLAMA_VISION_NUM_PREDICT", "96"))
+OLLAMA_VISION_TIMEOUT = int(os.getenv("OLLAMA_VISION_TIMEOUT", "45"))
+OLLAMA_PREDATOR_VERDICT_TIMEOUT = int(os.getenv("OLLAMA_PREDATOR_VERDICT_TIMEOUT", "25"))
 
 # ===== VISION / VLM CONFIGURATION =====
 # 1. Enable Vision & Screen capturing
@@ -214,11 +222,11 @@ VLM_MODEL = os.getenv("VLM_MODEL", "moondream:latest")
 
 # ===== MACHINE-GUN FAST CHART VISION (your custom models) =====
 # predator:latest   → Your custom main brain / reasoning / swarm (final trade decisions)
-# moondream:latest  → Specialized chart vision + OCR (reading candles, prices, levels from screenshots)
+# moondream:latest  → Fast chart vision + OCR (known working on this machine)
 FAST_CHART_VISION_MODEL = os.getenv("FAST_CHART_VISION_MODEL", "moondream:latest")
 FAST_CHART_OCR_MODEL    = os.getenv("FAST_CHART_OCR_MODEL", "moondream:latest")
 
-VISION_TIMEOUT = 120
+VISION_TIMEOUT = OLLAMA_VISION_TIMEOUT
 SAVE_DEBUG_SCREENSHOTS = True
 
 # 2. Turn on the Alarms and Sound Effects
@@ -352,10 +360,10 @@ del _alias, _yahoo
 # NQ=F/ES=F/CL=F map to the current working TradingView chart codes.
 TRADINGVIEW_SYMBOL_MAP = {
     # Yahoo futures -> CME_MINI / NYMEX contract names
-    "NQ=F":  "NQM6",
-    "MNQ=F": "NQM6",
-    "ES=F":  "ESM6",
-    "MES=F": "ESM6",
+    "NQ=F":  "CME_MINI:MNQ1!",
+    "MNQ=F": "CME_MINI:MNQ1!",
+    "ES=F":  "CME_MINI:MES1!",
+    "MES=F": "CME_MINI:MES1!",
     "MYM=F": "MYM1!",
     "M2K=F": "M2K1!",
     "6A=F": "M6A1!",
@@ -363,45 +371,45 @@ TRADINGVIEW_SYMBOL_MAP = {
     "BTC-USD": "MBT1!",
     "ETH-USD": "MET1!",
     # Oil is intentionally forced to Micro Crude. Full CL is $10/tick.
-    "CL=F":  "MCL1!",
-    "MCL=F": "MCL1!",
+    "CL=F":  "NYMEX:MCL1!",
+    "MCL=F": "NYMEX:MCL1!",
     # Canonical short forms (F stripped by candidate generator)
-    "NQ":  "NQM6",
-    "MNQ": "NQM6",
-    "ES":  "ESM6",
-    "MES": "ESM6",
+    "NQ":  "CME_MINI:MNQ1!",
+    "MNQ": "CME_MINI:MNQ1!",
+    "ES":  "CME_MINI:MES1!",
+    "MES": "CME_MINI:MES1!",
     "MYM": "MYM1!",
     "M2K": "M2K1!",
     "M6A": "M6A1!",
     "M6E": "M6E1!",
     "MBT": "MBT1!",
     "MET": "MET1!",
-    "CL":  "MCL1!",
-    "MCL": "MCL1!",
+    "CL":  "NYMEX:MCL1!",
+    "MCL": "NYMEX:MCL1!",
     # TradingView futures contract codes.
-    "CME_MINI:MNQ1!": "NQM6",
-    "CME_MINI:MES1!": "ESM6",
+    "CME_MINI:MNQ1!": "CME_MINI:MNQ1!",
+    "CME_MINI:MES1!": "CME_MINI:MES1!",
     "CBOT_MINI:MYM1!": "MYM1!",
     "CME_MINI:M2K1!": "M2K1!",
     "CME:M6A1!": "M6A1!",
     "CME:M6E1!": "M6E1!",
     "CME:MBT1!": "MBT1!",
     "CME:MET1!": "MET1!",
-    "NYMEX:CL1!": "MCL1!",
-    "NYMEX:CLM26!": "MCL1!",  # Legacy alias only
-    "NYMEX:MCL1!": "MCL1!",
+    "NYMEX:CL1!": "NYMEX:MCL1!",
+    "NYMEX:CLM26!": "NYMEX:MCL1!",  # Legacy alias only
+    "NYMEX:MCL1!": "NYMEX:MCL1!",
     # Bare TradingView contract codes (user-specified analysis tickers)
-    "MNQ1!": "NQM6",
-    "MES1!": "ESM6",
-    "CL1!": "MCL1!",
-    "MCL1!": "MCL1!",
+    "MNQ1!": "CME_MINI:MNQ1!",
+    "MES1!": "CME_MINI:MES1!",
+    "CL1!": "NYMEX:MCL1!",
+    "MCL1!": "NYMEX:MCL1!",
     "MYM1!": "MYM1!",
     "M2K1!": "M2K1!",
     "M6A1!": "M6A1!",
     "M6E1!": "M6E1!",
     "MBT1!": "MBT1!",
     "MET1!": "MET1!",
-    "CLM26!": "MCL1!",  # Legacy alias only
+    "CLM26!": "NYMEX:MCL1!",  # Legacy alias only
     # Gold (COMEX Micro Gold)
     "COMEX:MGC1!": "MGC",
     "GC=F": "MGC",
@@ -658,7 +666,7 @@ PRIMARY_MONITOR_WIDTH = int(os.getenv("PRIMARY_MONITOR_WIDTH", "1920"))
 PRIMARY_MONITOR_HEIGHT = int(os.getenv("PRIMARY_MONITOR_HEIGHT", "1080"))
 
 # ===== SLIPPAGE GUARD =====
-MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "2.50"))
+MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "0.15"))
 MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 
 # ===== RETAIL BROKER CONFIGURATION =====
@@ -668,6 +676,10 @@ MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 # ===== AGGRESSIVE HUNTER =====
 # If signal confidence >= this threshold, skip 1m/3m MTF alignment and strike on 5m alone.
 AGGRESSIVE_HUNTER_CONFIDENCE_PCT = float(os.getenv("AGGRESSIVE_HUNTER_CONFIDENCE_PCT", "65.0"))
+# Vision-only Hunter entries must be cleaner than ordinary scanner alerts.
+HUNTER_EXECUTION_CONFIDENCE_PCT = float(os.getenv("HUNTER_EXECUTION_CONFIDENCE_PCT", "80.0"))
+PRICE_ACTION_GATE_ENABLED = os.getenv("PRICE_ACTION_GATE_ENABLED", "true").lower() == "true"
+PRICE_ACTION_GATE_REQUIRE_DATA = os.getenv("PRICE_ACTION_GATE_REQUIRE_DATA", "true").lower() == "true"
 
 # ===== AUTONOMOUS RISK MANAGEMENT =====
 # ATR-driven risk management (replaces fixed-dollar thresholds).
@@ -701,8 +713,8 @@ DAILY_PROFIT_LADDER_SHIELD_ENABLED = os.getenv("DAILY_PROFIT_LADDER_SHIELD_ENABL
 DAILY_PROFIT_LADDER_PAUSE_ON_TRIGGER = os.getenv("DAILY_PROFIT_LADDER_PAUSE_ON_TRIGGER", "true").lower() == "true"
 STOP_UPDATE_RETRY_COOLDOWN_SECONDS = int(os.getenv("STOP_UPDATE_RETRY_COOLDOWN_SECONDS", "60"))
 MANUAL_CLOSE_SYNC_ENABLED = os.getenv("MANUAL_CLOSE_SYNC_ENABLED", "true").lower() == "true"
-MANUAL_CLOSE_CONFIRMATIONS = int(os.getenv("MANUAL_CLOSE_CONFIRMATIONS", "2"))
-MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS = int(os.getenv("MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS", "60"))
+MANUAL_CLOSE_CONFIRMATIONS = int(os.getenv("MANUAL_CLOSE_CONFIRMATIONS", "4"))
+MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS = int(os.getenv("MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS", "180"))
 TRADINGVIEW_COLOR_SCAN_FALLBACK_ENABLED = os.getenv("TRADINGVIEW_COLOR_SCAN_FALLBACK_ENABLED", "false").lower() == "true"
 TRADINGVIEW_TRUST_UNVERIFIED_CLICK = os.getenv("TRADINGVIEW_TRUST_UNVERIFIED_CLICK", "false").lower() == "true"
 

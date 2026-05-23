@@ -100,6 +100,10 @@ class SettingsManager:
         # before they can poison the persisted watchlist.
         if not re.search(r"[A-Z]", normalized):
             return ""
+        # Guard against accidental UI suffixes such as NQ=F1, which yfinance
+        # rejects even though NQ=F is valid.
+        if re.fullmatch(r"[A-Z]{1,4}=F\d+", normalized):
+            normalized = re.sub(r"\d+$", "", normalized)
         return self.FUTURES_ALIASES.get(normalized, normalized)
 
     def normalize_watchlist(self, watchlist) -> list[str]:

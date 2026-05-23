@@ -268,7 +268,9 @@ class RPAExecutor:
             expected_terms = {term.upper() for term in self._ticker_window_terms(expected_tv)}
             expected_terms.update(term.upper() for term in self._ticker_window_terms(expected_symbol))
 
-            # Strategy 0: Check URL symbol parameter — hard guard against false positives
+            # Strategy 0: Check URL symbol parameter when it agrees. TradingView's
+            # single-tab symbol switch can leave this parameter stale, so a
+            # mismatch is not enough by itself to abort.
             current_url = str(page.url or "")
             lowered_url = current_url.lower()
             if "?symbol=" in lowered_url:
@@ -277,10 +279,9 @@ class RPAExecutor:
                 url_terms = {term.upper() for term in self._ticker_window_terms(url_symbol)}
                 if url_symbol and not (url_terms & expected_terms):
                     logger.warning(
-                        "[LANDMARK] URL symbol mismatch: URL=%s, expected=%s — force navigating",
+                        "[LANDMARK] URL symbol mismatch: URL=%s, expected=%s — checking live title/DOM",
                         url_symbol, expected_symbol,
                     )
-                    return False
                 if url_terms & expected_terms:
                     logger.info("[LANDMARK] URL symbol confirms: %s", expected_symbol)
                     return True
@@ -348,6 +349,8 @@ class RPAExecutor:
             time.sleep(0.3)
         except Exception as focus_err:
             logger.warning("[FOCUS] Focus click failed: %s", focus_err)
+
+        self._set_tradingview_order_quantity(page, float(getattr(config, "INITIAL_ENTRY_BULLETS", 1)))
 
         # STEALTH LAYER 1: Humanized delay
         human_delay = random.uniform(0.5, 1.8)
@@ -1020,6 +1023,7 @@ class RPAExecutor:
         except Exception as ss_err:
             logger.warning("[DEBUG] Could not save failure screenshot: %s", ss_err)
 
+        self.last_failure_reason = f"Click sent but no open position was verified for {trade.asset}"
         logger.error("[RPA] All 3 attempts failed for %s %s", action, trade.asset)
         return False
 
@@ -1059,6 +1063,7 @@ class RPAExecutor:
                 logger.info("[TV-RPA] Retrying in %ss...", backoff)
                 time.sleep(backoff)
 
+        self.last_failure_reason = f"Click sent but TradingView did not verify an open {trade.asset} position"
         logger.error("[TV-RPA] All 3 attempts failed for %s %s", action, trade.asset)
         return False
 
@@ -1072,6 +1077,7 @@ class RPAExecutor:
             if ticker and not self._verify_chart_landmark(page, ticker):
                 logger.warning("[CONTROLLED-PAGE] Refusing HTML click because chart landmark does not match %s", ticker)
                 return False
+            self._set_tradingview_order_quantity(page, float(getattr(config, "INITIAL_ENTRY_BULLETS", 1)))
 
             async def _do_click():
                 if target_key == "buy_button":
@@ -1220,6 +1226,62 @@ class RPAExecutor:
             logger.warning("[CONTROLLED-PAGE] Close/flatten click failed: %s", e)
         return False
 
+    def _set_tradingview_order_quantity(self, page, quantity: float = 1.0) -> bool:
+        """Force TradingView's order ticket quantity before the entry click."""
+        try:
+            qty_text = str(int(quantity)) if float(quantity).is_integer() else f"{quantity:.4f}".rstrip("0").rstrip(".")
+
+            async def _do_set_quantity():
+                return await page.evaluate("""(qtyText) => {
+                    const visible = (el) => {
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    const scoreInput = (input) => {
+                        const attrs = [
+                            input.getAttribute('aria-label') || '',
+                            input.getAttribute('placeholder') || '',
+                            input.getAttribute('name') || '',
+                            input.getAttribute('title') || '',
+                            input.id || '',
+                            input.className || '',
+                            input.closest('[class*="order"], [data-name*="order"], [class*="trade"], [class*="quantity"], [class*="qty"]')?.textContent || '',
+                        ].join(' ').toLowerCase();
+                        let score = 0;
+                        if (/\\b(qty|quantity|contracts?|size|amount|lots?)\\b/.test(attrs)) score += 30;
+                        if (attrs.includes('order') || attrs.includes('trade')) score += 10;
+                        if (attrs.includes('price') || attrs.includes('stop') || attrs.includes('profit') || attrs.includes('take')) score -= 40;
+                        const rect = input.getBoundingClientRect();
+                        if (rect.width >= 25 && rect.width <= 180) score += 5;
+                        return score;
+                    };
+                    const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), textarea'))
+                        .filter(visible)
+                        .map(input => ({ input, score: scoreInput(input) }))
+                        .filter(item => item.score > 0)
+                        .sort((a, b) => b.score - a.score);
+                    const target = inputs[0]?.input;
+                    if (!target) return false;
+                    target.focus();
+                    target.select?.();
+                    target.value = qtyText;
+                    target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: qtyText }));
+                    target.dispatchEvent(new Event('change', { bubbles: true }));
+                    target.blur();
+                    return true;
+                }""", qty_text)
+
+            ok = bool(self._run_async(_do_set_quantity()))
+            if ok:
+                logger.info("[TV-ORDER] Set TradingView order quantity to %s", qty_text)
+            else:
+                logger.warning("[TV-ORDER] Could not find TradingView quantity field; check ticket is set to 1")
+            return ok
+        except Exception as exc:
+            logger.warning("[TV-ORDER] Quantity set failed: %s", exc)
+            return False
+
     def flatten_position(self, ticker_hint: str = "") -> bool:
         """Best-effort TradingView position flatten used by profit protection."""
         surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
@@ -1282,6 +1344,16 @@ class RPAExecutor:
             window.activate()
             if self.human_latency_enabled:
                 time.sleep(_weighted_hesitation(0.3, 1.2))
+
+            page = getattr(self, "_controlled_page", None)
+            if page and not page.is_closed():
+                if not ticker or self._verify_chart_landmark(page, ticker):
+                    self._set_tradingview_order_quantity(
+                        page,
+                        float(getattr(config, "INITIAL_ENTRY_BULLETS", 1)),
+                    )
+                else:
+                    logger.warning("[TV-ORDER] Skipping quantity set; controlled page does not match %s", ticker)
 
             target_x = target_y = None
             if bool(getattr(config, "TRADINGVIEW_COLOR_SCAN_FALLBACK_ENABLED", False)):
@@ -1368,6 +1440,7 @@ class RPAExecutor:
             terms.add(alias_map[base])
         if root in alias_map:
             terms.add(alias_map[root])
+        terms.update(self._ticker_contract_family(ticker))
         return [t.lower() for t in terms if t and len(t) >= 2]
 
     def _ticker_contract_family(self, ticker):
@@ -1388,7 +1461,9 @@ class RPAExecutor:
         for group in groups:
             if any(token in text for token in group):
                 return group
-        return set(self._ticker_window_terms(ticker))
+        compact = text.replace("-", "").replace("/", "").replace(":", "").replace("!", "").replace("=", "")
+        base = text.split(":", 1)[-1].replace("!", "").replace("=", "")
+        return {token for token in {text, compact, base} if token}
 
     def _window_title_conflicts_with_ticker(self, title: str, ticker_hint) -> bool:
         """Detect when a browser title clearly belongs to a different futures contract."""
@@ -1405,6 +1480,37 @@ class RPAExecutor:
         if not present:
             return False
         return not bool(present & expected)
+
+    def _window_title_matches_ticker(self, title: str, ticker_hint) -> bool:
+        """Require a positive ticker match before using physical click fallback."""
+        if not ticker_hint:
+            return True
+        lowered = str(title or "").lower()
+        return any(term in lowered for term in self._ticker_window_terms(ticker_hint))
+
+    def _confirmation_text_conflicts_with_ticker(self, text: str, ticker_hint) -> bool:
+        """Reject order confirmations that mention a different contract family."""
+        if not ticker_hint:
+            return False
+        import re
+        text_up = str(text or "").upper()
+        expected = self._ticker_contract_family(ticker_hint)
+        known_roots = {
+            "MNQ", "NQ", "MES", "ES", "MCL", "CL", "MGC", "GC",
+            "MYM", "YM", "M2K", "RTY", "M6A", "6A", "M6E", "6E",
+            "MBT", "BTC", "MET", "ETH",
+        }
+        contract_months = "FGHJKMNQUVXZ"
+        tokens = re.findall(r"[A-Z0-9!]+", text_up)
+        present = set()
+        for token in tokens:
+            clean = token.replace("!", "")
+            for root in known_roots:
+                if clean == root:
+                    present.add(root)
+                elif re.match(rf"^{re.escape(root)}[{contract_months}]\d{{0,2}}", clean):
+                    present.add(root)
+        return bool(present) and not bool(present & expected)
 
     def _get_browser_window(self, ticker_hint=None):
         """Find the active broker/browser window using config hints and ticker titles."""
@@ -1430,6 +1536,13 @@ class RPAExecutor:
                 if self._window_title_conflicts_with_ticker(title, ticker_hint):
                     logger.warning(
                         "[WINDOW] Rejecting browser window for %s because title is a different contract: %s",
+                        ticker_hint,
+                        title,
+                    )
+                    continue
+                if ticker_hint and not self._window_title_matches_ticker(title, ticker_hint):
+                    logger.debug(
+                        "[WINDOW] Skipping browser window for %s because title has no ticker match: %s",
                         ticker_hint,
                         title,
                     )
@@ -1468,6 +1581,13 @@ class RPAExecutor:
                     if self._window_title_conflicts_with_ticker(title, ticker_hint):
                         logger.error(
                             "[WINDOW] Refusing hint-selected window for %s; title is %s",
+                            ticker_hint,
+                            title,
+                        )
+                        continue
+                    if ticker_hint and not self._window_title_matches_ticker(title, ticker_hint):
+                        logger.error(
+                            "[WINDOW] Refusing hint-selected window for %s; title has no ticker match: %s",
                             ticker_hint,
                             title,
                         )
@@ -1759,6 +1879,13 @@ class RPAExecutor:
                             if count > 0:
                                 text = await locator.first.text_content() or ""
                                 if any(w in text.lower() for w in ["filled", "executed", "opened", "order", "position"]):
+                                    if self._confirmation_text_conflicts_with_ticker(text, ticker):
+                                        logger.error(
+                                            "[VERIFY] Rejecting confirmation for %s because toast mentions another contract: %s",
+                                            ticker,
+                                            text[:120],
+                                        )
+                                        return None
                                     return ("toast", sel, text)
                         except Exception:
                             continue

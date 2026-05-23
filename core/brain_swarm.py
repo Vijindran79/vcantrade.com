@@ -191,16 +191,18 @@ def call_local_brain(
         "model": chosen_model,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": getattr(config, "OLLAMA_KEEP_ALIVE", "30m"),
         "options": {
             "temperature": 0.1,  # Very low = consistent JSON, no rambling
-            "num_predict": int(num_predict or 256),  # keep general swarm roomy; chart verdicts override lower
+            "num_predict": int(num_predict or getattr(config, "OLLAMA_BRAIN_NUM_PREDICT", 96)),
+            "num_ctx": int(getattr(config, "OLLAMA_NUM_CTX", 2048)),
             "top_p": 0.9,
             "top_k": 40,
         }
     }
 
     try:
-        request_timeout = max(int(timeout or config.LLM_TIMEOUT), 90)
+        request_timeout = max(10, int(timeout or config.LLM_TIMEOUT))
         logger.info(
             "[BRAIN] Calling local brain: %s at %s (timeout=%ss)",
             chosen_model,
@@ -305,8 +307,9 @@ def analyze_chart_with_vision(
         ],
         "stream": False,
         "temperature": 0.1,
-        "max_tokens": 128,
+        "max_tokens": int(getattr(config, "OLLAMA_VISION_NUM_PREDICT", 96)),
         "top_p": 0.9,
+        "keep_alive": getattr(config, "OLLAMA_KEEP_ALIVE", "30m"),
     }
 
     # Native fallback payload (uses stripped base64, no data URI prefix)
@@ -320,9 +323,11 @@ def analyze_chart_with_vision(
             }
         ],
         "stream": False,
+        "keep_alive": getattr(config, "OLLAMA_KEEP_ALIVE", "30m"),
         "options": {
             "temperature": 0.1,
-            "num_predict": 128,
+            "num_predict": int(getattr(config, "OLLAMA_VISION_NUM_PREDICT", 96)),
+            "num_ctx": int(getattr(config, "OLLAMA_NUM_CTX", 2048)),
             "top_p": 0.9,
         },
     }
@@ -353,7 +358,7 @@ def analyze_chart_with_vision(
         return response.json()
 
     try:
-        request_timeout = max(int(timeout or config.LLM_TIMEOUT), 90)
+        request_timeout = max(10, int(timeout or getattr(config, "OLLAMA_VISION_TIMEOUT", config.LLM_TIMEOUT)))
         logger.info(
             "[VISION] Sending %s chart to %s (timeout=%ss)",
             symbol,
@@ -396,8 +401,8 @@ def analyze_chart_with_vision(
             brain_out = call_local_brain(
                 brain_prompt,
                 model="predator:latest",
-                timeout=60,
-                num_predict=96,
+                timeout=int(getattr(config, "OLLAMA_PREDATOR_VERDICT_TIMEOUT", 25)),
+                num_predict=int(getattr(config, "OLLAMA_BRAIN_NUM_PREDICT", 96)),
             )
             predator_text = str(
                 brain_out.get("content")
