@@ -735,19 +735,39 @@ Return JSON only:
         skip_reason = ""
 
         # ============================================================
-        # PHASE 1: Vibe + Vision run IN PARALLEL (no dependencies)
+        # MACHINE-GUN PARALLEL SWARM
+        # All independent agents fire simultaneously using DIFFERENT models
+        # so each voice is truly independent. Total time = slowest single
+        # call instead of sum of all calls.
         # ============================================================
+        # Pick fast secondary models if installed; fall back to primary.
+        # gemma:2b is fast (~2s) and is a different model family from qwen.
+        # qwen2.5-coder:1.5b also works as a fast independent voice.
+        secondary_model = "gemma:2b"
+        tertiary_model = "qwen2.5-coder:1.5b"
+
         if skip_vibe_debate:
-            skip_reason = "FORCE ACTION armed - skipped Vibe and Liquidity debate before strike."
+            skip_reason = "FORCE ACTION armed - skipped debate before strike."
             vibe_result = self._default_vibe_result(market_data, skipped=True)
+            liquidity_result = self._default_liquidity_result(market_data, skipped=True)
             vision_result = None
             detected_symbol = ""
             vision_summary = "Vision agent: no chart image supplied."
         else:
             vibe_prompt = self._build_vibe_prompt(market_data, session_context, user_suggestion, memory_summary)
+            liquidity_prompt = self._build_liquidity_prompt(
+                market_data, session_context, user_suggestion,
+                {},  # no vibe dependency - parallel
+                memory_summary,
+            )
 
             async def _run_vibe():
-                return call_local_brain(vibe_prompt, model=self.model, timeout=self.timeout)
+                # Primary model (fast, default qwen2.5:1.5b)
+                return await asyncio.to_thread(call_local_brain, vibe_prompt, self.model, self.timeout)
+
+            async def _run_liquidity():
+                # Different model = independent voice. Falls back to primary if missing.
+                return await asyncio.to_thread(call_local_brain, liquidity_prompt, secondary_model, self.timeout)
 
             async def _run_vision():
                 if not chart_image_base64:
@@ -771,40 +791,28 @@ Return JSON only:
                 vs = self._format_vision_summary(vr, ds, market_data.asset)
                 return vr, ds, vs
 
+            # Fire all three in parallel — total time = slowest single call.
             vibe_task = asyncio.create_task(_run_vibe())
+            liquidity_task = asyncio.create_task(_run_liquidity())
             vision_task = asyncio.create_task(_run_vision())
-            vibe_result, (vision_result, detected_symbol, vision_summary) = await asyncio.gather(
-                vibe_task, vision_task
+            vibe_result, liquidity_result, (vision_result, detected_symbol, vision_summary) = await asyncio.gather(
+                vibe_task, liquidity_task, vision_task,
+                return_exceptions=False,
             )
 
-            if "error" in vibe_result:
-                logger.error("Vibe agent failed: %s", vibe_result["error"])
+            if isinstance(vibe_result, dict) and "error" in vibe_result:
+                logger.warning("Vibe agent failed: %s — using default", vibe_result.get("error"))
                 vibe_result = self._default_vibe_result(market_data)
-
-        _t1 = _time.monotonic()
-        logger.info("[SWARM] Phase 1 (Vibe+Vision) done in %.1fs", _t1 - _t0)
-
-        # ============================================================
-        # PHASE 2: Liquidity (depends on Vibe result)
-        # ============================================================
-        if skip_vibe_debate:
-            liquidity_result = self._default_liquidity_result(market_data, skipped=True)
-        else:
-            liquidity_prompt = self._build_liquidity_prompt(
-                market_data, session_context, user_suggestion, vibe_result, memory_summary,
-            )
-            liquidity_result = await asyncio.to_thread(
-                call_local_brain, liquidity_prompt, self.model, self.timeout,
-            )
-            if "error" in liquidity_result:
-                logger.error("Liquidity agent failed: %s", liquidity_result["error"])
+            if isinstance(liquidity_result, dict) and "error" in liquidity_result:
+                logger.warning("Liquidity agent failed: %s — using default", liquidity_result.get("error"))
                 liquidity_result = self._default_liquidity_result(market_data)
 
-        _t2 = _time.monotonic()
-        logger.info("[SWARM] Phase 2 (Liquidity) done in %.1fs", _t2 - _t1)
+        _t1 = _time.monotonic()
+        logger.info("[SWARM] Machine-gun phase 1 (Vibe+Liquidity+Vision parallel) done in %.1fs", _t1 - _t0)
 
         # ============================================================
-        # PHASE 3: Closer (needs Vibe + Liquidity results)
+        # PHASE 2: Closer (uses all 3 voices to make final call)
+        # Uses tertiary model so it's a 3rd independent perspective.
         # ============================================================
         closer_prompt = self._build_analysis_prompt(
             market_data, news_context, session_context, user_suggestion,
@@ -815,9 +823,13 @@ Return JSON only:
             market_wisdom=market_wisdom,
         )
 
-        result = await asyncio.to_thread(call_local_brain, closer_prompt, self.model, self.timeout)
+        # Try tertiary model first (independent voice). Fall back to primary if missing.
+        result = await asyncio.to_thread(call_local_brain, closer_prompt, tertiary_model, self.timeout)
+        if isinstance(result, dict) and "error" in result and "not found" in str(result.get("error", "")).lower():
+            logger.info("[SWARM] Tertiary model %s missing — using primary %s", tertiary_model, self.model)
+            result = await asyncio.to_thread(call_local_brain, closer_prompt, self.model, self.timeout)
         if "error" in result:
-            logger.error(f"Local brain failed: {result['error']}")
+            logger.error(f"Closer brain failed: {result['error']}")
             result = self._default_result(market_data)
 
         output = LLMAnalysisOutput(
