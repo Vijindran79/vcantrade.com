@@ -131,9 +131,12 @@ class CommandCenter(QWidget):
 
     def _setup_window(self):
         self.setWindowTitle("VcaniTrade AI - Prop Trading Command Center")
-        # Start with always-on-top but user can toggle it off
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
-        self._always_on_top = True  # Track current state
+        # Default to NOT always-on-top. Always-on-top breaks taskbar restore on
+        # Windows (clicking the taskbar entry on a minimized always-on-top
+        # window often fails to bring it back). User can pin via the [PIN]
+        # button when they want it sticky. This is the single biggest reason
+        # the dashboard "won't come back" after minimizing.
+        self._always_on_top = False
 
         # Get screen size and use 85% of height
         from PyQt6.QtWidgets import QApplication
@@ -145,7 +148,10 @@ class CommandCenter(QWidget):
         self.resize(width, height)
         self.move(screen.width() - width - 20, 20)  # Right side of screen
         self.setStyleSheet(f"background-color: {BG_DARK};")
-        self.setWindowOpacity(0.92)  # Glass effect - 92% opacity
+        # Always start fully opaque so the window is visible. The user can
+        # adjust the transparency slider once the dashboard is up. A 0% opacity
+        # window is invisible and unrecoverable without this safety floor.
+        self.setWindowOpacity(1.0)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -244,8 +250,10 @@ class CommandCenter(QWidget):
         layout.addWidget(trans_label)
 
         self.transparency_slider = QSpinBox()
-        self.transparency_slider.setRange(50, 100)
-        self.transparency_slider.setValue(92)
+        # Floor at 70% so the user can't accidentally make the dashboard
+        # invisible. 100% = fully opaque (default — guaranteed visible).
+        self.transparency_slider.setRange(70, 100)
+        self.transparency_slider.setValue(100)
         self.transparency_slider.setSuffix("%")
         self.transparency_slider.setFixedWidth(60)
         self.transparency_slider.setStyleSheet(f"""
@@ -255,13 +263,14 @@ class CommandCenter(QWidget):
         self.transparency_slider.valueChanged.connect(self._update_transparency)
         layout.addWidget(self.transparency_slider)
 
-        # Pin/Unpin button (toggle always on top)
-        self.pin_btn = QPushButton("[PIN] PIN")
+        # Pin/Unpin button (toggle always on top). Starts UNPINNED so the
+        # taskbar restore works normally — pin only when you want sticky.
+        self.pin_btn = QPushButton("[PIN] UNPIN")
         self.pin_btn.setFixedWidth(65)
         self.pin_btn.setStyleSheet(f"""
-            QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 4px;
+            QPushButton {{ background: {ORANGE}; color: {BG_DARK}; border: none; border-radius: 4px;
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 4px 8px; }}
-            QPushButton:hover {{ background: #00b8e6; }}
+            QPushButton:hover {{ background: #e66e1a; }}
         """)
         self.pin_btn.clicked.connect(self._toggle_always_on_top)
         layout.addWidget(self.pin_btn)
@@ -319,14 +328,53 @@ class CommandCenter(QWidget):
             """)
             self.log("[PIN] Dashboard unpinned - can now go behind other windows")
         
-        self.show()  # Re-show to apply flag changes
+        # Re-apply flag change. setWindowFlags() hides the window on Windows,
+        # so we must show + raise + activate to bring it back to the front.
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def _update_transparency(self, value: int):
-        """Update window opacity based on slider value."""
+        """Update window opacity based on slider value. Floor at 70% so the
+        dashboard can never become invisible by accident."""
+        value = max(70, min(100, int(value)))
         opacity = value / 100.0
         self.setWindowOpacity(opacity)
         if value < 80:
             self.log(f"[MAGNIFY] Transparency: {100 - value}% (you can see through the dashboard)")
+
+    def force_restore(self):
+        """Bring the dashboard back to a known-good visible state.
+        Bound to Ctrl+Shift+R as a rescue hotkey if the window ever goes
+        invisible or stuck behind other windows."""
+        self.setWindowOpacity(1.0)
+        if hasattr(self, "transparency_slider"):
+            try:
+                self.transparency_slider.blockSignals(True)
+                self.transparency_slider.setValue(100)
+            finally:
+                self.transparency_slider.blockSignals(False)
+        # Reset position in case it was moved off-screen
+        try:
+            from PyQt6.QtWidgets import QApplication
+            screen = QApplication.primaryScreen().geometry()
+            if (self.x() < -200 or self.x() > screen.width() - 100
+                    or self.y() < -200 or self.y() > screen.height() - 100):
+                self.move(screen.width() - self.width() - 20, 20)
+        except Exception:
+            pass
+        # Drop always-on-top flag, in case it's stuck
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
+        self._always_on_top = False
+        if hasattr(self, "pin_btn"):
+            self.pin_btn.setText("[PIN] UNPIN")
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        try:
+            self.log("[RESCUE] Dashboard force-restored to visible state")
+        except Exception:
+            pass
 
     def set_bridge_status(self, status: str):
         """Update external brain bridge indicator in the header."""

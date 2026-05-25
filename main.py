@@ -2142,6 +2142,13 @@ class VcaniTradeApp:
         self._mirror_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._mirror_shortcut.activated.connect(self._toggle_mirror_visibility)
 
+        # RESCUE HOTKEY: Ctrl+Shift+R brings the dashboard back to a known-good
+        # visible state. Use this if the window ever goes invisible, gets stuck
+        # behind another window, or won't restore from the taskbar.
+        self._rescue_shortcut = QShortcut(QKeySequence("Ctrl+Shift+R"), self.cmd)
+        self._rescue_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._rescue_shortcut.activated.connect(self._rescue_dashboard)
+
     def _apply_initial_mode_ui(self):
         """Align the dashboard controls with the backend's initial runtime mode."""
         self._apply_mode_to_dashboard(self.current_mode)
@@ -2322,6 +2329,21 @@ class VcaniTradeApp:
         else:
             self.ai_narrator.show()
             self.cmd.log("[WINDOW] Mirror shown via Ctrl+Shift+H")
+
+    def _rescue_dashboard(self):
+        """Ctrl+Shift+R rescue: bring the dashboard back to a known-good
+        visible state (full opacity, not on top, repositioned, raised)."""
+        try:
+            if hasattr(self.cmd, "force_restore"):
+                self.cmd.force_restore()
+            else:
+                self.cmd.setWindowOpacity(1.0)
+                self.cmd.showNormal()
+                self.cmd.raise_()
+                self.cmd.activateWindow()
+            logger.info("[RESCUE] Dashboard restored via Ctrl+Shift+R")
+        except Exception as exc:
+            logger.warning("[RESCUE] force_restore failed: %s", exc)
 
     def _format_liquidity_label(self, signal_data: dict) -> str:
         """Create a readable liquidity label for the mirror broadcast strip."""
@@ -6928,10 +6950,16 @@ class VcaniTradeApp:
         # Show dashboard - this MUST succeed regardless of any service errors.
         try:
             self.cmd.show()
+            self.cmd.showNormal()
+            self.cmd.raise_()
+            self.cmd.activateWindow()
         except Exception as exc:
             logger.error("Dashboard show() failed: %s - attempting re-init", exc)
             self.cmd = CommandCenter()
             self.cmd.show()
+            self.cmd.showNormal()
+            self.cmd.raise_()
+            self.cmd.activateWindow()
 
         # Initialize UI with balance and ledger
         try:
