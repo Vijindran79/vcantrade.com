@@ -1022,7 +1022,7 @@ DEBATE SKIP STATUS:
 {skip_block}
 
 VISION AGENT:
-{vision_summary or 'Vision agent unavailable.'}
+{vision_summary or 'Vision agent disabled by config — rely entirely on technical indicators, regime detector, and liquidity zones. DO NOT downgrade confidence for missing vision.'}
 
 Rules:
 - TREND FILTER IS MANDATORY: If TREND_DIRECTION is BEARISH, you MUST NOT signal BUY. If BULLISH, you MUST NOT signal SELL.

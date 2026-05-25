@@ -199,8 +199,12 @@ OLLAMA_TIMEOUT = LLM_TIMEOUT  # Alias used by llm_analyzer swarm runner
 JSON_OUTPUT = True
 
 # ===== VISION / VLM CONFIGURATION =====
-# 1. Enable Vision & Screen capturing
-USE_VISION = True
+# 1. Vision is OFF by default. The local vision models (moondream, llava) cannot
+#    reliably read TradingView charts — they describe the image generically and
+#    always return SIGNAL_NONE 50%, which kills every swarm decision. Trading
+#    uses technical indicators + regime detector instead. Set USE_VISION=true
+#    in .env if you have a strong vision model and want to re-enable it.
+USE_VISION = os.getenv("USE_VISION", "false").lower() == "true"
 VLM_MODEL = os.getenv("VLM_MODEL", "moondream:latest")
 VISION_TIMEOUT = 120
 SAVE_DEBUG_SCREENSHOTS = True
