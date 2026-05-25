@@ -5729,14 +5729,40 @@ class VcaniTradeApp:
         # FORCE GHOSTEXECUTOR (Desktop TV only): immediate execution for high-strength signals
         if True:  # Desktop mode - always use GhostExecutor
             logger.info("EXEC_CLOUD: GhostExecutor Desktop TV path for %s %s", action, ticker)
+            success = False
             try:
-                success = asyncio.get_event_loop().run_until_complete(
-                    self._ghost_executor.execute_trade(ticker, action)
-                )
-            except Exception:
+                # Prefer the persistent browser event loop (lives on the
+                # browser thread). Falls back to a fresh loop if browser
+                # agent never started. Using run_coroutine_threadsafe is
+                # the only safe way to await a coroutine from a non-main
+                # thread (e.g., the signal listener direct path).
+                browser_loop = getattr(self, "_browser_loop", None)
+                if browser_loop is not None and not browser_loop.is_closed():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._ghost_executor.execute_trade(ticker, action),
+                        browser_loop,
+                    )
+                    success = bool(future.result(timeout=30))
+                else:
+                    # Fallback: spin up a fresh loop on this thread. Works
+                    # when called from the main thread or any worker without
+                    # an existing loop.
+                    fresh_loop = asyncio.new_event_loop()
+                    try:
+                        success = bool(
+                            fresh_loop.run_until_complete(
+                                self._ghost_executor.execute_trade(ticker, action)
+                            )
+                        )
+                    finally:
+                        fresh_loop.close()
+            except Exception as exc:
+                logger.exception("EXEC_CLOUD: GhostExecutor execute_trade failed for %s %s: %s", action, ticker, exc)
                 success = False
             if success:
                 logger.info("EXEC_CLOUD: GhostExecutor executed %s %s on Desktop TV", action, ticker)
+            else:
+                logger.warning("EXEC_CLOUD: GhostExecutor returned False for %s %s — trade did not click", action, ticker)
             return success
 
         # AGGRESSIVE BYPASS: High-strength liquidity signals execute immediately
