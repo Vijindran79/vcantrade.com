@@ -1549,8 +1549,8 @@ class VcaniTradeApp:
         )  # Self-Correction Engine
 
         # Browser Agent (Autonomous price checking via Playwright)
-        self.browser_agent = None  # Will be started asynchronously when needed
-        self.browser_agent_status = "idle"  # idle, starting, ready, error
+        self.browser_agent = None
+        self.browser_agent_status = "disabled"  # Desktop/GhostExecutor mode - browser removed
         self._browser_error_message = ""
         self._browser_executor_initialized = False
         self._browser_start_announced = False
@@ -1625,7 +1625,7 @@ class VcaniTradeApp:
         logger.info("VcaniTrade AI initialized (Hybrid Architecture)")
         
         # Auto-start browser agent for testing
-        self._start_browser_agent_background()
+        # BrowserAgent disabled - pure TradingView Desktop + GhostExecutor mode
 
     def _run_on_ui_thread(self, callback):
         """Run callback on the Qt main thread safely."""
@@ -5337,8 +5337,8 @@ class VcaniTradeApp:
                 f'bypassing news pause for {action} {ticker}'
             )
 
-        # -- Trading Hours Gate --------------------------------------------
-        if config.TRADING_START_HOUR_UTC >= 0 and config.TRADING_END_HOUR_UTC >= 0:
+        # -- Trading Hours Gate (DISABLED for Desktop TV mode) ------------
+        if False:  # permanently disabled for autonomous Desktop execution
             from datetime import datetime, timezone
             now_utc = datetime.now(timezone.utc)
             current_hour = now_utc.hour
@@ -5574,12 +5574,17 @@ class VcaniTradeApp:
         # -- TradingView UI path: execute through GhostExecutor/RPA.
         # Legacy broker-specific futures whitelists do not apply here.
 
-        # FORCE GHOSTEXECUTOR: When enabled, never use RPA mouse movement
-        if getattr(self._ghost_executor, "enabled", False):
-            logger.info("EXEC_CLOUD: Using GhostExecutor (JS injection) for %s %s", action, ticker)
-            success = self._ghost_executor.execute_trade(action, ticker, entry_price)
+        # FORCE GHOSTEXECUTOR (Desktop TV only): immediate execution for high-strength signals
+        if True:  # Desktop mode - always use GhostExecutor
+            logger.info("EXEC_CLOUD: GhostExecutor Desktop TV path for %s %s", action, ticker)
+            try:
+                success = asyncio.get_event_loop().run_until_complete(
+                    self._ghost_executor.execute_trade(ticker, action)
+                )
+            except Exception:
+                success = False
             if success:
-                logger.info("EXEC_CLOUD: GhostExecutor successfully executed %s %s", action, ticker)
+                logger.info("EXEC_CLOUD: GhostExecutor executed %s %s on Desktop TV", action, ticker)
             return success
 
         # AGGRESSIVE BYPASS: High-strength liquidity signals execute immediately
@@ -5745,6 +5750,10 @@ class VcaniTradeApp:
             return
 
         # HYBRID GATEWAY: broker WebSocket -> local socket -> MT5 -> TradingView JS.
+        # POSITION LOCK: Lock this ticker immediately to prevent churning.
+        # Even if execution fails, we don't want to retry the same symbol for
+        # at least SIGNAL_COOLDOWN_SECONDS (300s = 5 min).
+        self.locked_tickers[ticker] = time.time()
         rpa_success = False
         execution_route = "legacy_rpa"
         try:

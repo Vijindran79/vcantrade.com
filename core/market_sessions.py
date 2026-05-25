@@ -369,17 +369,19 @@ class MarketSessionDetector:
         self._holiday_name = holiday_name
         
         # If US holiday, only crypto and non-US markets active
+        # NOTE: CME futures (NQ, ES, CL) often trade on US holidays with reduced
+        # hours. We no longer block them — if MT5 gives us a tick, the market is
+        # open and we can trade. Only equities are truly closed on holidays.
         if is_us_holiday:
-            active_markets = ["Crypto"]
+            active_markets = ["Crypto", "Futures"]
             if not is_hk_holiday:
-                # HK might still be open
                 active_markets.extend(["Tokyo", "HongKong"])
             
             self._current_session = MarketSession.HOLIDAY
             self._active_markets = active_markets
             self._last_update = now
             
-            logger.info(f"[PALM] HOLIDAY MODE: {holiday_name} | Only crypto/non-US markets active")
+            logger.info(f"[PALM] HOLIDAY MODE: {holiday_name} | Futures + Crypto still active (equities closed)")
             return active_markets, MarketSession.HOLIDAY
         
         # Check early close
