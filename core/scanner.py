@@ -1988,8 +1988,16 @@ class CloudScanner:
                 # Sniper triple-check: trend/setup/entry must all align (5m/3m/1m).
                 # If yfinance data is unavailable (futures symbols), skip this gate
                 # and rely on the regime detector + brain swarm for direction.
-                # AGGRESSIVE MODE: High-strength liquidity signals bypass MTF/LEVEL2 for speed
-                bypass_mtf_level2 = signal.strength >= 0.82 and "LIQUIDITY" in signal.signal_type
+                # AGGRESSIVE MODE: bypass MTF/LEVEL2 when EITHER
+                #   (a) raw signal strength >= 0.82, OR
+                #   (b) full swarm consensus >= 0.85 (1.00 confidence is normal
+                #       when Devil's Advocate clears the trade and all agents
+                #       agree). The previous gate of 0.82 only on raw strength
+                #       missed signals where the swarm boosted to 1.00.
+                bypass_mtf_level2 = (
+                    "LIQUIDITY" in signal.signal_type
+                    and (signal.strength >= 0.82 or confidence_score >= 0.85)
+                )
                 if bypass_mtf_level2:
                     logger.info(
                         "[AGGRESSIVE] High-strength liquidity signal (%.2f) bypassing MTF/LEVEL2 for %s",
@@ -2087,7 +2095,7 @@ class CloudScanner:
                         or (regime in ("STRONG_BEAR", "LEAN_BEAR") and analysis.action.value == "SELL")
                     )
                     fast_path = (
-                        signal.strength >= 0.82
+                        (signal.strength >= 0.82 or confidence_score >= 0.85)
                         and analysis.action.value == technical_action
                         and "LIQUIDITY" in signal.signal_type
                         and regime_aligned

@@ -376,6 +376,21 @@ class CommandCenter(QWidget):
         except Exception:
             pass
 
+    def showEvent(self, event):
+        """Every time the window is shown, guarantee it's visible.
+        Stops the dashboard from coming back at 0% opacity / off-screen."""
+        try:
+            if self.windowOpacity() < 0.7:
+                self.setWindowOpacity(1.0)
+            from PyQt6.QtWidgets import QApplication
+            screen = QApplication.primaryScreen().geometry()
+            if (self.x() < -200 or self.x() > screen.width() - 100
+                    or self.y() < -200 or self.y() > screen.height() - 100):
+                self.move(screen.width() - self.width() - 20, 20)
+        except Exception:
+            pass
+        super().showEvent(event)
+
     def set_bridge_status(self, status: str):
         """Update external brain bridge indicator in the header."""
         normalized = str(status or "disconnected").strip().lower()

@@ -100,16 +100,21 @@ class MultiTimeframeStructureAnalyzer:
                     support_zones,
                     timeframe_biases,
                 )
-            blocking = self._nearest_zone(current_price, resistance_zones)
-            if blocking is not None:
-                return StructureVerdict(
-                    False,
-                    dominant_bias,
-                    f"BUY rejected: price is inside/under major {blocking.timeframe} resistance.",
-                    resistance_zones,
-                    support_zones,
-                    timeframe_biases,
-                )
+            # BREAKOUT-FRIENDLY: When the higher-timeframe trend is BULLISH,
+            # price near resistance is a breakout setup, not a rejection. Only
+            # block proximity when the bias is NEUTRAL/UNKNOWN — those are the
+            # trades that actually fail at resistance.
+            if dominant_bias != "BULLISH":
+                blocking = self._nearest_zone(current_price, resistance_zones)
+                if blocking is not None:
+                    return StructureVerdict(
+                        False,
+                        dominant_bias,
+                        f"BUY rejected: price is inside/under major {blocking.timeframe} resistance.",
+                        resistance_zones,
+                        support_zones,
+                        timeframe_biases,
+                    )
 
         if action == "SELL":
             if dominant_bias == "BULLISH":
@@ -121,16 +126,20 @@ class MultiTimeframeStructureAnalyzer:
                     support_zones,
                     timeframe_biases,
                 )
-            blocking = self._nearest_zone(current_price, support_zones)
-            if blocking is not None:
-                return StructureVerdict(
-                    False,
-                    dominant_bias,
-                    f"SELL rejected: price is inside/over major {blocking.timeframe} support.",
-                    resistance_zones,
-                    support_zones,
-                    timeframe_biases,
-                )
+            # BREAKDOWN-FRIENDLY: When the higher-timeframe trend is BEARISH,
+            # price near support is a breakdown setup. Only block proximity
+            # when the bias is NEUTRAL/UNKNOWN.
+            if dominant_bias != "BEARISH":
+                blocking = self._nearest_zone(current_price, support_zones)
+                if blocking is not None:
+                    return StructureVerdict(
+                        False,
+                        dominant_bias,
+                        f"SELL rejected: price is inside/over major {blocking.timeframe} support.",
+                        resistance_zones,
+                        support_zones,
+                        timeframe_biases,
+                    )
 
         return StructureVerdict(
             True,
