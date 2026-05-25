@@ -2289,6 +2289,15 @@ class CloudScanner:
             )
             base_confidence = max(base_confidence, 0.60)
 
+        # [BOOST] Strong technical signals (0.85+) should not be downgraded by
+        # cautious LLM. If radar strength >= 0.85, boost base to HIGH (0.80).
+        if signal_strength >= 0.85 and base_confidence < 0.80:
+            logger.info(
+                f"[BOOST] Technical signal very strong ({signal_strength:.2f}), "
+                f"lifting base confidence to HIGH (0.80)"
+            )
+            base_confidence = max(base_confidence, 0.80)
+
         # Adjust based on agent alignment
         alignment_bonus = 0.0
         if transcript:

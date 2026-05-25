@@ -1624,8 +1624,10 @@ class VcaniTradeApp:
         self._initialize_vibe_status()
         logger.info("VcaniTrade AI initialized (Hybrid Architecture)")
         
-        # Auto-start browser agent for testing
-        # BrowserAgent disabled - pure TradingView Desktop + GhostExecutor mode
+        # Auto-start the browser agent so Hunter cycles can navigate TradingView
+        # and the GhostExecutor can click Buy/Sell. Without this, the bot is
+        # blind and every Hunter cycle prints "Browser agent disabled".
+        self._start_browser_agent_background()
 
     def _run_on_ui_thread(self, callback):
         """Run callback on the Qt main thread safely."""
