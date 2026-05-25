@@ -1,10 +1,10 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "CME_MINI:MNQ1!",
-    "CME_MINI:MES1!",
-    "CL=F",
-    "GC=F"
+    "MNQ1!",
+    "MES1!",
+    "MCL1!",
+    "MGC1!"
   ],
   "investment_amount": 1000.0,
   "lot_size": 1.0,
@@ -14,8 +14,8 @@
   "auto_risk_enabled": true,
   "take_profit_pct": 1.0,
   "stop_loss_pct": 0.5,
-  "max_daily_loss": 150.0,
-  "auto_execute_threshold": 0.9,
+  "max_daily_loss": 0.0,
+  "auto_execute_threshold": 0.7,
   "prop_firm_enabled": true,
   "prop_firm_name": "Apex Trader Funding",
   "prop_account_size": 50000.0

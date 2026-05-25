@@ -86,7 +86,7 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 # ===== OPTIONAL SYMBOL SAFETY LISTS =====
 # These are only used by legacy broker-specific paths. TradingView and MT5 route
 # through their own execution handlers and should not be blocked by a prop firm list.
-FUTURES_WHITELIST = ["CL=F", "CL1!", "NQM6", "ESM6", "MGC"]
+FUTURES_WHITELIST = ["MNQ1!", "MES1!", "MCL1!", "MGC1!", "MYM1!", "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!"]
 # Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
@@ -262,7 +262,7 @@ YFINANCE_SYMBOL_MAP = {
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
-MULTI_ASSET_TICKERS = ["CL=F", "CME_MINI:MNQ1!", "CME_MINI:MES1!", "COMEX:MGC1!"]
+MULTI_ASSET_TICKERS = ["MNQ1!", "MES1!", "MCL1!", "MGC1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
@@ -282,38 +282,50 @@ for _alias, _yahoo in SYMBOL_TO_YAHOO_MAP.items():
 del _alias, _yahoo
 # Symbol mapping: Yahoo / internal ticker -> TradingView chart symbol.
 # Used by browser_agent/rpa_executor when a chart symbol needs to be resolved.
-# NQ=F/ES=F/CL=F map to the current working TradingView chart codes.
+# Symbol mapping: any internal alias -> EXACT TradingView ticker that you trade.
+# These are your ACTUAL Apex Micro futures contracts. The bot types these
+# strings into TradingView's symbol search box (Ctrl+O) before clicking Buy/Sell.
+# DO NOT change to NQM6/ESM6/etc — those are wrong contracts for Apex Micros.
 TRADINGVIEW_SYMBOL_MAP = {
-    # Yahoo futures -> CME_MINI / NYMEX contract names
-    "NQ=F":  "NQM6",
-    "MNQ=F": "NQM6",
-    "ES=F":  "ESM6",
-    "MES=F": "ESM6",
-    "CL=F":  "CL1!",
-    "MCL=F": "MCL1!",
-    # Canonical short forms (F stripped by candidate generator)
-    "NQ":  "NQM6",
-    "MNQ": "NQM6",
-    "ES":  "ESM6",
-    "MES": "ESM6",
-    "CL":  "CL1!",
-    "MCL": "MCL1!",
-    # TradingView futures contract codes.
-    "CME_MINI:MNQ1!": "NQM6",
-    "CME_MINI:MES1!": "ESM6",
-    "NYMEX:CL1!": "CL1!",
-    "NYMEX:CLM26!": "CL1!",  # Legacy alias only
-    # Bare TradingView contract codes (user-specified analysis tickers)
-    "MNQ1!": "NQM6",
-    "MES1!": "ESM6",
-    "CL1!": "CL1!",
-    "CLM26!": "CL1!",  # Legacy alias only
-    # Gold (COMEX Micro Gold)
-    "COMEX:MGC1!": "MGC",
-    "GC=F": "MGC",
-    "GC": "MGC",
-    "MGC": "MGC",
-    "XAUUSD": "MGC",
+    # ===== Apex Micro futures (MNQ, MES, MCL, MGC, MYM, M2K, M6A, M6E) =====
+    # Continuous-contract codes (1!) so TradingView always shows the front month.
+    "MNQ":  "MNQ1!",   "MNQ=F": "MNQ1!",   "MNQ1!": "MNQ1!",
+    "MES":  "MES1!",   "MES=F": "MES1!",   "MES1!": "MES1!",
+    "MCL":  "MCL1!",   "MCL=F": "MCL1!",   "MCL1!": "MCL1!",
+    "MGC":  "MGC1!",   "MGC=F": "MGC1!",   "MGC1!": "MGC1!",
+    "MYM":  "MYM1!",   "MYM=F": "MYM1!",   "MYM1!": "MYM1!",
+    "M2K":  "M2K1!",   "M2K=F": "M2K1!",   "M2K1!": "M2K1!",
+    "M6A":  "M6A1!",   "M6A1!": "M6A1!",
+    "M6E":  "M6E1!",   "M6E1!": "M6E1!",
+    "MBT":  "MBT1!",   "MBT1!": "MBT1!",
+    "MET":  "MET1!",   "MET1!": "MET1!",
+
+    # ===== Yahoo aliases users sometimes type =====
+    "NQ":  "MNQ1!",   "NQ=F":  "MNQ1!",
+    "ES":  "MES1!",   "ES=F":  "MES1!",
+    "CL":  "MCL1!",   "CL=F":  "MCL1!",
+    "GC":  "MGC1!",   "GC=F":  "MGC1!",
+    "YM":  "MYM1!",   "YM=F":  "MYM1!",
+    "RTY": "M2K1!",   "RTY=F": "M2K1!",
+
+    # ===== TradingView prefixed forms =====
+    "CME_MINI:MNQ1!": "MNQ1!",
+    "CME_MINI:MES1!": "MES1!",
+    "NYMEX:MCL1!":    "MCL1!",
+    "COMEX:MGC1!":    "MGC1!",
+    "CBOT_MINI:MYM1!": "MYM1!",
+    "CME_MINI:M2K1!":  "M2K1!",
+    "CME_MINI:M6A1!":  "M6A1!",
+    "CME_MINI:M6E1!":  "M6E1!",
+    "CME:MBT1!":       "MBT1!",
+    "CME:MET1!":       "MET1!",
+
+    # ===== Crypto / spot =====
+    "XAUUSD": "MGC1!",
+    "BTCUSD": "MBT1!",
+    "ETHUSD": "MET1!",
+    "BTC-USD": "MBT1!",
+    "ETH-USD": "MET1!",
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
