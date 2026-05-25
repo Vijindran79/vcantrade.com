@@ -201,7 +201,7 @@ JSON_OUTPUT = True
 # ===== VISION / VLM CONFIGURATION =====
 # 1. Enable Vision & Screen capturing
 USE_VISION = True
-VLM_MODEL = os.getenv("VLM_MODEL", "llama3.2-vision:latest")
+VLM_MODEL = os.getenv("VLM_MODEL", "moondream:latest")
 VISION_TIMEOUT = 120
 SAVE_DEBUG_SCREENSHOTS = True
 
@@ -382,7 +382,7 @@ MT5_SYMBOL_MAP = {
     "NVDA": "NVDA",
     "AAPL": "AAPL",
 }
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "llama3.2-vision:latest")
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream:latest")
 MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====

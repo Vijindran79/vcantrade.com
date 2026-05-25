@@ -5695,6 +5695,29 @@ class VcaniTradeApp:
             )
             focus_locked = self.rpa_hand.bring_tradingview_to_front(ticker_hint=ticker)
             logger.info("EXEC_CLOUD: pre-strike TradingView focus for %s -> %s", ticker, focus_locked)
+
+            # CRITICAL: Make sure the chart on screen is showing the symbol we
+            # intend to trade. Without this, all clicks land on whichever chart
+            # was already visible (which is why "only MCL was traded").
+            if focus_locked and self.browser_agent and getattr(self, "_browser_loop", None):
+                try:
+                    nav_future = asyncio.run_coroutine_threadsafe(
+                        self.browser_agent.navigate_to_symbol(ticker),
+                        self._browser_loop,
+                    )
+                    nav_ok = nav_future.result(timeout=8)
+                    logger.info("EXEC_CLOUD: chart switched to %s -> %s", ticker, nav_ok)
+                    if not nav_ok:
+                        self.cmd.log(
+                            f'<span style="color:#D29922;font-weight:bold">[WARN] CHART SWITCH FAILED</span>: '
+                            f'could not change chart to {ticker} — clicks may land on wrong symbol'
+                        )
+                except Exception as nav_err:
+                    logger.warning("EXEC_CLOUD: chart switch failed for %s: %s", ticker, nav_err)
+                    self.cmd.log(
+                        f'<span style="color:#D29922">[WARN]</span> chart switch error for {ticker}: {nav_err}'
+                    )
+
             if not focus_locked:
                 self.cmd.log(
                     f'<span style="color:#F85149;font-weight:bold">[WARN] STRIKE BLOCKED</span>: '

@@ -591,13 +591,21 @@ class BrowserAgent:
         return terms
 
     async def navigate_to_symbol(self, symbol: str) -> bool:
-        """Switch to the browser tab whose TradingView chart matches this symbol."""
+        """Switch TradingView to the given symbol.
+
+        Strategy (in order):
+        1. If a tab already shows this symbol, bring it to front (fast)
+        2. Otherwise type the symbol into TradingView's search box (slow but
+           always works — uses Ctrl+O shortcut to open the symbol picker)
+        """
         if self._is_passive_observer_mode():
             self._observer_log(symbol)
             return True
         if not self.browser or not self.is_running:
             return False
         terms = self._symbol_search_terms(symbol)
+
+        # 1) Look for a tab that already shows the symbol
         best_page = None
         best_score = 0
         for ctx in self.browser.contexts:
@@ -615,15 +623,72 @@ class BrowserAgent:
                         best_page = page
                 except Exception:
                     continue
-        if best_page:
+
+        if best_page and best_score >= 2:
             await best_page.bring_to_front()
             self.page = best_page
             if hasattr(self, '_on_page_switched') and callable(self._on_page_switched):
                 self._on_page_switched(self.page)
-            logger.info("[NAV] Switched to tab for %s: %s", symbol, best_page.url[:80])
+            logger.info("[NAV] Switched to existing tab for %s: %s", symbol, best_page.url[:80])
             return True
-        logger.warning("[NAV] No tab found matching %s (searched: %s)", symbol, terms[:5])
-        return False
+
+        # 2) No matching tab — actually CHANGE the chart in the active TradingView page.
+        # Without this fix, the bot would click Buy/Sell on the wrong chart.
+        active_page = self.page or (best_page if best_page else None)
+        if not active_page:
+            for ctx in self.browser.contexts:
+                for page in ctx.pages:
+                    if "tradingview" in (page.url or "").lower():
+                        active_page = page
+                        break
+                if active_page:
+                    break
+
+        if not active_page:
+            logger.warning("[NAV] No TradingView page available to change symbol to %s", symbol)
+            return False
+
+        try:
+            await active_page.bring_to_front()
+            self.page = active_page
+            # Use Ctrl+O to open TradingView's symbol picker, then type the symbol.
+            # This is the only reliable way to change the chart programmatically.
+            search_term = self._symbol_for_tradingview_search(symbol)
+            await active_page.keyboard.press("Control+o")
+            await active_page.wait_for_timeout(500)
+            # Clear any existing text first
+            await active_page.keyboard.press("Control+a")
+            await active_page.wait_for_timeout(100)
+            await active_page.keyboard.type(search_term, delay=30)
+            await active_page.wait_for_timeout(800)  # let TV resolve the symbol
+            await active_page.keyboard.press("Enter")
+            await active_page.wait_for_timeout(2500)  # let chart load
+            if hasattr(self, '_on_page_switched') and callable(self._on_page_switched):
+                self._on_page_switched(self.page)
+            logger.info("[NAV] Changed TradingView chart to %s (typed: %s)", symbol, search_term)
+            return True
+        except Exception as exc:
+            logger.error("[NAV] Failed to change chart to %s: %s", symbol, exc)
+            return False
+
+    def _symbol_for_tradingview_search(self, symbol: str) -> str:
+        """Map an internal ticker to what TradingView expects in its symbol search."""
+        # Use the existing TRADINGVIEW_SYMBOL_MAP from config
+        try:
+            import config
+            tv_map = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {}) or {}
+            mapped = tv_map.get(symbol) or tv_map.get(str(symbol).upper())
+            if mapped:
+                return mapped
+        except Exception:
+            pass
+        # Default: strip common suffixes
+        s = str(symbol or "").strip().upper()
+        if s.endswith("=F"):
+            s = s[:-2]
+        if ":" in s:
+            s = s.split(":", 1)[-1]
+        return s
 
     async def switch_to_symbol(self, symbol: str, *args, **kwargs) -> bool:
         """Delegate to navigate_to_symbol."""
