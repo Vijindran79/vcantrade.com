@@ -1940,18 +1940,34 @@ class CloudScanner:
                     or "AUTONOMOUS"
                 ).upper()
 
-                # REGIME GUARD: Don't allow counter-trend liquidity sweeps in strong regimes
-                # The regime detector data lives in signal.metadata["regime"], not
-                # in market_data.indicators (which only carries the formatted label).
+                # REGIME GUARD: Don't allow counter-trend liquidity sweeps in trending markets.
+                # Logs showed the scanner repeatedly trying to SELL into a
+                # LEAN_BULL +42 BULL_STACK regime (selling rallies in an
+                # uptrend). That is the wrong side of the market. Block both
+                # STRONG_* and LEAN_* counter-trend liquidity trades. The bot
+                # only fades into NEUTRAL/CHOPPY regimes where reversals are
+                # statistically more likely.
                 regime_payload = signal.metadata.get("regime") or {}
                 regime = str(regime_payload.get("regime") or market_data.indicators.get("REGIME", "")).upper()
+                regime_score = float(regime_payload.get("score") or 0.0)
                 if "LIQUIDITY" in signal.signal_type:
-                    if regime == "STRONG_BULL" and technical_action == "SELL":
-                        logger.warning("[REGIME] REJECTED: SELL %s in STRONG_BULL regime", signal.ticker)
+                    if regime in ("STRONG_BULL", "LEAN_BULL") and technical_action == "SELL":
+                        # Allow only the rare case of a high-score reversal:
+                        # if the regime score is dropping sharply (we don't
+                        # have that signal here), keep blocking by default.
+                        logger.warning(
+                            "[REGIME] REJECTED: SELL %s in %s regime (score=%+.0f). "
+                            "No fading rallies in an uptrend.",
+                            signal.ticker, regime, regime_score,
+                        )
                         self._emit_status(signal.ticker, "trade_rejected")
                         continue
-                    if regime == "STRONG_BEAR" and technical_action == "BUY":
-                        logger.warning("[REGIME] REJECTED: BUY %s in STRONG_BEAR regime", signal.ticker)
+                    if regime in ("STRONG_BEAR", "LEAN_BEAR") and technical_action == "BUY":
+                        logger.warning(
+                            "[REGIME] REJECTED: BUY %s in %s regime (score=%+.0f). "
+                            "No buying dips in a downtrend.",
+                            signal.ticker, regime, regime_score,
+                        )
                         self._emit_status(signal.ticker, "trade_rejected")
                         continue
                 # If the model collapses to HOLD while the deterministic scanner
