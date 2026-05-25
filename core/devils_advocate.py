@@ -209,17 +209,39 @@ class DevilsAdvocate:
         return result
 
     def _apply_temporal_guardrails(self, result: Dict, session_context: Optional[Dict]) -> Dict:
-        """Raise stronger objections during market holidays and late Friday trade windows."""
+        """Raise stronger objections during market holidays and late Friday trade windows.
+
+        FUTURES BYPASS: CME / Apex micro futures (MNQ, MES, MCL, MGC, MYM, M2K,
+        M6A, M6E, MBT, MET) trade through US holidays except for full closures.
+        The "Memorial Day = no liquidity" rejection used to kill every trade
+        today even though the futures session was fully open. We only apply
+        the holiday penalty when the session is genuinely a hard close.
+        """
         context = session_context or {}
         reasons = [str(reason) for reason in result.get("rejection_reasons", [])]
 
-        if context.get("is_holiday_us") or context.get("is_holiday_hk"):
+        # Treat the holiday flag as informational only when futures are still
+        # active. The market_sessions module always includes "Futures" in
+        # active_markets when CME is open (e.g. Memorial Day, MLK Day,
+        # Presidents Day). On a hard close (Christmas Day, Thanksgiving) the
+        # "Futures" entry is absent and we keep the full penalty.
+        active_markets = [str(m).lower() for m in (context.get("active_markets") or [])]
+        futures_open_on_holiday = any("futures" in m for m in active_markets)
+        hard_close = bool(context.get("is_hard_close") or context.get("equities_and_futures_closed"))
+
+        if (context.get("is_holiday_us") or context.get("is_holiday_hk")) and (hard_close or not futures_open_on_holiday):
             holiday_name = str(context.get("holiday_name") or "Market holiday")
             reasons.insert(0, f"{holiday_name} reduces liquidity and follow-through for fresh entries.")
             result["rating"] = "STRONG_AVOID"
             result["confidence_penalty"] = min(float(result.get("confidence_penalty", -0.15)), -0.25)
             result["better_entry_timing"] = "Wait for the next full market session after the holiday."
             result["hidden_risks"] = "Holiday conditions can distort price discovery and widen slippage."
+        elif context.get("is_holiday_us") or context.get("is_holiday_hk"):
+            # Futures open on a US holiday: log it, do not penalize.
+            logger.info(
+                "[DEVIL] Holiday flag set but futures session is open — no penalty applied (%s)",
+                context.get("holiday_name") or "holiday",
+            )
 
         if context.get("is_friday_close_window"):
             cutoff = int(context.get("friday_close_cutoff_utc", getattr(config, "FRIDAY_CLOSE_CUTOFF_UTC", 18)) or 18)

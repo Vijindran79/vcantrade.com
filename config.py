@@ -32,8 +32,6 @@ from dotenv import load_dotenv
 # Load environment variables from .env file if it exists
 load_dotenv()
 
-INITIAL_ENTRY_BULLETS = int(os.getenv("INITIAL_ENTRY_BULLETS", "1"))  # First entry starts with one bullet
-
 # ===== PROP FIRM RULES (The "Professor") =====
 PROP_FIRM_ENABLED = os.getenv("PROP_FIRM_ENABLED", "True").lower() == "true"
 PROP_FIRM_NAME = os.getenv("PROP_FIRM_NAME", "Apex Trader Funding")
@@ -64,7 +62,6 @@ DAILY_LOSS_KILL = MAX_DAILY_LOSS
 # MAX_TRADES_PER_DAY: Maximum number of trades allowed per day
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "20"))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
-SINGLE_TRADE_FOCUS_MODE = os.getenv("SINGLE_TRADE_FOCUS_MODE", "true").lower() == "true"
 COOLDOWN_AFTER_STOP = int(os.getenv("COOLDOWN_AFTER_STOP", "300"))
 KILL_SWITCH = False
 
@@ -89,21 +86,14 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 # ===== OPTIONAL SYMBOL SAFETY LISTS =====
 # These are only used by legacy broker-specific paths. TradingView and MT5 route
 # through their own execution handlers and should not be blocked by a prop firm list.
-FUTURES_WHITELIST = [
-    "MNQ1!", "MES1!", "MCL1!", "MGC1!", "MYM1!",
-    "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!",
-    "NQM6", "ESM6", "MGC",
-]
+FUTURES_WHITELIST = ["MNQ1!", "MES1!", "MCL1!", "MGC1!", "MYM1!", "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!"]
 # Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
 # ===== SYMBOL BRIDGE (TradingView → MT5 Broker) =====
 # TradingView chart symbols can differ from broker-specific MT5 names.
 # Override any value with an environment variable if your broker labels differ.
-TRADINGVIEW_TICKERS = (
-    "MNQ1!", "MES1!", "MCL1!", "MGC1!", "MYM1!",
-    "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!",
-)
+TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "CL1!", "MGC")
 # TradingView is the sole charting surface. No legacy aliases remain.
 
 # Muted tickers: scanner will NEVER scan these.
@@ -153,11 +143,10 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # OpenAI-compatible v1 endpoint (for /v1/chat/completions with vision)
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
-# Your custom built model for all final reasoning / swarm decisions
-MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "predator:latest")
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
 OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL",
-    MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "predator:latest",
+    MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen2.5:1.5b-instruct-q4_K_M",
 )
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 VAST_API_TOKEN = None
@@ -205,28 +194,19 @@ TARGET_ACCOUNTS = _parse_key_list(os.getenv("TARGET_ACCOUNTS", ""))
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 
 # Local execution settings
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
+LLM_TIMEOUT = 180  # Heavy local Qwen runs need more time to finish reliably
 OLLAMA_TIMEOUT = LLM_TIMEOUT  # Alias used by llm_analyzer swarm runner
 JSON_OUTPUT = True
-OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
-OLLAMA_BRAIN_NUM_PREDICT = int(os.getenv("OLLAMA_BRAIN_NUM_PREDICT", "96"))
-OLLAMA_VISION_NUM_PREDICT = int(os.getenv("OLLAMA_VISION_NUM_PREDICT", "96"))
-OLLAMA_VISION_TIMEOUT = int(os.getenv("OLLAMA_VISION_TIMEOUT", "45"))
-OLLAMA_PREDATOR_VERDICT_TIMEOUT = int(os.getenv("OLLAMA_PREDATOR_VERDICT_TIMEOUT", "25"))
 
 # ===== VISION / VLM CONFIGURATION =====
-# 1. Enable Vision & Screen capturing
-USE_VISION = True
+# 1. Vision is OFF by default. The local vision models (moondream, llava) cannot
+#    reliably read TradingView charts — they describe the image generically and
+#    always return SIGNAL_NONE 50%, which kills every swarm decision. Trading
+#    uses technical indicators + regime detector instead. Set USE_VISION=true
+#    in .env if you have a strong vision model and want to re-enable it.
+USE_VISION = os.getenv("USE_VISION", "false").lower() == "true"
 VLM_MODEL = os.getenv("VLM_MODEL", "moondream:latest")
-
-# ===== MACHINE-GUN FAST CHART VISION (your custom models) =====
-# predator:latest   → Your custom main brain / reasoning / swarm (final trade decisions)
-# moondream:latest  → Fast chart vision + OCR (known working on this machine)
-FAST_CHART_VISION_MODEL = os.getenv("FAST_CHART_VISION_MODEL", "moondream:latest")
-FAST_CHART_OCR_MODEL    = os.getenv("FAST_CHART_OCR_MODEL", "moondream:latest")
-
-VISION_TIMEOUT = OLLAMA_VISION_TIMEOUT
+VISION_TIMEOUT = 120
 SAVE_DEBUG_SCREENSHOTS = True
 
 # 2. Turn on the Alarms and Sound Effects
@@ -253,18 +233,7 @@ CHART_REGION_H = int(os.getenv("CHART_REGION_H", "720"))
 SCAN_INTERVAL = 15  # Reduced from 5 — less DOM polling = less detection
 WATCHLIST_INTERVAL = 60
 SNIPER_SCAN_INTERVAL = float(os.getenv("SNIPER_SCAN_INTERVAL", "3.0"))
-CLOUD_TICKERS = [
-    "CME_MINI:MNQ1!",
-    "CME_MINI:MES1!",
-    "NYMEX:MCL1!",
-    "COMEX:MGC1!",
-    "CBOT_MINI:MYM1!",
-    "CME_MINI:M2K1!",
-    "CME:M6A1!",
-    "CME:M6E1!",
-    "CME:MBT1!",
-    "CME:MET1!",
-]
+CLOUD_TICKERS = ["CME_MINI:MNQ1!", "CME_MINI:MES1!", "CL=F"]
 
 # yfinance requires dashed crypto symbols. Keep chart/broker symbols separate.
 YFINANCE_SYMBOL_MAP = {
@@ -292,37 +261,12 @@ YFINANCE_SYMBOL_MAP = {
     "NYMEX:CLM26!": "CL=F",
     "CLM26": "CL=F",
     "CLM26!": "CL=F",
-    "MCL1!": "CL=F",
-    "NYMEX:MCL1!": "CL=F",
-    "MYM1!": "MYM=F",
-    "CBOT_MINI:MYM1!": "MYM=F",
-    "M2K1!": "M2K=F",
-    "CME_MINI:M2K1!": "M2K=F",
-    "M6A1!": "6A=F",
-    "CME:M6A1!": "6A=F",
-    "M6E1!": "6E=F",
-    "CME:M6E1!": "6E=F",
-    "MBT1!": "BTC-USD",
-    "CME:MBT1!": "BTC-USD",
-    "MET1!": "ETH-USD",
-    "CME:MET1!": "ETH-USD",
 }
 
 # ===== MULTI-ASSET HUNTER (Vision-Based Chart Cycling) =====
 # Cycles through NQ / ES / Oil every 30 seconds, screenshots each chart,
 # sends to Cloud Brain via SSH tunnel, and executes trades locally.
-MULTI_ASSET_TICKERS = [
-    "CME_MINI:MNQ1!",
-    "CME_MINI:MES1!",
-    "NYMEX:MCL1!",
-    "COMEX:MGC1!",
-    "CBOT_MINI:MYM1!",
-    "CME_MINI:M2K1!",
-    "CME:M6A1!",
-    "CME:M6E1!",
-    "CME:MBT1!",
-    "CME:MET1!",
-]
+MULTI_ASSET_TICKERS = ["MNQ1!", "MES1!", "MCL1!", "MGC1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # Symbol mapping: TradingView (Hunter) -> Yahoo Finance (Scanner/Cloud)
@@ -331,24 +275,9 @@ SYMBOL_TO_YAHOO_MAP = {
     "CME_MINI:MES1!": "MES=F",
     "CL=F": "CL=F",
     "CL1!": "CL=F",
-    "MCL1!": "CL=F",
     "NYMEX:CL1!": "CL=F",
-    "NYMEX:MCL1!": "CL=F",
     "NYMEX:CLM26!": "CL=F",  # Legacy alias only
     "COMEX:MGC1!": "GC=F",
-    "MGC1!": "GC=F",
-    "CBOT_MINI:MYM1!": "MYM=F",
-    "MYM1!": "MYM=F",
-    "CME_MINI:M2K1!": "M2K=F",
-    "M2K1!": "M2K=F",
-    "CME:M6A1!": "6A=F",
-    "M6A1!": "6A=F",
-    "CME:M6E1!": "6E=F",
-    "M6E1!": "6E=F",
-    "CME:MBT1!": "BTC-USD",
-    "MBT1!": "BTC-USD",
-    "CME:MET1!": "ETH-USD",
-    "MET1!": "ETH-USD",
 }
 # Merge TradingView-side aliases into the canonical SYMBOL_MAP without
 # overwriting the broker (MT5) entries already defined above.
@@ -357,72 +286,77 @@ for _alias, _yahoo in SYMBOL_TO_YAHOO_MAP.items():
 del _alias, _yahoo
 # Symbol mapping: Yahoo / internal ticker -> TradingView chart symbol.
 # Used by browser_agent/rpa_executor when a chart symbol needs to be resolved.
-# NQ=F/ES=F/CL=F map to the current working TradingView chart codes.
+# Symbol mapping: any internal alias -> EXACT TradingView ticker that you trade.
+# These are your ACTUAL Apex Micro futures contracts. The bot types these
+# strings into TradingView's symbol search box (Ctrl+O) before clicking Buy/Sell.
+# DO NOT change to NQM6/ESM6/etc — those are wrong contracts for Apex Micros.
 TRADINGVIEW_SYMBOL_MAP = {
-    # Yahoo futures -> CME_MINI / NYMEX contract names
-    "NQ=F":  "CME_MINI:MNQ1!",
-    "MNQ=F": "CME_MINI:MNQ1!",
-    "ES=F":  "CME_MINI:MES1!",
-    "MES=F": "CME_MINI:MES1!",
-    "MYM=F": "MYM1!",
-    "M2K=F": "M2K1!",
-    "6A=F": "M6A1!",
-    "6E=F": "M6E1!",
+    # ===== Apex Micro futures (MNQ, MES, MCL, MGC, MYM, M2K, M6A, M6E) =====
+    # Continuous-contract codes (1!) so TradingView always shows the front month.
+    "MNQ":  "MNQ1!",   "MNQ=F": "MNQ1!",   "MNQ1!": "MNQ1!",
+    "MES":  "MES1!",   "MES=F": "MES1!",   "MES1!": "MES1!",
+    "MCL":  "MCL1!",   "MCL=F": "MCL1!",   "MCL1!": "MCL1!",
+    "MGC":  "MGC1!",   "MGC=F": "MGC1!",   "MGC1!": "MGC1!",
+    "MYM":  "MYM1!",   "MYM=F": "MYM1!",   "MYM1!": "MYM1!",
+    "M2K":  "M2K1!",   "M2K=F": "M2K1!",   "M2K1!": "M2K1!",
+    "M6A":  "M6A1!",   "M6A1!": "M6A1!",
+    "M6E":  "M6E1!",   "M6E1!": "M6E1!",
+    "MBT":  "MBT1!",   "MBT1!": "MBT1!",
+    "MET":  "MET1!",   "MET1!": "MET1!",
+
+    # ===== Yahoo aliases users sometimes type =====
+    "NQ":  "MNQ1!",   "NQ=F":  "MNQ1!",
+    "ES":  "MES1!",   "ES=F":  "MES1!",
+    "CL":  "MCL1!",   "CL=F":  "MCL1!",
+    "GC":  "MGC1!",   "GC=F":  "MGC1!",
+    "YM":  "MYM1!",   "YM=F":  "MYM1!",
+    "RTY": "M2K1!",   "RTY=F": "M2K1!",
+
+    # ===== TradingView prefixed forms =====
+    "CME_MINI:MNQ1!": "MNQ1!",
+    "CME_MINI:MES1!": "MES1!",
+    "NYMEX:MCL1!":    "MCL1!",
+    "COMEX:MGC1!":    "MGC1!",
+    "CBOT_MINI:MYM1!": "MYM1!",
+    "CME_MINI:M2K1!":  "M2K1!",
+    "CME_MINI:M6A1!":  "M6A1!",
+    "CME_MINI:M6E1!":  "M6E1!",
+    "CME:MBT1!":       "MBT1!",
+    "CME:MET1!":       "MET1!",
+
+    # ===== Crypto / spot =====
+    "XAUUSD": "MGC1!",
+    "BTCUSD": "MBT1!",
+    "ETHUSD": "MET1!",
     "BTC-USD": "MBT1!",
     "ETH-USD": "MET1!",
-    # Oil is intentionally forced to Micro Crude. Full CL is $10/tick.
-    "CL=F":  "NYMEX:MCL1!",
-    "MCL=F": "NYMEX:MCL1!",
-    # Canonical short forms (F stripped by candidate generator)
-    "NQ":  "CME_MINI:MNQ1!",
-    "MNQ": "CME_MINI:MNQ1!",
-    "ES":  "CME_MINI:MES1!",
-    "MES": "CME_MINI:MES1!",
-    "MYM": "MYM1!",
-    "M2K": "M2K1!",
-    "M6A": "M6A1!",
-    "M6E": "M6E1!",
-    "MBT": "MBT1!",
-    "MET": "MET1!",
-    "CL":  "NYMEX:MCL1!",
-    "MCL": "NYMEX:MCL1!",
-    # TradingView futures contract codes.
-    "CME_MINI:MNQ1!": "CME_MINI:MNQ1!",
-    "CME_MINI:MES1!": "CME_MINI:MES1!",
-    "CBOT_MINI:MYM1!": "MYM1!",
-    "CME_MINI:M2K1!": "M2K1!",
-    "CME:M6A1!": "M6A1!",
-    "CME:M6E1!": "M6E1!",
-    "CME:MBT1!": "MBT1!",
-    "CME:MET1!": "MET1!",
-    "NYMEX:CL1!": "NYMEX:MCL1!",
-    "NYMEX:CLM26!": "NYMEX:MCL1!",  # Legacy alias only
-    "NYMEX:MCL1!": "NYMEX:MCL1!",
-    # Bare TradingView contract codes (user-specified analysis tickers)
-    "MNQ1!": "CME_MINI:MNQ1!",
-    "MES1!": "CME_MINI:MES1!",
-    "CL1!": "NYMEX:MCL1!",
-    "MCL1!": "NYMEX:MCL1!",
-    "MYM1!": "MYM1!",
-    "M2K1!": "M2K1!",
-    "M6A1!": "M6A1!",
-    "M6E1!": "M6E1!",
-    "MBT1!": "MBT1!",
-    "MET1!": "MET1!",
-    "CLM26!": "NYMEX:MCL1!",  # Legacy alias only
-    # Gold (COMEX Micro Gold)
-    "COMEX:MGC1!": "MGC",
-    "GC=F": "MGC",
-    "GC": "MGC",
-    "MGC": "MGC",
-    "MGC1!": "MGC",
-    "XAUUSD": "MGC",
 }
 
 # Symbol mapping: Any ticker alias -> MT5 broker symbol (Scanner/MT5 data feed)
 # Pepperstone UK DEMO account — Spread Betting (GBP) uses _SB suffix.
 # Chart tabs show: Crude_SB, NAS100_SB, US500_SB
 MT5_SYMBOL_MAP = {
+    # ===== Direct Apex micro futures aliases (executor receives these) =====
+    # Pepperstone Spread Betting account uses _SB suffix on CFD/index symbols.
+    "MNQ1!": "NAS100_SB",
+    "MES1!": "US500_SB",
+    "MCL1!": "Crude_SB",
+    "MGC1!": "Gold_SB",
+    "MYM1!": "DJ30_SB",
+    "M2K1!": "RUS2000_SB",
+    "M6A1!": "AUDUSD",
+    "M6E1!": "EURUSD",
+    "MBT1!": "BTCUSD",
+    "MET1!": "ETHUSD",
+    # Plain root tickers
+    "MNQ": "NAS100_SB",
+    "MES": "US500_SB",
+    "MCL": "Crude_SB",
+    "MGC": "Gold_SB",
+    "MYM": "DJ30_SB",
+    "M2K": "RUS2000_SB",
+    "MBT": "BTCUSD",
+    "MET": "ETHUSD",
     # ===== TradingView futures aliases -> Pepperstone broker symbols =====
     # These are the symbols the scanner receives - map them FIRST.
     "CL=F": "Crude_SB",
@@ -431,23 +365,10 @@ MT5_SYMBOL_MAP = {
     "NQM6": "NAS100_SB",
     "ESM6": "US500_SB",
     "MGC": "Gold_SB",
-    "MYM1!": "MYM1!",
-    "M2K1!": "M2K1!",
-    "M6A1!": "M6A1!",
-    "M6E1!": "M6E1!",
-    "MBT1!": "MBT1!",
-    "MET1!": "MET1!",
     # CME / NYMEX prefixes -> Pepperstone exact terminal name
     "CME_MINI:MNQ1!": "NAS100_SB",
     "CME_MINI:MES1!": "US500_SB",
-    "CBOT_MINI:MYM1!": "MYM1!",
-    "CME_MINI:M2K1!": "M2K1!",
-    "CME:M6A1!": "M6A1!",
-    "CME:M6E1!": "M6E1!",
-    "CME:MBT1!": "MBT1!",
-    "CME:MET1!": "MET1!",
     "NYMEX:CL1!": "Crude_SB",
-    "NYMEX:MCL1!": "Crude_SB",
     "NYMEX:CLM26!": "Crude_SB",  # Legacy alias only
     "CLM26!": "Crude_SB",  # Legacy alias only
     # Yahoo-style aliases -> Pepperstone
@@ -457,10 +378,6 @@ MT5_SYMBOL_MAP = {
     "NQ=F": "NAS100_SB",
     "ES=F": "US500_SB",
     "GC=F": "Gold_SB",
-    "MYM=F": "MYM1!",
-    "M2K=F": "M2K1!",
-    "6A=F": "M6A1!",
-    "6E=F": "M6E1!",
     "SI=F": "XAGUSD",
     "YM=F": "YM1!",
     "RTY=F": "M2K1!",
@@ -475,12 +392,6 @@ MT5_SYMBOL_MAP = {
     "GC": "Gold_SB",
     "SI": "XAGUSD",
     "YM": "YM1!",
-    "MYM": "MYM1!",
-    "M2K": "M2K1!",
-    "M6A": "M6A1!",
-    "M6E": "M6E1!",
-    "MBT": "MBT1!",
-    "MET": "MET1!",
     # Gold / Silver
     "XAUUSD": "XAUUSD_SB",
     "Gold_SB": "XAUUSD_SB",
@@ -508,8 +419,10 @@ MT5_SYMBOL_MAP = {
     "NVDA": "NVDA",
     "AAPL": "AAPL",
 }
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "qwen3-vl:2b")
-MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream:latest")
+# Hunter thread is vision-based; the local vision models cannot reliably read
+# trading charts. Disabled by default. Re-enable only with a stronger VLM.
+MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "False").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====
 # "TV_DESKTOP" = Connect to TradingView Desktop via CDP on port 9222 (ghost JS injection)
@@ -522,10 +435,6 @@ TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_DESKTOP")
 # "TRADINGVIEW" = Physical mouse clicks on TradingView web/paper interface
 # "MT5" = Native MetaTrader 5 order execution
 ACTIVE_EXECUTION_SURFACE = os.getenv("ACTIVE_EXECUTION_SURFACE", "TRADINGVIEW").upper().strip()
-
-# Hybrid mode: Use MT5 for live market data / ticks / structure even when executing on TradingView
-# This was your preferred old setting: MT5 data → brain (predator), execution on TV chart
-USE_MT5_AS_DATA_FEED = os.getenv("USE_MT5_AS_DATA_FEED", "true").lower() == "true"
 
 # TradingView account label to verify before clicking (e.g., "Paper Trading", "Live")
 TRADINGVIEW_ACCOUNT_LABEL = os.getenv("TRADINGVIEW_ACCOUNT_LABEL", "Paper Trading").strip()
@@ -542,13 +451,6 @@ BROWSER_CDP_URL = os.getenv("BROWSER_CDP_URL", "http://127.0.0.1:9222").strip()
 TV_DESKTOP_CDP_URL = os.getenv("TV_DESKTOP_CDP_URL", "http://127.0.0.1:9222").strip()
 # How long (seconds) to wait for TradingView Desktop to be ready after launch
 TV_DESKTOP_CONNECT_TIMEOUT = int(os.getenv("TV_DESKTOP_CONNECT_TIMEOUT", "15"))
-
-# ===== CDP / BROWSER AGENT RESILIENCE (for flaky Electron / TV Desktop) =====
-# These make the connection "machine-gun tolerant" — long patience, many retries
-CDP_MAX_CONNECT_RETRIES = int(os.getenv("CDP_MAX_CONNECT_RETRIES", "15"))
-CDP_RETRY_DELAY_SECONDS = int(os.getenv("CDP_RETRY_DELAY_SECONDS", "8"))
-CDP_PAGE_WAIT_SECONDS = int(os.getenv("CDP_PAGE_WAIT_SECONDS", "45"))  # wait for chart tab to appear after WS connect
-CDP_CONNECT_TIMEOUT_MS = int(os.getenv("CDP_CONNECT_TIMEOUT_MS", "240000"))  # 4 minutes — generous for Electron
 LOW_LATENCY_EXECUTION_ENABLED = os.getenv("LOW_LATENCY_EXECUTION_ENABLED", "true").lower() == "true"
 HYBRID_GATEWAY_PRIMARY = os.getenv("HYBRID_GATEWAY_PRIMARY", "broker_ws").lower().strip()
 BROKER_WS_URL = os.getenv("BROKER_WS_URL", "").strip()
@@ -620,9 +522,6 @@ MTF_STRUCTURE_PROXIMITY_PCT = float(os.getenv("MTF_STRUCTURE_PROXIMITY_PCT", "0.
 SIGNAL_COOLDOWN_SECONDS = int(os.getenv("SIGNAL_COOLDOWN_SECONDS", "300"))
 MT5_REQUIRE_PROTECTIVE_STOP = os.getenv("MT5_REQUIRE_PROTECTIVE_STOP", "true").lower() == "true"
 AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED = os.getenv("AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED", "false").lower() == "true"
-COMPETITION_REVERSAL_FLATTEN_ENABLED = os.getenv("COMPETITION_REVERSAL_FLATTEN_ENABLED", "true").lower() == "true"
-COMPETITION_REVERSAL_MIN_CONFIDENCE = float(os.getenv("COMPETITION_REVERSAL_MIN_CONFIDENCE", "75.0"))
-COMPETITION_REVERSAL_MIN_OPEN_PROFIT_USD = float(os.getenv("COMPETITION_REVERSAL_MIN_OPEN_PROFIT_USD", "50.0"))
 AI_OVERLAY_START_PINNED = os.getenv("AI_OVERLAY_START_PINNED", "false").lower() == "true"
 
 # ===== CLOUD SCANNER =====
@@ -666,7 +565,7 @@ PRIMARY_MONITOR_WIDTH = int(os.getenv("PRIMARY_MONITOR_WIDTH", "1920"))
 PRIMARY_MONITOR_HEIGHT = int(os.getenv("PRIMARY_MONITOR_HEIGHT", "1080"))
 
 # ===== SLIPPAGE GUARD =====
-MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "0.15"))
+MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "2.50"))
 MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 
 # ===== RETAIL BROKER CONFIGURATION =====
@@ -676,10 +575,6 @@ MAX_SPREAD_PERCENT = float(os.getenv("MAX_SPREAD_PERCENT", "0.30"))
 # ===== AGGRESSIVE HUNTER =====
 # If signal confidence >= this threshold, skip 1m/3m MTF alignment and strike on 5m alone.
 AGGRESSIVE_HUNTER_CONFIDENCE_PCT = float(os.getenv("AGGRESSIVE_HUNTER_CONFIDENCE_PCT", "65.0"))
-# Vision-only Hunter entries must be cleaner than ordinary scanner alerts.
-HUNTER_EXECUTION_CONFIDENCE_PCT = float(os.getenv("HUNTER_EXECUTION_CONFIDENCE_PCT", "80.0"))
-PRICE_ACTION_GATE_ENABLED = os.getenv("PRICE_ACTION_GATE_ENABLED", "true").lower() == "true"
-PRICE_ACTION_GATE_REQUIRE_DATA = os.getenv("PRICE_ACTION_GATE_REQUIRE_DATA", "true").lower() == "true"
 
 # ===== AUTONOMOUS RISK MANAGEMENT =====
 # ATR-driven risk management (replaces fixed-dollar thresholds).
@@ -695,28 +590,6 @@ AUTONOMOUS_BREAK_EVEN_TRIGGER_USD = float(os.getenv("AUTONOMOUS_BREAK_EVEN_TRIGG
 AUTONOMOUS_BREAK_EVEN_PLUS_USD = float(os.getenv("AUTONOMOUS_BREAK_EVEN_PLUS_USD", "2.0"))
 AUTONOMOUS_TRAILING_LOOKBACK_BARS = 3
 AUTONOMOUS_TRAILING_UPDATE_SECONDS = 60
-
-# Protect open winners from round-tripping. Once a position reaches the minimum
-# open profit, the bot tracks peak profit and exits if too much is given back.
-PROFIT_GIVEBACK_SHIELD_ENABLED = os.getenv("PROFIT_GIVEBACK_SHIELD_ENABLED", "true").lower() == "true"
-PROFIT_GIVEBACK_MIN_PROFIT_USD = float(os.getenv("PROFIT_GIVEBACK_MIN_PROFIT_USD", "50.0"))
-PROFIT_GIVEBACK_MAX_RETRACE_PCT = float(os.getenv("PROFIT_GIVEBACK_MAX_RETRACE_PCT", "25.0"))
-PROFIT_GIVEBACK_MIN_LOCK_USD = float(os.getenv("PROFIT_GIVEBACK_MIN_LOCK_USD", "20.0"))
-PROFIT_GIVEBACK_AUTO_FLATTEN = os.getenv("PROFIT_GIVEBACK_AUTO_FLATTEN", "true").lower() == "true"
-PROFIT_GIVEBACK_COOLDOWN_SECONDS = int(os.getenv("PROFIT_GIVEBACK_COOLDOWN_SECONDS", "20"))
-PROFIT_LADDER_SHIELD_ENABLED = os.getenv("PROFIT_LADDER_SHIELD_ENABLED", "true").lower() == "true"
-PROFIT_LADDER_STEPS_USD = os.getenv(
-    "PROFIT_LADDER_STEPS_USD",
-    "50:15,100:60,150:100,250:180,350:275,500:400,750:625,1000:850",
-)
-DAILY_PROFIT_LADDER_SHIELD_ENABLED = os.getenv("DAILY_PROFIT_LADDER_SHIELD_ENABLED", "true").lower() == "true"
-DAILY_PROFIT_LADDER_PAUSE_ON_TRIGGER = os.getenv("DAILY_PROFIT_LADDER_PAUSE_ON_TRIGGER", "true").lower() == "true"
-STOP_UPDATE_RETRY_COOLDOWN_SECONDS = int(os.getenv("STOP_UPDATE_RETRY_COOLDOWN_SECONDS", "60"))
-MANUAL_CLOSE_SYNC_ENABLED = os.getenv("MANUAL_CLOSE_SYNC_ENABLED", "true").lower() == "true"
-MANUAL_CLOSE_CONFIRMATIONS = int(os.getenv("MANUAL_CLOSE_CONFIRMATIONS", "4"))
-MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS = int(os.getenv("MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS", "180"))
-TRADINGVIEW_COLOR_SCAN_FALLBACK_ENABLED = os.getenv("TRADINGVIEW_COLOR_SCAN_FALLBACK_ENABLED", "false").lower() == "true"
-TRADINGVIEW_TRUST_UNVERIFIED_CLICK = os.getenv("TRADINGVIEW_TRUST_UNVERIFIED_CLICK", "false").lower() == "true"
 
 # ===== LOGGING =====
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

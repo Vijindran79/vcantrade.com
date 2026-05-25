@@ -1962,14 +1962,35 @@ class CloudScanner:
                     or "AUTONOMOUS"
                 ).upper()
 
-                # REGIME GUARD: Don't allow counter-trend liquidity sweeps in strong regimes
-                regime = str(market_data.indicators.get("REGIME", "")).upper()
+                # REGIME GUARD: Don't allow counter-trend liquidity sweeps in trending markets.
+                # Logs showed the scanner repeatedly trying to SELL into a
+                # LEAN_BULL +42 BULL_STACK regime (selling rallies in an
+                # uptrend). That is the wrong side of the market. Block both
+                # STRONG_* and LEAN_* counter-trend liquidity trades. The bot
+                # only fades into NEUTRAL/CHOPPY regimes where reversals are
+                # statistically more likely.
+                regime_payload = signal.metadata.get("regime") or {}
+                regime = str(regime_payload.get("regime") or market_data.indicators.get("REGIME", "")).upper()
+                regime_score = float(regime_payload.get("score") or 0.0)
                 if "LIQUIDITY" in signal.signal_type:
-                    if regime == "STRONG_BULL" and technical_action == "SELL":
-                        logger.warning("[REGIME] REJECTED: SELL %s in STRONG_BULL regime", signal.ticker)
+                    if regime in ("STRONG_BULL", "LEAN_BULL") and technical_action == "SELL":
+                        # Allow only the rare case of a high-score reversal:
+                        # if the regime score is dropping sharply (we don't
+                        # have that signal here), keep blocking by default.
+                        logger.warning(
+                            "[REGIME] REJECTED: SELL %s in %s regime (score=%+.0f). "
+                            "No fading rallies in an uptrend.",
+                            signal.ticker, regime, regime_score,
+                        )
+                        self._emit_status(signal.ticker, "trade_rejected")
                         continue
-                    if regime == "STRONG_BEAR" and technical_action == "BUY":
-                        logger.warning("[REGIME] REJECTED: BUY %s in STRONG_BEAR regime", signal.ticker)
+                    if regime in ("STRONG_BEAR", "LEAN_BEAR") and technical_action == "BUY":
+                        logger.warning(
+                            "[REGIME] REJECTED: BUY %s in %s regime (score=%+.0f). "
+                            "No buying dips in a downtrend.",
+                            signal.ticker, regime, regime_score,
+                        )
+                        self._emit_status(signal.ticker, "trade_rejected")
                         continue
                 # If the model collapses to HOLD while the deterministic scanner
                 # has a strong directional setup, keep the trade candidate alive.
@@ -2005,8 +2026,16 @@ class CloudScanner:
                 # Sniper triple-check: trend/setup/entry must all align (5m/3m/1m).
                 # If yfinance data is unavailable (futures symbols), skip this gate
                 # and rely on the regime detector + brain swarm for direction.
-                # AGGRESSIVE MODE: High-strength liquidity signals bypass MTF/LEVEL2 for speed
-                bypass_mtf_level2 = signal.strength >= 0.82 and "LIQUIDITY" in signal.signal_type
+                # AGGRESSIVE MODE: bypass MTF/LEVEL2 when EITHER
+                #   (a) raw signal strength >= 0.82, OR
+                #   (b) full swarm consensus >= 0.85 (1.00 confidence is normal
+                #       when Devil's Advocate clears the trade and all agents
+                #       agree). The previous gate of 0.82 only on raw strength
+                #       missed signals where the swarm boosted to 1.00.
+                bypass_mtf_level2 = (
+                    "LIQUIDITY" in signal.signal_type
+                    and (signal.strength >= 0.82 or confidence_score >= 0.85)
+                )
                 if bypass_mtf_level2:
                     logger.info(
                         "[AGGRESSIVE] High-strength liquidity signal (%.2f) bypassing MTF/LEVEL2 for %s",
@@ -2094,7 +2123,31 @@ class CloudScanner:
                     self._emit_status(signal.ticker, f"brain_fallback:{brain_used}")
                 self._emit_status(signal.ticker, f"brain_verdict:{brain_verdict}")
                 if brain_verdict != approved_brain_verdict:
-                    if (
+                    # FAST-PATH BYPASS: when the deterministic scanner already
+                    # has a regime-aligned high-strength signal AND the swarm
+                    # has agreed (analysis.action == technical_action), the
+                    # final brain veto is just the same local model giving a
+                    # contradictory answer. Trust the swarm + regime instead.
+                    regime_aligned = (
+                        (regime in ("STRONG_BULL", "LEAN_BULL") and analysis.action.value == "BUY")
+                        or (regime in ("STRONG_BEAR", "LEAN_BEAR") and analysis.action.value == "SELL")
+                    )
+                    fast_path = (
+                        (signal.strength >= 0.82 or confidence_score >= 0.85)
+                        and analysis.action.value == technical_action
+                        and "LIQUIDITY" in signal.signal_type
+                        and regime_aligned
+                    )
+                    if fast_path:
+                        logger.info(
+                            "[FAST-PATH] %s %s strength=%.2f regime=%s — bypassing brain re-vote",
+                            analysis.action.value,
+                            signal.ticker,
+                            signal.strength,
+                            regime,
+                        )
+                        brain_verdict = approved_brain_verdict
+                    elif (
                         self._brain_unavailable(brain_decision)
                         and signal.strength >= 0.60
                         and confidence_score >= float(getattr(config, "SWARM_CONFIDENCE_THRESHOLD", 0.60))
@@ -2310,6 +2363,15 @@ class CloudScanner:
                 f"boosting LLM LOW to MEDIUM minimum"
             )
             base_confidence = max(base_confidence, 0.60)
+
+        # [BOOST] Strong technical signals (0.85+) should not be downgraded by
+        # cautious LLM. If radar strength >= 0.85, boost base to HIGH (0.80).
+        if signal_strength >= 0.85 and base_confidence < 0.80:
+            logger.info(
+                f"[BOOST] Technical signal very strong ({signal_strength:.2f}), "
+                f"lifting base confidence to HIGH (0.80)"
+            )
+            base_confidence = max(base_confidence, 0.80)
 
         # Adjust based on agent alignment
         alignment_bonus = 0.0

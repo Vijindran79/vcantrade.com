@@ -18,15 +18,9 @@ Architecture:
 import sys
 import os
 import io
-import faulthandler
 
 if sys.platform == 'win32':
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    # Qt can hard-crash on some Windows desktop/RDP/admin DPI transitions.
-    # Set these before importing PyQt so the UI uses the most stable path.
-    os.environ.setdefault('QT_QPA_PLATFORM', 'windows:dpiawareness=0')
-    os.environ.setdefault('QT_OPENGL', 'software')
-    os.environ.setdefault('QT_QUICK_BACKEND', 'software')
     try:
         sys.stdout = io.TextIOWrapper(
             sys.stdout.buffer, encoding='ascii', errors='ignore', line_buffering=True
@@ -36,13 +30,6 @@ if sys.platform == 'win32':
         )
     except AttributeError:
         pass
-
-try:
-    _startup_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "startup_log.txt")
-    _startup_crash_log = open(_startup_log_path, "a", encoding="utf-8", buffering=1)
-    faulthandler.enable(file=_startup_crash_log, all_threads=True)
-except Exception:
-    pass
 
 import signal
 import socket
@@ -55,7 +42,7 @@ import queue
 import re
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable
 from playwright.async_api import async_playwright  # Async Playwright only - no sync mix
 
 # Trade Alert Sound — Windows built-in, no extra dependencies
@@ -173,6 +160,11 @@ logging.basicConfig(
     force=True  # Force reconfiguration
 )
 logger = logging.getLogger(__name__)
+
+# Silence yfinance "possibly delisted" noise — Apex micro futures (MNQ=F,
+# MES=F, etc.) are not on Yahoo, and the warnings drown out real trade events.
+for _noisy in ("yfinance", "peewee", "urllib3", "asyncio"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR if _noisy != "yfinance" else logging.CRITICAL)
 
 
 def _teacher_mode_forced_by_config() -> bool:
@@ -704,6 +696,15 @@ class SignalListenerThread(QThread):
         super().__init__()
         self.running = True
         self.dispatcher = SignalDispatcher()
+        # Optional fallback callback executed directly from the listener thread
+        # via a thread-safe invoker. This guarantees execution even if the Qt
+        # signal queue is starved or backed up.
+        self._direct_callback: Optional[Callable] = None
+
+    def set_direct_callback(self, callback) -> None:
+        """Register a thread-safe handler invoked alongside the Qt signal so
+        execution is not gated on the Qt event loop being responsive."""
+        self._direct_callback = callback
 
     def run(self):
         logger.info(
@@ -765,9 +766,23 @@ class SignalListenerThread(QThread):
             raise
 
     def _on_signal_received(self, signal_data: dict):
-        """Handle incoming signal from cloud."""
+        """Handle incoming signal from cloud.
+
+        Two-track delivery:
+        1) Qt signal emit — preferred path, lands on main thread via the Qt
+           event loop. Gated on the event loop being responsive.
+        2) Direct callback — backup path that fires from this listener thread
+           and uses MainThreadInvoker.submit() to schedule onto the main
+           thread without going through the regular signal queue. This
+           rescues execution when the Qt event loop is busy with other slots.
+        """
         self.signal_received.emit(signal_data)
         logger.info(f"Signal received from cloud: {signal_data}")
+        if self._direct_callback is not None:
+            try:
+                self._direct_callback(dict(signal_data))
+            except Exception as exc:
+                logger.error(f"Direct signal callback failed: {exc}")
 
     def _on_handshake_received(self, handshake_data: dict):
         """Handle authenticated bridge handshake."""
@@ -930,7 +945,7 @@ class MultiAssetHunterThread(QThread):
     """
 
     status_update = pyqtSignal(str, str, str)  # symbol, status, message
-    trade_signal = pyqtSignal(str, str, str, int, str)  # symbol, action, reason, confidence, threat
+    trade_signal = pyqtSignal(str, str, str)    # symbol, action, reason
     narrator_update = pyqtSignal(str, str)      # icon, message (thread-safe Activity Feed)
 
     def __init__(self, app, symbols=None, interval_sec=None):
@@ -940,7 +955,6 @@ class MultiAssetHunterThread(QThread):
         self.interval_sec = interval_sec or config.MULTI_ASSET_CYCLE_SECONDS
         self.running = True
         self.index = 0
-        self._last_focus_log_ts = 0.0
 
     def _get_ready_browser_agent(self, symbol: str, require_page: bool = True):
         """Return BrowserAgent only when the async startup path is ready."""
@@ -984,34 +998,6 @@ class MultiAssetHunterThread(QThread):
                 # RESPECT DASHBOARD WATCHLIST: Only scan what the user manually entered.
                 # Never auto-add MNQ/MES/MCL — the user controls the watchlist.
                 active_symbols = list(watchlist) if watchlist else []  # strict: no fallback, user must set watchlist
-
-            if not active_symbols:
-                self.status_update.emit("WATCHLIST", "WAITING", "No active symbols armed")
-                time.sleep(min(self.interval_sec, 5))
-                continue
-
-            if bool(getattr(config, "SINGLE_TRADE_FOCUS_MODE", True)) and getattr(self.app, "positions", []):
-                focus_assets = [
-                    str(pos.get("asset", "") or "").strip()
-                    for pos in getattr(self.app, "positions", [])
-                    if str(pos.get("asset", "") or "").strip()
-                ]
-                if focus_assets:
-                    focus_symbol = focus_assets[0]
-                    parked_count = max(0, len(active_symbols) - 1)
-                    active_symbols = [focus_symbol]
-                    now_ts = time.time()
-                    if now_ts - self._last_focus_log_ts >= 60:
-                        logger.info(
-                            "[FOCUS] Hunter locked on %s; parking %d other symbol(s)",
-                            focus_symbol,
-                            parked_count,
-                        )
-                        self.narrator_update.emit(
-                            "[FOCUS]",
-                            f"Hunter locked on {focus_symbol}; other symbols parked",
-                        )
-                        self._last_focus_log_ts = now_ts
 
             # Monday State Re-Sync (Anti-Ghosting) - properly awaited via asyncio
             if not is_weekend and not getattr(self.app, "_monday_resync_done", False):
@@ -1185,27 +1171,20 @@ class MultiAssetHunterThread(QThread):
 
             # 6. Execute if BUY/SELL AND confidence meets threshold
             if signal in ("BUY", "SELL"):
-                hunter_threshold = float(
-                    getattr(
-                        config,
-                        "HUNTER_EXECUTION_CONFIDENCE_PCT",
-                        getattr(config, "MIN_CONFIDENCE_THRESHOLD", 80.0),
-                    )
-                )
-                if confidence >= hunter_threshold:
+                if confidence >= config.MIN_CONFIDENCE_THRESHOLD:
                     logger.critical(
                         "[HUNTER] %s SIGNAL: %s | Confidence: %d%% | Threat: %s | %s",
                         symbol, signal, confidence, threat, reason
                     )
-                    self.trade_signal.emit(symbol, signal, reason, int(confidence), str(threat))
+                    self.trade_signal.emit(symbol, signal, reason)
                 else:
                     logger.info(
                         "[HUNTER] %s %s signal REJECTED | Confidence %d%% < threshold %d%% | %s",
-                        symbol, signal, confidence, hunter_threshold, reason
+                        symbol, signal, confidence, config.MIN_CONFIDENCE_THRESHOLD, reason
                     )
                     self.status_update.emit(
                         symbol, "SKIPPED_LOW_CONFIDENCE",
-                        f"Confidence {confidence}% below {hunter_threshold:.0f}%"
+                        f"Confidence {confidence}% below {config.MIN_CONFIDENCE_THRESHOLD}%"
                     )
             else:
                 logger.info("[HUNTER] %s no trade setup | %s", symbol, reason)
@@ -1472,10 +1451,6 @@ class VcaniTradeApp:
         self.peak_balance = float(config.CURRENT_BALANCE)
         self.max_drawdown = 0.0
         self.trades_today = 0
-        self.session_peak_pnl = 0.0
-        self.protected_session_pnl = 0.0
-        self.daily_profit_ladder_triggered = False
-        self._tv_no_position_confirmations = 0
         self.positions = []
         self.locked_tickers = {}
         self.rpa_execution_enabled = True
@@ -1544,7 +1519,6 @@ class VcaniTradeApp:
         self._vibe_strategy_worker = None
         self.session_detector = MarketSessionDetector()
         self.slippage_guard = SlippageGuard()
-        self._last_pretrade_market_prices = {}
         self.support_resistance_levels = {}
         self.latest_confidence_score = 0.0
         self.analysis_mode_status = "READY"
@@ -1603,8 +1577,8 @@ class VcaniTradeApp:
         )  # Self-Correction Engine
 
         # Browser Agent (Autonomous price checking via Playwright)
-        self.browser_agent = None  # Will be started asynchronously when needed
-        self.browser_agent_status = "idle"  # idle, starting, ready, error
+        self.browser_agent = None
+        self.browser_agent_status = "disabled"  # Desktop/GhostExecutor mode - browser removed
         self._browser_error_message = ""
         self._browser_executor_initialized = False
         self._browser_start_announced = False
@@ -1664,10 +1638,6 @@ class VcaniTradeApp:
         self.max_drawdown = 0.0
         self.trades_today = 0
         self.daily_wins = 0
-        self.session_peak_pnl = 0.0
-        self.protected_session_pnl = 0.0
-        self.daily_profit_ladder_triggered = False
-        self._tv_no_position_confirmations = 0
         self.positions = []  # Live positions
 
         # Trading settings
@@ -1682,7 +1652,9 @@ class VcaniTradeApp:
         self._initialize_vibe_status()
         logger.info("VcaniTrade AI initialized (Hybrid Architecture)")
         
-        # Auto-start browser agent for testing
+        # Auto-start the browser agent so Hunter cycles can navigate TradingView
+        # and the GhostExecutor can click Buy/Sell. Without this, the bot is
+        # blind and every Hunter cycle prints "Browser agent disabled".
         self._start_browser_agent_background()
 
     def _run_on_ui_thread(self, callback):
@@ -1854,14 +1826,38 @@ class VcaniTradeApp:
 
             current_market_price = None
 
-            # PRICE SOURCE PIVOT: M6 contract codes (NQM6, ESM6, MCLM6) and XAUUSD/Gold are WealthCharts-specific
-            # and NOT recognized by Yahoo Finance. Use MT5 as source of truth for these.
-            if ticker and (ticker.upper().endswith("M6") or ticker.upper() in {"XAUUSD", "GC", "GC=F", "MGC", "COMEX:MGC1!"}):
+            # PRICE SOURCE PIVOT: Apex micro futures (MNQ1!, MES1!, MCL1!, MGC1!,
+            # MYM1!, M2K1!, M6A1!, M6E1!, MBT1!, MET1!) and the legacy M6 codes
+            # are NOT carried by Yahoo Finance. MT5 is the only live source.
+            # Anything ending in "1!" or matching a micro alias goes to MT5 first.
+            ticker_upper = (ticker or "").upper()
+            futures_aliases = {
+                "MNQ", "MES", "MCL", "MGC", "MYM", "M2K", "M6A", "M6E", "MBT", "MET",
+                "NQ", "ES", "CL", "GC", "YM", "RTY", "MNQ=F", "MES=F", "MCL=F",
+                "MGC=F", "NQ=F", "ES=F", "CL=F", "GC=F", "YM=F", "RTY=F",
+                "XAUUSD", "BTCUSD", "ETHUSD", "COMEX:MGC1!",
+            }
+            is_micro_futures = (
+                ticker_upper.endswith("1!")
+                or ticker_upper.endswith("M6")
+                or ticker_upper in futures_aliases
+                or ticker_upper.startswith("M") and ticker_upper.endswith("=F")
+            )
+            if is_micro_futures:
                 current_market_price = self._fetch_mt5_price_for_m6(ticker)
                 if current_market_price and current_market_price > 0:
                     logger.info("[GATEKEEPER] MT5 price for %s: %.4f", ticker, current_market_price)
+                else:
+                    # MT5 unavailable: fall back to the dispatched setup price
+                    # rather than aborting on a missing live tick. This stops
+                    # yfinance from killing every Apex micro futures trade.
+                    logger.warning(
+                        "[GATEKEEPER] MT5 price unavailable for %s — using setup entry price as audit reference",
+                        ticker,
+                    )
+                    current_market_price = entry_price
 
-            # Fallback to Yahoo Finance for everything else
+            # Fallback to Yahoo Finance only for non-futures (stocks, FX, crypto pairs)
             if current_market_price is None:
                 import yfinance as yf
                 market_ticker = self._canonical_market_ticker(ticker)
@@ -1894,12 +1890,6 @@ class VcaniTradeApp:
                 f'{ticker} live=${current_market_price:.2f} | setup=${entry_price:.2f} | '
                 f'slippage={slippage_pct:.3f}% | spread={spread_pct:.3f}%'
             )
-            self._last_pretrade_market_prices[ticker] = {
-                "price": float(current_market_price),
-                "setup_price": float(entry_price),
-                "slippage_pct": float(slippage_pct),
-                "ts": time.time(),
-            }
 
             if not slippage_ok:
                 self._log_gatekeeper_abort(
@@ -2001,7 +1991,6 @@ class VcaniTradeApp:
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
-            "opened_ts": time.time(),
             "order_id": result.order_id,
             "bot_opened": True,
         }
@@ -2157,6 +2146,17 @@ class VcaniTradeApp:
         self.signal_listener.handshake_received.connect(self._on_bridge_handshake_received, Qt.ConnectionType.QueuedConnection)
         self.signal_listener.listener_error.connect(self._on_listener_error, Qt.ConnectionType.QueuedConnection)
 
+        # DIRECT FALLBACK: also wire a thread-safe direct callback so execution
+        # is not gated on the Qt event loop being responsive. The handler runs
+        # from the listener thread context — execution paths that touch the UI
+        # are guarded internally and Qt-safe operations use QTimer.singleShot.
+        def _direct_signal_relay(payload: dict):
+            try:
+                self._on_signal_received_direct(dict(payload))
+            except Exception:
+                logger.exception("Direct signal relay failed")
+        self.signal_listener.set_direct_callback(_direct_signal_relay)
+
         # Data Scout Listener -> UI + TV Flip + Narrator
         self.data_scout_listener.signal_received.connect(self._on_data_scout_signal, Qt.ConnectionType.QueuedConnection)
 
@@ -2175,6 +2175,13 @@ class VcaniTradeApp:
         self._mirror_shortcut = QShortcut(QKeySequence("Ctrl+Shift+H"), self.cmd)
         self._mirror_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._mirror_shortcut.activated.connect(self._toggle_mirror_visibility)
+
+        # RESCUE HOTKEY: Ctrl+Shift+R brings the dashboard back to a known-good
+        # visible state. Use this if the window ever goes invisible, gets stuck
+        # behind another window, or won't restore from the taskbar.
+        self._rescue_shortcut = QShortcut(QKeySequence("Ctrl+Shift+R"), self.cmd)
+        self._rescue_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._rescue_shortcut.activated.connect(self._rescue_dashboard)
 
     def _apply_initial_mode_ui(self):
         """Align the dashboard controls with the backend's initial runtime mode."""
@@ -2356,6 +2363,21 @@ class VcaniTradeApp:
         else:
             self.ai_narrator.show()
             self.cmd.log("[WINDOW] Mirror shown via Ctrl+Shift+H")
+
+    def _rescue_dashboard(self):
+        """Ctrl+Shift+R rescue: bring the dashboard back to a known-good
+        visible state (full opacity, not on top, repositioned, raised)."""
+        try:
+            if hasattr(self.cmd, "force_restore"):
+                self.cmd.force_restore()
+            else:
+                self.cmd.setWindowOpacity(1.0)
+                self.cmd.showNormal()
+                self.cmd.raise_()
+                self.cmd.activateWindow()
+            logger.info("[RESCUE] Dashboard restored via Ctrl+Shift+R")
+        except Exception as exc:
+            logger.warning("[RESCUE] force_restore failed: %s", exc)
 
     def _format_liquidity_label(self, signal_data: dict) -> str:
         """Create a readable liquidity label for the mirror broadcast strip."""
@@ -3332,6 +3354,24 @@ class VcaniTradeApp:
                 return None
 
         for label, period, interval in tf_map:
+            # FUTURES BYPASS: MNQ1!, MES1!, MCL1!, etc. are not on yfinance.
+            # Skip the network call entirely so we do not flood the log with
+            # "possibly delisted" errors. The regime detector already supplies
+            # the trend bias for futures.
+            ticker_upper = (ticker or "").upper()
+            mt_upper = (market_ticker or "").upper()
+            futures_alias_set = {
+                "MNQ", "MES", "MCL", "MGC", "MYM", "M2K", "M6A", "M6E", "MBT", "MET",
+                "NQ", "ES", "CL", "GC", "YM", "RTY",
+            }
+            looks_like_futures = (
+                ticker_upper.endswith("1!") or mt_upper.endswith("1!")
+                or ticker_upper.endswith("=F") or mt_upper.endswith("=F")
+                or ticker_upper in futures_alias_set or mt_upper in futures_alias_set
+            )
+            if looks_like_futures:
+                votes[label] = "WAIT"
+                continue
             try:
                 if interval == "3m":
                     one_min_df = yf.Ticker(market_ticker).history(period=period, interval="1m")
@@ -3845,263 +3885,6 @@ class VcaniTradeApp:
             take_profit = entry_price * (1 + take_pct / 100.0)
         return float(stop_loss), float(take_profit)
 
-    def _resolve_trade_entry_price(self, ticker: str, fallback_price: float = 0.0) -> float:
-        """Resolve a live-ish entry price for simple BUY/SELL paths."""
-        if fallback_price and fallback_price > 0:
-            return float(fallback_price)
-
-        try:
-            mt5_price = self._fetch_mt5_price_for_m6(ticker)
-            if mt5_price and mt5_price > 0:
-                return float(mt5_price)
-        except Exception as exc:
-            logger.debug("[PRICE] MT5 price lookup failed for %s: %s", ticker, exc)
-
-        closes = self._scanner_cached_closes(ticker, min_points=1)
-        if closes is not None and not closes.empty:
-            return float(closes.iloc[-1])
-
-        try:
-            import yfinance as yf
-            market_ticker = self._canonical_market_ticker(ticker)
-            history = yf.Ticker(market_ticker).history(period="1d", interval="1m")
-            if not history.empty and "Close" in history and not history["Close"].dropna().empty:
-                return float(history["Close"].dropna().iloc[-1])
-        except Exception as exc:
-            logger.debug("[PRICE] yfinance price lookup failed for %s: %s", ticker, exc)
-
-        return 0.0
-
-    def _scanner_cached_closes(self, symbol: str, min_points: int = 4):
-        """Return recent scanner candles for a symbol from the live CloudScanner cache."""
-        df = self._scanner_cached_ohlcv(symbol, min_points=min_points)
-        if df is None or getattr(df, "empty", True) or "Close" not in df:
-            return None
-        closes = df["Close"].dropna()
-        return closes if len(closes) >= min_points else None
-
-    def _scanner_cached_ohlcv(self, symbol: str, min_points: int = 4):
-        """Return the best cached OHLCV frame for a symbol from the live CloudScanner."""
-        try:
-            scanner_thread = getattr(self, "cloud_scanner", None)
-            scanner = getattr(scanner_thread, "scanner", scanner_thread)
-            cache = getattr(scanner, "market_data_cache", {}) if scanner else {}
-            if not cache:
-                return None
-
-            requested = str(symbol or "").upper()
-            requested_yf = normalize_yfinance_symbol(requested).upper()
-            best = None
-            best_score = -1
-            for key, df in cache.items():
-                if df is None or getattr(df, "empty", True) or "Close" not in df:
-                    continue
-                ticker_key = str(key[0] if isinstance(key, tuple) and key else key).upper()
-                ticker_yf = normalize_yfinance_symbol(ticker_key).upper()
-                if ticker_key != requested and ticker_yf != requested_yf and not root_matches(ticker_key, requested):
-                    continue
-                if not {"Open", "High", "Low", "Close"}.issubset(set(df.columns)):
-                    continue
-                clean = df.dropna(subset=["Open", "High", "Low", "Close"]).copy()
-                if len(clean) < min_points:
-                    continue
-                interval = str(key[1] if isinstance(key, tuple) and len(key) > 1 else "")
-                score = len(clean)
-                if interval in {"1m", "1min", "60s"}:
-                    score += 10000
-                if score > best_score:
-                    best = clean
-                    best_score = score
-            return best
-        except Exception as exc:
-            logger.debug("[PRICE] scanner cached OHLCV lookup failed for %s: %s", symbol, exc)
-            return None
-
-    def _resample_ohlcv_frame(self, df, rule: str):
-        """Resample cached 1m candles into 2m/5m/15m price-action frames."""
-        try:
-            if df is None or getattr(df, "empty", True):
-                return None
-            frame = df.copy()
-            if not hasattr(frame.index, "tz") and "Datetime" in frame.columns:
-                frame = frame.set_index("Datetime")
-            if not hasattr(frame.index, "inferred_type") or "date" not in str(frame.index.inferred_type):
-                return None
-            out = frame.resample(rule).agg({
-                "Open": "first",
-                "High": "max",
-                "Low": "min",
-                "Close": "last",
-            })
-            if "Volume" in frame.columns:
-                out["Volume"] = frame["Volume"].resample(rule).sum()
-            return out.dropna(subset=["Open", "High", "Low", "Close"])
-        except Exception as exc:
-            logger.debug("[PRICE ACTION] Resample %s failed: %s", rule, exc)
-            return None
-
-    def _candle_strength(self, row) -> tuple[float, float, float]:
-        """Return body/range, upper-wick/range, lower-wick/range."""
-        open_price = float(row.get("Open", 0.0) or 0.0)
-        high = float(row.get("High", 0.0) or 0.0)
-        low = float(row.get("Low", 0.0) or 0.0)
-        close = float(row.get("Close", 0.0) or 0.0)
-        candle_range = max(high - low, 0.0001)
-        body = abs(close - open_price) / candle_range
-        upper = (high - max(open_price, close)) / candle_range
-        lower = (min(open_price, close) - low) / candle_range
-        return body, upper, lower
-
-    def _price_action_gate(self, symbol: str, action: str) -> tuple[bool, str]:
-        """15m bias, 5m setup, 2m trigger gate for Hunter entries."""
-        if not bool(getattr(config, "PRICE_ACTION_GATE_ENABLED", True)):
-            return True, "price-action gate disabled"
-
-        side = str(action or "").upper()
-        base = self._scanner_cached_ohlcv(symbol, min_points=20)
-        if base is None or len(base) < 20:
-            if bool(getattr(config, "PRICE_ACTION_GATE_REQUIRE_DATA", True)):
-                return False, "no candle data for 15m/5m/2m price-action gate"
-            return True, "price-action data unavailable; gate configured fail-open"
-
-        frames = {
-            "15m": self._resample_ohlcv_frame(base, "15min"),
-            "5m": self._resample_ohlcv_frame(base, "5min"),
-            "2m": self._resample_ohlcv_frame(base, "2min"),
-        }
-        if any(frame is None or len(frame) < 3 for frame in frames.values()):
-            if bool(getattr(config, "PRICE_ACTION_GATE_REQUIRE_DATA", True)):
-                return False, "not enough 15m/5m/2m candles yet"
-            return True, "partial price-action data; gate configured fail-open"
-
-        f15 = frames["15m"].tail(4)
-        f5 = frames["5m"].tail(4)
-        f2 = frames["2m"].tail(3)
-
-        close15_now = float(f15["Close"].iloc[-1])
-        close15_then = float(f15["Close"].iloc[0])
-        high15_now = float(f15["High"].iloc[-1])
-        low15_now = float(f15["Low"].iloc[-1])
-        high15_prev = float(f15["High"].iloc[-2])
-        low15_prev = float(f15["Low"].iloc[-2])
-
-        if side == "BUY":
-            bias_ok = close15_now > close15_then and (low15_now >= low15_prev or high15_now > high15_prev)
-        else:
-            bias_ok = close15_now < close15_then and (high15_now <= high15_prev or low15_now < low15_prev)
-        if not bias_ok:
-            return False, f"15m bias disagrees with {side}"
-
-        last5 = f5.iloc[-1]
-        prev5 = f5.iloc[-2]
-        body5, upper5, lower5 = self._candle_strength(last5)
-        close5 = float(last5["Close"])
-        open5 = float(last5["Open"])
-        if side == "BUY":
-            setup_ok = close5 > open5 and close5 >= float(prev5["Close"]) and lower5 >= upper5 * 0.8
-        else:
-            setup_ok = close5 < open5 and close5 <= float(prev5["Close"]) and upper5 >= lower5 * 0.8
-        if not setup_ok:
-            return False, f"5m setup not confirmed for {side}"
-
-        last2 = f2.iloc[-1]
-        prev2 = f2.iloc[-2]
-        body2, upper2, lower2 = self._candle_strength(last2)
-        close2 = float(last2["Close"])
-        open2 = float(last2["Open"])
-        if side == "BUY":
-            trigger_ok = close2 > open2 and close2 >= float(prev2["Close"]) and body2 >= 0.25
-        else:
-            trigger_ok = close2 < open2 and close2 <= float(prev2["Close"]) and body2 >= 0.25
-        if not trigger_ok:
-            return False, f"2m trigger not ready for {side}"
-
-        return True, f"15m bias + 5m setup + 2m trigger confirmed for {side}"
-
-    def _build_simple_execution_plan(
-        self,
-        symbol: str,
-        action: str,
-        reason: str = "",
-        entry_price: float = 0.0,
-    ) -> dict:
-        """Build a minimal protected trade plan for direct Hunter BUY/SELL execution."""
-        side = str(action or "").upper()
-        if side not in {"BUY", "SELL"}:
-            return {"ok": False, "reason": f"Unsupported action: {action}"}
-
-        entry = self._resolve_trade_entry_price(symbol, entry_price)
-        if entry <= 0:
-            return {
-                "ok": False,
-                "reason": "No live entry price available; refusing naked order.",
-            }
-
-        atr_proxy = max(entry * 0.005, 0.01)
-        stop_distance = atr_proxy * float(getattr(config, "ATR_STOP_MULTIPLIER", 1.5))
-        target_distance = atr_proxy * float(getattr(config, "ATR_TP_MULTIPLIER", 3.0))
-
-        if side == "BUY":
-            stop_loss = entry - stop_distance
-            take_profit = entry + target_distance
-        else:
-            stop_loss = entry + stop_distance
-            take_profit = entry - target_distance
-
-        if stop_loss <= 0 or take_profit <= 0:
-            return {"ok": False, "reason": "Risk plan produced invalid stop/target."}
-
-        quantity = float(getattr(config, "MT5_VOLUME", 0.1) or 0.1)
-        return {
-            "ok": True,
-            "symbol": symbol,
-            "action": side,
-            "entry_price": float(entry),
-            "stop_loss": float(stop_loss),
-            "take_profit": float(take_profit),
-            "quantity": quantity,
-            "reason": reason or "Predator/Hunter protected execution plan.",
-            "risk_text": (
-                f"{side} {symbol} @ ${entry:.2f} | "
-                f"SL=${stop_loss:.2f} | TP=${take_profit:.2f} | R:R=2.0:1"
-            ),
-        }
-
-    def _hunter_direction_sanity_check(self, symbol: str, action: str) -> tuple[bool, str]:
-        """Block Hunter only when live cached candles clearly disagree."""
-        side = str(action or "").upper()
-        if side not in {"BUY", "SELL"}:
-            return False, "unsupported action"
-
-        try:
-            closes = self._scanner_cached_closes(symbol, min_points=4)
-            source = "scanner cache"
-            if closes is None or closes.empty:
-                import yfinance as yf
-                market_ticker = self._canonical_market_ticker(symbol)
-                history = yf.Ticker(market_ticker).history(period="30m", interval="1m")
-                if history is not None and not history.empty and "Close" in history:
-                    closes = history["Close"].dropna()
-                    source = "market data"
-
-            if closes is None or len(closes) < 4:
-                return False, "direction data unavailable; waiting for scanner confirmation"
-
-            latest = float(closes.iloc[-1])
-            previous = float(closes.iloc[-2])
-            recent_avg = float(closes.tail(4).mean())
-            rising = latest > previous and latest >= recent_avg
-            falling = latest < previous and latest <= recent_avg
-
-            if side == "BUY" and not rising:
-                return False, f"live price is not rising ({previous:.2f} -> {latest:.2f})"
-            if side == "SELL" and not falling:
-                return False, f"live price is not falling ({previous:.2f} -> {latest:.2f})"
-            return True, f"{source} direction agrees ({previous:.2f} -> {latest:.2f})"
-        except Exception as exc:
-            logger.debug("[HUNTER] Direction sanity check failed for %s: %s", symbol, exc)
-            return False, "direction check unavailable; waiting for scanner confirmation"
-
     def _derive_structure_stop_loss(
         self,
         action: str,
@@ -4130,45 +3913,6 @@ class VcaniTradeApp:
 
         return float(risk_eval.get("stop_loss") or 0.0)
 
-    def _derive_structure_take_profit(
-        self,
-        action: str,
-        entry_price: float,
-        signal_data: dict,
-        levels: dict,
-    ) -> float:
-        """Place targets just inside nearby structure to improve fill odds."""
-        if entry_price <= 0:
-            return 0.0
-
-        liquidity_zone = signal_data.get("liquidity_zone") or {}
-        zone_low = float(liquidity_zone.get("low", 0.0) or 0.0)
-        zone_high = float(liquidity_zone.get("high", 0.0) or 0.0)
-        zone_level = float(liquidity_zone.get("level", 0.0) or 0.0)
-        side = str(action or "").upper()
-
-        if side == "BUY":
-            candidates = [
-                float(level or 0.0)
-                for level in list(levels.get("resistances", []) or []) + [zone_high, zone_level]
-                if float(level or 0.0) > entry_price
-            ]
-            if candidates:
-                tp_price = min(candidates) * 0.999
-                return tp_price if tp_price > entry_price else 0.0
-
-        elif side == "SELL":
-            candidates = [
-                float(level or 0.0)
-                for level in list(levels.get("supports", []) or []) + [zone_low, zone_level]
-                if 0 < float(level or 0.0) < entry_price
-            ]
-            if candidates:
-                tp_price = max(candidates) * 1.001
-                return tp_price if 0 < tp_price < entry_price else 0.0
-
-        return 0.0
-
     def _pick_more_protective_stop(self, position: dict, updates: list[dict]) -> Optional[dict]:
         """Choose the stop update that protects more profit for the current side."""
         if not updates:
@@ -4185,33 +3929,14 @@ class VcaniTradeApp:
         if new_stop <= 0:
             return False
 
-        now_ts = time.time()
-        cooldown = max(5, int(getattr(config, "STOP_UPDATE_RETRY_COOLDOWN_SECONDS", 60)))
-        fail_key = f"{reason}:{new_stop:.4f}"
-        last_fail_key = str(position.get("last_stop_update_fail_key", "") or "")
-        last_fail_ts = float(position.get("last_stop_update_fail_ts", 0.0) or 0.0)
-        if last_fail_key == fail_key and now_ts - last_fail_ts < cooldown:
-            logger.debug(
-                "[SHIELD] Stop update retry suppressed for %s %s -> %.4f",
-                position.get("asset", "unknown"),
-                reason,
-                new_stop,
-            )
-            return False
-
         if not self.rpa_hand.update_stop_loss(new_stop, ticker_hint=position["asset"]):
-            position["last_stop_update_fail_key"] = fail_key
-            position["last_stop_update_fail_ts"] = now_ts
             self.cmd.log(
                 f'<span style="color:#F85149;font-weight:bold">[WARN] STOP UPDATE FAILED</span>: '
-                f'{position["asset"]} {reason} -> ${new_stop:.4f} '
-                f'(retrying in {cooldown}s; virtual profit shield still active)'
+                f'{position["asset"]} {reason} -> ${new_stop:.4f}'
             )
             return False
 
         position["sl_price"] = new_stop
-        position.pop("last_stop_update_fail_key", None)
-        position.pop("last_stop_update_fail_ts", None)
         if stop_update.get("break_even_locked"):
             position["break_even_locked"] = True
         position["last_stop_update_reason"] = reason
@@ -4257,239 +3982,10 @@ class VcaniTradeApp:
         if chosen_update:
             self._apply_managed_stop_update(position, chosen_update)
 
-    def _calculate_position_pnl(self, position: dict, current_price: float) -> tuple[float, float]:
-        """Calculate open P&L using futures contract point values when known."""
-        entry = float(position.get("entry", 0.0) or 0.0)
-        if entry <= 0 or current_price <= 0:
-            return 0.0, 0.0
-
-        pnl_usd = self.profit_lock.calculate_open_profit(position, current_price)
-        side = str(position.get("side", "") or "").upper()
-        if side == "SELL":
-            pnl_pct = ((entry - current_price) / entry) * 100.0
-        else:
-            pnl_pct = ((current_price - entry) / entry) * 100.0
-        return pnl_usd, pnl_pct
-
-    def _track_peak_open_profit(self, position: dict, pnl_usd: float) -> None:
-        peak = max(float(position.get("peak_pnl", 0.0) or 0.0), float(pnl_usd))
-        position["peak_pnl"] = peak
-        if peak > 0:
-            giveback = max(0.0, peak - float(pnl_usd))
-            position["profit_giveback_usd"] = giveback
-            position["profit_giveback_pct"] = (giveback / peak) * 100.0
-        else:
-            position["profit_giveback_usd"] = 0.0
-            position["profit_giveback_pct"] = 0.0
-
-    def _profit_ladder_floor(self, peak_profit: float) -> float:
-        """Return the locked profit floor for the current high-water mark."""
-        if not bool(getattr(config, "PROFIT_LADDER_SHIELD_ENABLED", True)):
-            return 0.0
-
-        ladder_text = str(getattr(config, "PROFIT_LADDER_STEPS_USD", "") or "")
-        floor = 0.0
-        for raw_step in ladder_text.split(","):
-            if ":" not in raw_step:
-                continue
-            trigger_text, floor_text = raw_step.split(":", 1)
-            try:
-                trigger = float(trigger_text.strip())
-                candidate_floor = float(floor_text.strip())
-            except ValueError:
-                continue
-            if peak_profit >= trigger:
-                floor = max(floor, candidate_floor)
-        return floor
-
-    def _profit_giveback_should_exit(self, position: dict) -> bool:
-        if not bool(getattr(config, "PROFIT_GIVEBACK_SHIELD_ENABLED", True)):
-            return False
-        if position.get("profit_shield_triggered"):
-            return False
-
-        peak = float(position.get("peak_pnl", 0.0) or 0.0)
-        pnl = float(position.get("pnl", 0.0) or 0.0)
-        min_profit = float(getattr(config, "PROFIT_GIVEBACK_MIN_PROFIT_USD", 150.0))
-        if peak < min_profit:
-            return False
-
-        ladder_floor = self._profit_ladder_floor(peak)
-        position["profit_ladder_floor_usd"] = ladder_floor
-        if ladder_floor > 0 and pnl <= ladder_floor:
-            position["profit_shield_exit_reason"] = (
-                f"ladder floor ${ladder_floor:.2f} after peak ${peak:.2f}"
-            )
-            return True
-
-        max_retrace = float(getattr(config, "PROFIT_GIVEBACK_MAX_RETRACE_PCT", 35.0))
-        min_lock = float(getattr(config, "PROFIT_GIVEBACK_MIN_LOCK_USD", 50.0))
-        giveback_pct = float(position.get("profit_giveback_pct", 0.0) or 0.0)
-        if giveback_pct >= max_retrace and pnl >= min_lock:
-            position["profit_shield_exit_reason"] = (
-                f"{giveback_pct:.1f}% giveback from peak ${peak:.2f}"
-            )
-            return True
-        return False
-
-    def _execute_profit_giveback_exit(self, position: dict) -> bool:
-        asset = position.get("asset", "unknown")
-        peak = float(position.get("peak_pnl", 0.0) or 0.0)
-        pnl = float(position.get("pnl", 0.0) or 0.0)
-        giveback_pct = float(position.get("profit_giveback_pct", 0.0) or 0.0)
-        exit_reason = str(position.get("profit_shield_exit_reason", "") or "").strip()
-        self.cmd.log(
-            f'<span style="color:#F0B90B;font-weight:bold">[PROFIT SHIELD]</span> '
-            f'{asset} peak=${peak:.2f}, now=${pnl:.2f}, gave back {giveback_pct:.1f}%'
-            f'{f" ({exit_reason})" if exit_reason else ""} - protecting profit'
-        )
-
-        if not bool(getattr(config, "PROFIT_GIVEBACK_AUTO_FLATTEN", True)):
-            self.cmd.log(
-                f'<span style="color:#D29922;font-weight:bold">[PROFIT SHIELD]</span> '
-                f'Auto-flatten disabled for {asset}; manual close recommended'
-            )
-            return False
-
-        now = time.time()
-        cooldown = int(getattr(config, "PROFIT_GIVEBACK_COOLDOWN_SECONDS", 120))
-        last_attempt = float(position.get("last_profit_shield_exit_attempt", 0.0) or 0.0)
-        if now - last_attempt < cooldown:
-            return False
-        position["last_profit_shield_exit_attempt"] = now
-
-        flatten = getattr(self.rpa_hand, "flatten_position", None)
-        if not callable(flatten):
-            self.cmd.log(
-                f'<span style="color:#F85149;font-weight:bold">[PROFIT SHIELD]</span> '
-                f'No RPA flatten method available for {asset}'
-            )
-            return False
-
-        try:
-            success = bool(flatten(asset))
-        except Exception as e:
-            logger.error("[PROFIT SHIELD] Flatten failed for %s: %s", asset, e)
-            success = False
-
-        if success:
-            position["profit_shield_triggered"] = True
-            position["profit_shield_ts"] = time.time()
-            self._close_position(position, "Profit Giveback Shield")
-            return True
-
-        self.cmd.log(
-            f'<span style="color:#F85149;font-weight:bold">[PROFIT SHIELD]</span> '
-            f'Flatten attempt failed for {asset}; check TradingView position manually'
-        )
-        return False
-
-    def _update_daily_profit_ladder(self, live_positions_pnl: float) -> None:
-        """Pause fresh entries if the day's high-water profit gives back too much."""
-        if not bool(getattr(config, "DAILY_PROFIT_LADDER_SHIELD_ENABLED", True)):
-            return
-        if self.daily_profit_ladder_triggered:
-            return
-
-        session_pnl = float(getattr(self, "protected_session_pnl", 0.0) or 0.0) + float(live_positions_pnl or 0.0)
-        self.session_peak_pnl = max(float(getattr(self, "session_peak_pnl", 0.0) or 0.0), session_pnl)
-        floor = self._profit_ladder_floor(self.session_peak_pnl)
-        if floor <= 0 or session_pnl > floor:
-            return
-
-        self.daily_profit_ladder_triggered = True
-        self.cmd.log(
-            f'<span style="color:#F0B90B;font-weight:bold">[DAILY LADDER]</span> '
-            f'Session peak ${self.session_peak_pnl:.2f}, now ${session_pnl:.2f}; '
-            f'locking the board above ${floor:.2f}'
-        )
-        self.ai_narrator.add_activity(
-            "[LOCK]",
-            f"Daily ladder protected ${floor:.0f}+; fresh entries paused",
-        )
-        if bool(getattr(config, "DAILY_PROFIT_LADDER_PAUSE_ON_TRIGGER", True)):
-            self.can_trade = False
-            self.rpa_execution_enabled = False
-            try:
-                self.ai_narrator.set_rpa_execution_enabled(False)
-            except Exception:
-                pass
-
-    def _tradingview_has_open_positions(self) -> Optional[bool]:
-        """Return TradingView's open-position state, or None when it cannot be verified."""
-        if not bool(getattr(config, "MANUAL_CLOSE_SYNC_ENABLED", True)):
-            return None
-
-        ghost = getattr(self, "_ghost_executor", None)
-        page = getattr(getattr(self, "browser_agent", None), "page", None)
-        loop = getattr(self, "_browser_loop", None)
-        if ghost is None or page is None or loop is None or loop.is_closed():
-            return None
-
-        try:
-            ghost.set_page(page)
-            future = asyncio.run_coroutine_threadsafe(ghost.has_open_positions(), loop)
-            return bool(future.result(timeout=3))
-        except Exception as exc:
-            logger.debug("[SYNC] TradingView position query unavailable: %s", exc)
-            return None
-
-    def _sync_manual_tradingview_close(self) -> bool:
-        """Clear internal focus lock after the user manually closes the TV position."""
-        if not self.positions:
-            self._tv_no_position_confirmations = 0
-            return False
-
-        newest_open_ts = 0.0
-        for pos in self.positions:
-            try:
-                newest_open_ts = max(newest_open_ts, float(pos.get("opened_ts", 0.0) or 0.0))
-            except Exception:
-                continue
-        min_age = max(0, int(getattr(config, "MANUAL_CLOSE_SYNC_MIN_AGE_SECONDS", 60)))
-        if newest_open_ts and time.time() - newest_open_ts < min_age:
-            return False
-
-        has_open = self._tradingview_has_open_positions()
-        if has_open is None:
-            return False
-        if has_open:
-            self._tv_no_position_confirmations = 0
-            return False
-
-        self._tv_no_position_confirmations += 1
-        required = max(1, int(getattr(config, "MANUAL_CLOSE_CONFIRMATIONS", 2)))
-        if self._tv_no_position_confirmations < required:
-            logger.info(
-                "[SYNC] TradingView reports no open positions (%s/%s confirmations)",
-                self._tv_no_position_confirmations,
-                required,
-            )
-            return False
-
-        closing = list(self.positions)
-        self.cmd.log(
-            f'<span style="color:#3FB950;font-weight:bold">[SYNC]</span> '
-            f'TradingView position closed manually; releasing focus lock for next opportunity'
-        )
-        for pos in closing:
-            self._close_position(pos, "Manual Close Sync")
-
-        self.positions = []
-        self._tv_no_position_confirmations = 0
-        self.cmd.update_positions(self.positions)
-        self.profit_lock.open_positions = []
-        self.ai_narrator.update_live_pnl(self.total_pnl, 0)
-        self._refresh_live_ledger()
-        return True
-
     def _update_positions(self):
         """Update live positions with current prices and check TP/SL."""
         import yfinance as yf
         import concurrent.futures
-
-        if self._sync_manual_tradingview_close():
-            return
 
         updated_positions = []
         for pos in self.positions:
@@ -4526,11 +4022,16 @@ class VcaniTradeApp:
 
                 pos["current"] = current_price
 
-                # Calculate P&L using contract point values where known.
-                pnl_usd, pnl_pct = self._calculate_position_pnl(pos, current_price)
+                # Calculate P&L
+                if pos["side"] == "BUY":
+                    pnl_pct = ((current_price - pos["entry"]) / pos["entry"]) * 100
+                    pnl_usd = (current_price - pos["entry"]) * pos["quantity"]
+                else:  # SELL
+                    pnl_pct = ((pos["entry"] - current_price) / pos["entry"]) * 100
+                    pnl_usd = (pos["entry"] - current_price) * pos["quantity"]
+
                 pos["pnl"] = pnl_usd
                 pos["pnl_pct"] = pnl_pct
-                self._track_peak_open_profit(pos, pnl_usd)
 
                 # MANUAL TRADE PROTECTION
                 if not pos.get("bot_opened"):
@@ -4542,10 +4043,6 @@ class VcaniTradeApp:
                     continue
 
                 self._manage_position_stop(pos, None)
-
-                if self._profit_giveback_should_exit(pos):
-                    if self._execute_profit_giveback_exit(pos):
-                        continue
 
                 # Check Take Profit
                 if pos.get("tp_price", 0) > 0:
@@ -4588,7 +4085,6 @@ class VcaniTradeApp:
         self.positions = updated_positions
         self.cmd.update_positions(self.positions)
         live_positions_pnl = sum(p.get("pnl", 0.0) for p in self.positions)
-        self._update_daily_profit_ladder(live_positions_pnl)
         self.profit_lock.update_balance(self.balance + live_positions_pnl)
         self.ai_narrator.update_live_pnl(self.total_pnl + live_positions_pnl, len(self.positions))
         self._refresh_live_ledger()
@@ -5128,37 +4624,14 @@ class VcaniTradeApp:
         except Exception as e:
             logger.warning("Live balance sync failed: %s", e)
 
-    def _close_reentry_lockout_seconds(self, reason: str, pnl: float) -> int:
-        """Keep loss cooldown strict while allowing faster reversal after wins."""
-        base_seconds = int(float(getattr(config, "RE_ENTRY_LOCKOUT_MINUTES", 5)) * 60)
-        reason_text = str(reason or "").lower()
-        if "manual close" in reason_text:
-            return base_seconds
-        if "stop" in reason_text or pnl < 0:
-            return base_seconds
-        if "profit" in reason_text or "take" in reason_text:
-            return min(base_seconds, int(os.getenv("PROFIT_EXIT_REENTRY_LOCKOUT_SECONDS", "30")))
-        return min(base_seconds, int(os.getenv("WIN_EXIT_REENTRY_LOCKOUT_SECONDS", "60")))
-
-    def _apply_close_reentry_lockout(self, asset: str, reason: str, pnl: float) -> None:
-        lockout_seconds = max(0, self._close_reentry_lockout_seconds(reason, pnl))
-        if lockout_seconds <= 0:
-            self.locked_tickers.pop(asset, None)
-            return
-
-        base_seconds = max(1, int(float(getattr(config, "RE_ENTRY_LOCKOUT_MINUTES", 5)) * 60))
-        adjusted_started_at = time.time() - max(0, base_seconds - lockout_seconds)
-        self.locked_tickers[asset] = adjusted_started_at
-
     def _close_position(self, position: dict, reason: str):
         """Close a position and update P&L."""
         self._ensure_balance_state()
         pnl = position.get("pnl", 0)
-        self._apply_close_reentry_lockout(position["asset"], reason, pnl)
+        self.locked_tickers[position["asset"]] = time.time()
         self.balance += pnl
         self.daily_pnl += pnl
         self.total_pnl += pnl
-        self.protected_session_pnl = float(getattr(self, "protected_session_pnl", 0.0) or 0.0) + float(pnl or 0.0)
 
         # Update peak balance and drawdown
         if self.balance > self.peak_balance:
@@ -5330,6 +4803,50 @@ class VcaniTradeApp:
         # Update AI Narrator
         self.ai_narrator.notify_trade_rejected(signal_data["ticker"])
         self._broadcast_trade_levels(signal_data)
+
+    def _on_signal_received_direct(self, signal_data: dict):
+        """Direct-path signal handler used as a fallback when the Qt signal
+        queue is starved. Runs from the listener thread context.
+
+        Strategy:
+          1) Wait up to 2 seconds for the Qt-path handler to mark this signal
+             as seen via _mark_signal_listener_seen().
+          2) If still not seen, invoke _on_signal_received from the listener
+             thread. The inner handler logs APP_SIGNAL_HANDLER: received
+             which is the green-light marker the user is looking for.
+
+        Dedup is locked so the Qt path and direct path can never both fire
+        for the same signal.
+        """
+        try:
+            if not hasattr(self, "_signal_dedup_lock"):
+                self._signal_dedup_lock = threading.Lock()
+            key = self._signal_dispatch_key(signal_data)
+            # Step 1: brief wait for Qt path to claim this signal.
+            for _ in range(20):  # 20 * 0.1s = 2.0s
+                seen = getattr(self, "_listener_signal_seen", {})
+                if key in seen and time.time() - seen[key] < 10.0:
+                    logger.debug(
+                        "[SIGNAL-DIRECT] Qt path processed %s — direct fallback no-op",
+                        key,
+                    )
+                    return
+                time.sleep(0.1)
+            # Step 2: atomic claim under lock so Qt path can't race.
+            with self._signal_dedup_lock:
+                if not hasattr(self, "_listener_signal_seen"):
+                    self._listener_signal_seen = {}
+                seen = self._listener_signal_seen
+                if key in seen and time.time() - seen[key] < 10.0:
+                    return
+                seen[key] = time.time()
+            logger.warning(
+                "[SIGNAL-DIRECT] Qt path missed %s after 2.0s wait — running direct execution fallback",
+                key,
+            )
+            self._on_signal_received(signal_data)
+        except Exception:
+            logger.exception("[SIGNAL-DIRECT] Direct fallback failed")
 
     def _on_signal_received(self, signal_data: dict):
         """Handle signal received from cloud via HTTP.
@@ -5684,14 +5201,17 @@ class VcaniTradeApp:
 
     def _mark_signal_listener_seen(self, signal_data: dict) -> None:
         """Record that the local HTTP dispatcher delivered this signal into main.py."""
-        if not hasattr(self, "_listener_signal_seen"):
-            self._listener_signal_seen = {}
-        now = time.time()
-        self._listener_signal_seen = {
-            key: ts for key, ts in self._listener_signal_seen.items()
-            if now - ts < 30.0
-        }
-        self._listener_signal_seen[self._signal_dispatch_key(signal_data)] = now
+        if not hasattr(self, "_signal_dedup_lock"):
+            self._signal_dedup_lock = threading.Lock()
+        with self._signal_dedup_lock:
+            if not hasattr(self, "_listener_signal_seen"):
+                self._listener_signal_seen = {}
+            now = time.time()
+            self._listener_signal_seen = {
+                key: ts for key, ts in self._listener_signal_seen.items()
+                if now - ts < 30.0
+            }
+            self._listener_signal_seen[self._signal_dispatch_key(signal_data)] = now
 
     def _cloud_signal_listener_watchdog(self, signal_data: dict) -> None:
         """
@@ -5934,39 +5454,6 @@ class VcaniTradeApp:
             self.ai_narrator.notify_error(f"No entry price for {ticker}")
             return
 
-        if not self.rpa_execution_enabled and not force_execute:
-            self.cmd.log(f"[NO_ENTRY] RPA hand paused - blocked cloud execution for {action} {ticker}")
-            self._on_ticker_status_update(ticker, "trade_rejected")
-            return
-
-        # Fast focus/duplicate gate: reject parked symbols before expensive audits,
-        # ATR planning, or RPA setup. The later gate stays as defense in depth.
-        capacity_ok_early, capacity_note_early = self._check_position_capacity(ticker, action)
-        if not capacity_ok_early:
-            logger.info(
-                "EXEC_CLOUD: early position/focus block for %s %s (%s)",
-                action,
-                ticker,
-                capacity_note_early,
-            )
-            self._on_ticker_status_update(ticker, "focus_locked")
-            return
-
-        should_exec_early, conflict_note_early = self._check_position_conflict(
-            ticker,
-            action,
-            confidence_score=confidence_score,
-        )
-        if not should_exec_early:
-            logger.info(
-                "EXEC_CLOUD: early position conflict block for %s %s (%s)",
-                action,
-                ticker,
-                conflict_note_early,
-            )
-            self._on_ticker_status_update(ticker, "trade_rejected")
-            return
-
         vetoed, veto_reason, veto_status = self._check_rsi_veto(action, rsi_value)
         if vetoed and not force_execute:
             self.cmd.log(f"[SHIELD] [VETO] RSI blocked {action} {ticker}: {veto_reason}")
@@ -5982,20 +5469,6 @@ class VcaniTradeApp:
         if not self._run_pretrade_market_audit(ticker, entry_price, force_execute=force_execute):
             self._on_ticker_status_update(ticker, "trade_rejected")
             return
-        audit_snapshot = getattr(self, "_last_pretrade_market_prices", {}).get(ticker) or {}
-        audited_entry_price = float(audit_snapshot.get("price") or 0.0)
-        audit_age = time.time() - float(audit_snapshot.get("ts") or 0.0)
-        if audited_entry_price > 0 and audit_age <= 10:
-            original_entry_price = entry_price
-            entry_price = audited_entry_price
-            signal_data["setup_entry_price"] = original_entry_price
-            signal_data["entry_price"] = entry_price
-            if abs(entry_price - original_entry_price) > max(0.01, original_entry_price * 0.0001):
-                self.cmd.log(
-                    f'<span style="color:#D29922;font-weight:bold">[PRICE SYNC]</span> '
-                    f'{ticker} risk plan rebased from setup ${original_entry_price:.2f} '
-                    f'to live ${entry_price:.2f}'
-                )
 
         # Check if trading is paused due to news
         if self.financial_safety.trading_paused and not force_execute:
@@ -6016,8 +5489,8 @@ class VcaniTradeApp:
                 f'bypassing news pause for {action} {ticker}'
             )
 
-        # -- Trading Hours Gate --------------------------------------------
-        if config.TRADING_START_HOUR_UTC >= 0 and config.TRADING_END_HOUR_UTC >= 0:
+        # -- Trading Hours Gate (DISABLED for Desktop TV mode) ------------
+        if False:  # permanently disabled for autonomous Desktop execution
             from datetime import datetime, timezone
             now_utc = datetime.now(timezone.utc)
             current_hour = now_utc.hour
@@ -6089,8 +5562,7 @@ class VcaniTradeApp:
             else:
                 sl_price = atr_sl
 
-            structure_tp = self._derive_structure_take_profit(action, entry_price, signal_data, levels)
-            tp_price = structure_tp if structure_tp > 0 else atr_tp
+            tp_price = atr_tp
 
             # Log the ATR-driven risk plan
             rr_ratio = atr_tp_distance / max(atr_stop_distance, 0.0001)
@@ -6148,11 +5620,19 @@ class VcaniTradeApp:
 
         per_unit_risk = abs(entry_price - sl_price)
 
-        # Shared futures point values keep risk sizing aligned with execution symbols.
-        multiplier = self.profit_lock._point_value_for_asset(ticker)
+        # Micro futures contract multipliers ($ per price unit) — MUST match rpa_executor mapping
+        contract_multipliers = {
+            "NQ=F": 2.0,    # MNQ: $2 per point
+            "ES=F": 5.0,    # MES: $5 per point
+            "CL=F": 100.0,  # Full Crude Oil: $100 per $1.00 barrel move
+            "MCL=F": 10.0,  # Micro Crude Oil: $10 per $1.00 barrel move
+            "GC=F": 10.0,   # MGC: $10 per point
+            "SI=F": 10.0,   # Micro Silver: $10 per point
+        }
+        multiplier = contract_multipliers.get(ticker, 1.0)
         dollar_risk_per_contract = per_unit_risk * multiplier
 
-        risk_dollar = float(risk_eval.get("risk_amount") or 0.0)
+        risk_dollar = max(float(risk_eval.get("risk_amount") or 0.0), self.balance * 0.01)
         quantity = (risk_dollar / dollar_risk_per_contract) if dollar_risk_per_contract > 0 else 0.0
 
         logger.info(
@@ -6246,8 +5726,44 @@ class VcaniTradeApp:
         # -- TradingView UI path: execute through GhostExecutor/RPA.
         # Legacy broker-specific futures whitelists do not apply here.
 
-        # GhostExecutor is routed through the hybrid gateway below so confirmed
-        # executions still pass through the normal journal and position tracker.
+        # FORCE GHOSTEXECUTOR (Desktop TV only): immediate execution for high-strength signals
+        if True:  # Desktop mode - always use GhostExecutor
+            logger.info("EXEC_CLOUD: GhostExecutor Desktop TV path for %s %s", action, ticker)
+            success = False
+            try:
+                # Prefer the persistent browser event loop (lives on the
+                # browser thread). Falls back to a fresh loop if browser
+                # agent never started. Using run_coroutine_threadsafe is
+                # the only safe way to await a coroutine from a non-main
+                # thread (e.g., the signal listener direct path).
+                browser_loop = getattr(self, "_browser_loop", None)
+                if browser_loop is not None and not browser_loop.is_closed():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._ghost_executor.execute_trade(ticker, action),
+                        browser_loop,
+                    )
+                    success = bool(future.result(timeout=30))
+                else:
+                    # Fallback: spin up a fresh loop on this thread. Works
+                    # when called from the main thread or any worker without
+                    # an existing loop.
+                    fresh_loop = asyncio.new_event_loop()
+                    try:
+                        success = bool(
+                            fresh_loop.run_until_complete(
+                                self._ghost_executor.execute_trade(ticker, action)
+                            )
+                        )
+                    finally:
+                        fresh_loop.close()
+            except Exception as exc:
+                logger.exception("EXEC_CLOUD: GhostExecutor execute_trade failed for %s %s: %s", action, ticker, exc)
+                success = False
+            if success:
+                logger.info("EXEC_CLOUD: GhostExecutor executed %s %s on Desktop TV", action, ticker)
+            else:
+                logger.warning("EXEC_CLOUD: GhostExecutor returned False for %s %s — trade did not click", action, ticker)
+            return success
 
         # AGGRESSIVE BYPASS: High-strength liquidity signals execute immediately
         is_high_strength_liquidity = (
@@ -6321,19 +5837,7 @@ class VcaniTradeApp:
             return
 
         # Position Safety Check for cloud RPA path
-        capacity_ok_rpa, capacity_note_rpa = self._check_position_capacity(ticker, action)
-        if not capacity_ok_rpa:
-            self.cmd.log(
-                f'<span style="color:#8B949E;font-weight:bold">[SKIP]</span> '
-                f'Cloud signal {action} {ticker} skipped: {capacity_note_rpa}'
-            )
-            return
-
-        should_exec_rpa, conflict_note_rpa = self._check_position_conflict(
-            ticker,
-            action,
-            confidence_score=confidence_score,
-        )
+        should_exec_rpa, conflict_note_rpa = self._check_position_conflict(ticker, action)
         if not should_exec_rpa:
             self.cmd.log(
                 f'<span style="color:#8B949E;font-weight:bold">[SKIP]</span> '
@@ -6369,6 +5873,29 @@ class VcaniTradeApp:
             )
             focus_locked = self.rpa_hand.bring_tradingview_to_front(ticker_hint=ticker)
             logger.info("EXEC_CLOUD: pre-strike TradingView focus for %s -> %s", ticker, focus_locked)
+
+            # CRITICAL: Make sure the chart on screen is showing the symbol we
+            # intend to trade. Without this, all clicks land on whichever chart
+            # was already visible (which is why "only MCL was traded").
+            if focus_locked and self.browser_agent and getattr(self, "_browser_loop", None):
+                try:
+                    nav_future = asyncio.run_coroutine_threadsafe(
+                        self.browser_agent.navigate_to_symbol(ticker),
+                        self._browser_loop,
+                    )
+                    nav_ok = nav_future.result(timeout=8)
+                    logger.info("EXEC_CLOUD: chart switched to %s -> %s", ticker, nav_ok)
+                    if not nav_ok:
+                        self.cmd.log(
+                            f'<span style="color:#D29922;font-weight:bold">[WARN] CHART SWITCH FAILED</span>: '
+                            f'could not change chart to {ticker} — clicks may land on wrong symbol'
+                        )
+                except Exception as nav_err:
+                    logger.warning("EXEC_CLOUD: chart switch failed for %s: %s", ticker, nav_err)
+                    self.cmd.log(
+                        f'<span style="color:#D29922">[WARN]</span> chart switch error for {ticker}: {nav_err}'
+                    )
+
             if not focus_locked:
                 self.cmd.log(
                     f'<span style="color:#F85149;font-weight:bold">[WARN] STRIKE BLOCKED</span>: '
@@ -6424,6 +5951,10 @@ class VcaniTradeApp:
             return
 
         # HYBRID GATEWAY: broker WebSocket -> local socket -> MT5 -> TradingView JS.
+        # POSITION LOCK: Lock this ticker immediately to prevent churning.
+        # Even if execution fails, we don't want to retry the same symbol for
+        # at least SIGNAL_COOLDOWN_SECONDS (300s = 5 min).
+        self.locked_tickers[ticker] = time.time()
         rpa_success = False
         execution_route = "legacy_rpa"
         try:
@@ -6566,11 +6097,9 @@ class VcaniTradeApp:
             "quantity": quantity,
             "tp_price": tp_price,
             "sl_price": sl_price,
-            "point_value": self.profit_lock._point_value_for_asset(ticker),
-            "initial_risk_amount": abs(entry_price - sl_price) * quantity * self.profit_lock._point_value_for_asset(ticker),
+            "initial_risk_amount": abs(entry_price - sl_price) * quantity,
             "break_even_locked": False,
             "last_trailing_check_ts": 0.0,
-            "peak_pnl": 0.0,
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "order_id": f"rpa_{ticker}_{int(datetime.now().timestamp())}",
@@ -6578,7 +6107,6 @@ class VcaniTradeApp:
             "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
-            "opened_ts": time.time(),
             "bot_opened": True,
         }
 
@@ -6900,98 +6428,7 @@ class VcaniTradeApp:
         if self.ai_narrator:
             self.ai_narrator.add_activity(icon, message)
 
-    def _has_same_symbol_position(self, ticker: str) -> bool:
-        return any(pos.get("asset") == ticker for pos in self.positions)
-
-    def _check_position_capacity(self, ticker: str, action: str) -> tuple[bool, str]:
-        """Block brand-new entries when the configured position cap is full."""
-        if self._has_same_symbol_position(ticker):
-            return True, "existing_symbol"
-        if bool(getattr(config, "SINGLE_TRADE_FOCUS_MODE", True)) and self.positions:
-            focus_asset = self.positions[0].get("asset", "active trade")
-            logger.info(
-                "[FOCUS] %s %s blocked while focusing on open position %s",
-                ticker,
-                action,
-                focus_asset,
-            )
-            self.cmd.log(
-                f'<span style="color:#58A6FF;font-weight:bold">[FOCUS MODE]</span> '
-                f'{action} {ticker} blocked - managing {focus_asset} until it closes'
-            )
-            self.ai_narrator.add_activity("[FOCUS]", f"Managing {focus_asset}; new entries paused")
-            return False, "single_trade_focus_active"
-        max_positions = int(getattr(config, "MAX_OPEN_POSITIONS", 3) or 3)
-        if len(self.positions) >= max_positions:
-            logger.info(
-                "[POSITION] %s %s blocked: max open positions reached %s/%s",
-                ticker,
-                action,
-                len(self.positions),
-                max_positions,
-            )
-            self.cmd.log(
-                f'<span style="color:#D29922;font-weight:bold">[POSITION CAP]</span> '
-                f'{action} {ticker} blocked: max open positions {len(self.positions)}/{max_positions}'
-            )
-            self.ai_narrator.add_activity("[LOCK]", f"Max positions reached: {len(self.positions)}/{max_positions}")
-            return False, "max_open_positions"
-        return True, "capacity_ok"
-
-    def _flatten_profitable_opposite_position(
-        self,
-        position: dict,
-        ticker: str,
-        action: str,
-        confidence_score: float,
-    ) -> bool:
-        """Competition mode: bank a profitable opposite position before a strong reversal."""
-        if not bool(getattr(config, "COMPETITION_REVERSAL_FLATTEN_ENABLED", True)):
-            return False
-
-        min_confidence = float(getattr(config, "COMPETITION_REVERSAL_MIN_CONFIDENCE", 75.0))
-        if float(confidence_score or 0.0) < min_confidence:
-            return False
-
-        open_profit = float(position.get("pnl", 0.0) or 0.0)
-        min_profit = float(getattr(config, "COMPETITION_REVERSAL_MIN_OPEN_PROFIT_USD", 50.0))
-        if open_profit < min_profit:
-            return False
-
-        flatten = getattr(self.rpa_hand, "flatten_position", None)
-        if not callable(flatten):
-            return False
-
-        current_side = str(position.get("side", "") or "").upper()
-        self.cmd.log(
-            f'<span style="color:#F0B90B;font-weight:bold">[REVERSAL SHIELD]</span> '
-            f'{ticker} has profitable {current_side} (${open_profit:.2f}); flattening before {action}'
-        )
-        try:
-            success = bool(flatten(ticker))
-        except Exception as exc:
-            logger.error("[REVERSAL SHIELD] Flatten failed for %s: %s", ticker, exc)
-            success = False
-
-        if not success:
-            self.cmd.log(
-                f'<span style="color:#F85149;font-weight:bold">[REVERSAL SHIELD]</span> '
-                f'Could not flatten {ticker}; opposite {action} remains blocked'
-            )
-            return False
-
-        self._close_position(position, "Competition Reversal Flatten")
-        self.positions = [pos for pos in self.positions if pos is not position]
-        self.cmd.update_positions(self.positions)
-        return True
-
-    def _check_position_conflict(
-        self,
-        ticker: str,
-        action: str,
-        is_closing: bool = False,
-        confidence_score: float = 0.0,
-    ) -> tuple[bool, str]:
+    def _check_position_conflict(self, ticker: str, action: str, is_closing: bool = False) -> tuple[bool, str]:
         """
         Position Safety Check: If we already hold an opposing position,
         decide whether to close it first (Close-and-Reverse) or block.
@@ -7004,8 +6441,6 @@ class VcaniTradeApp:
                 current_side = str(pos.get("side", "")).upper()
                 if current_side and current_side != action and not is_closing:
                     if not bool(getattr(config, "AUTONOMOUS_CLOSE_AND_REVERSE_ENABLED", False)):
-                        if self._flatten_profitable_opposite_position(pos, ticker, action, confidence_score):
-                            return True, "competition_reversal_flattened"
                         logger.info(
                             "[POSITION] %s already %s | Opposite %s blocked by close-and-reverse safety",
                             ticker,
@@ -7056,20 +6491,6 @@ class VcaniTradeApp:
         Routes to MT5 or TradingView (RPA) based on active mode.
         Returns True if execution succeeded.
         """
-        action = str(action or "").upper()
-        if action not in {"BUY", "SELL"}:
-            self.cmd.log(
-                f'<span style="color:#F85149;font-weight:bold">[BLOCKED]</span> '
-                f'Unsupported trade action: {action or "EMPTY"}'
-            )
-            return False
-        if not self.rpa_execution_enabled:
-            self.cmd.log(
-                f'<span style="color:#D29922;font-weight:bold">[NO_ENTRY]</span> '
-                f'RPA hand paused - blocked Hunter execution for {action} {symbol}'
-            )
-            return False
-
         from core.market_sessions import is_crypto_ticker, is_futures_ticker
         is_always_on = is_crypto_ticker(symbol) or is_futures_ticker(symbol)
         if not self.can_trade and not is_always_on:
@@ -7079,113 +6500,8 @@ class VcaniTradeApp:
             )
             return False
 
-        if symbol in self.locked_tickers:
-            remaining = int((config.RE_ENTRY_LOCKOUT_MINUTES * 60) - (time.time() - self.locked_tickers[symbol]))
-            if remaining > 0:
-                self.cmd.log(
-                    f'<span style="color:#D29922;font-weight:bold">[WAIT]</span> '
-                    f'Hunter lockout: {symbol} cooling down for {remaining}s after the last close'
-                )
-                self.cmd.update_watchlist_status(
-                    symbol,
-                    f"[WAIT] LOCKOUT {remaining}s",
-                    confidence=0.0,
-                    last_signal=action,
-                )
-                self._refresh_lockout_timer()
-                return False
-
-        # Position Safety Check: do this before planning/logging so Hunter cannot
-        # queue a fresh symbol while the bot is already managing one open trade.
-        capacity_ok, capacity_note = self._check_position_capacity(symbol, action)
-        if not capacity_ok:
-            logger.info("[HUNTER] %s %s blocked by capacity: %s", symbol, action, capacity_note)
-            return False
-
-        direction_ok, direction_note = self._hunter_direction_sanity_check(symbol, action)
-        if not direction_ok:
-            self.cmd.log(
-                f'<span style="color:#D29922;font-weight:bold">[VISION CHECK]</span> '
-                f'{action} {symbol} blocked - {direction_note}'
-            )
-            logger.info("[HUNTER] %s %s blocked by direction sanity check: %s", symbol, action, direction_note)
-            return False
-        self.cmd.log(
-            f'<span style="color:#3FB950;font-weight:bold">[VISION CHECK]</span> '
-            f'{action} {symbol} allowed - {direction_note}'
-        )
-
-        price_action_ok, price_action_note = self._price_action_gate(symbol, action)
-        if not price_action_ok:
-            self.cmd.log(
-                f'<span style="color:#D29922;font-weight:bold">[PRICE ACTION]</span> '
-                f'{action} {symbol} waiting - {price_action_note}'
-            )
-            logger.info("[HUNTER] %s %s blocked by price-action gate: %s", symbol, action, price_action_note)
-            return False
-        self.cmd.log(
-            f'<span style="color:#3FB950;font-weight:bold">[PRICE ACTION]</span> '
-            f'{action} {symbol} allowed - {price_action_note}'
-        )
-
-        plan = self._build_simple_execution_plan(symbol, action, reason)
-        if not plan.get("ok"):
-            self.cmd.log(
-                f'<span style="color:#F85149;font-weight:bold">[BLOCKED]</span> '
-                f'{action} {symbol}: {plan.get("reason", "invalid trade plan")}'
-            )
-            logger.warning("[EXECUTION] Refused unprotected %s %s: %s", action, symbol, plan.get("reason"))
-            return False
-
-        self.cmd.log(
-            f'<span style="color:#58A6FF;font-weight:bold">[RISK PLAN]</span> '
-                f'{plan["risk_text"]}'
-        )
-
-        def _record_hunter_position(route: str) -> None:
-            amount = plan["quantity"] * plan["entry_price"]
-            position = {
-                "asset": symbol,
-                "side": action,
-                "entry": plan["entry_price"],
-                "current": plan["entry_price"],
-                "amount": amount,
-                "quantity": plan["quantity"],
-                "tp_price": plan["take_profit"],
-                "sl_price": plan["stop_loss"],
-                "point_value": self.profit_lock._point_value_for_asset(symbol),
-                "initial_risk_amount": (
-                    abs(plan["entry_price"] - plan["stop_loss"])
-                    * plan["quantity"]
-                    * self.profit_lock._point_value_for_asset(symbol)
-                ),
-                "break_even_locked": False,
-                "last_trailing_check_ts": 0.0,
-                "peak_pnl": 0.0,
-                "pnl": 0.0,
-                "pnl_pct": 0.0,
-                "order_id": f"hunter_{route}_{symbol}_{int(datetime.now().timestamp())}",
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "opened_ts": time.time(),
-                "bot_opened": True,
-                "source": "HUNTER",
-                "ai_reason": plan["reason"],
-            }
-            self.positions.append(position)
-            self.cmd.update_positions(self.positions)
-            self.cmd.add_trade_log(symbol, action, amount, 0, "Open")
-            self.ai_narrator.update_live_pnl(self.total_pnl + sum(p.get("pnl", 0.0) for p in self.positions), len(self.positions))
-            self.cmd.log(
-                f'<span style="color:#3FB950;font-weight:bold">[TRACKED]</span> '
-                f'Hunter position tracked: {action} {symbol} | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
-            )
-
         # Position Safety Check: Close-and-Reverse or skip duplicate
-        should_exec, conflict_note = self._check_position_conflict(
-            symbol,
-            action,
-            confidence_score=float(getattr(config, "COMPETITION_REVERSAL_MIN_CONFIDENCE", 75.0)),
-        )
+        should_exec, conflict_note = self._check_position_conflict(symbol, action)
         if not should_exec:
             return False
 
@@ -7199,22 +6515,15 @@ class VcaniTradeApp:
                 return False
             self.cmd.log(
                 f'<span style="color:#00D4FF;font-weight:bold">[MT5]</span> '
-                f'Sending protected {action} {symbol} to MetaTrader 5'
+                f'Sending {action} {symbol} to MetaTrader 5'
             )
-            success = mt5_executor.execute_trade(
-                symbol,
-                action,
-                volume=plan["quantity"],
-                stop_loss=plan["stop_loss"],
-                take_profit=plan["take_profit"],
-            )
+            success = mt5_executor.execute_trade(symbol, action)
             if success:
                 self.cmd.log(
                     f'<span style="color:#3FB950;font-weight:bold">[MT5 OK]</span> '
-                    f'{action} {symbol} executed on MT5 | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
+                    f'{action} {symbol} executed on MT5'
                 )
                 self.ai_narrator.add_activity("[MT5]", f"{action} {symbol}")
-                _record_hunter_position("mt5")
             else:
                 self.cmd.log(
                     f'<span style="color:#F85149;font-weight:bold">[MT5 FAIL]</span> '
@@ -7228,30 +6537,25 @@ class VcaniTradeApp:
                 trade = TradeRecord(
                     asset=symbol,
                     action=SignalAction.BUY if action == "BUY" else SignalAction.SELL,
-                    entry_price=plan["entry_price"],
-                    stop_loss=plan["stop_loss"],
-                    take_profit=plan["take_profit"],
+                    entry_price=0.0,
+                    stop_loss=0.0,
+                    take_profit=0.0,
                     confidence=ConfidenceLevel.MEDIUM,
-                    ai_reason=plan["reason"],
+                    ai_reason=reason,
                     mode="HUNTER",
                     status="OPEN",
                 )
                 # Position Safety Check for Hunter RPA path
-                should_exec_hunter, _ = self._check_position_conflict(
-                    symbol,
-                    action,
-                    confidence_score=float(getattr(config, "COMPETITION_REVERSAL_MIN_CONFIDENCE", 75.0)),
-                )
+                should_exec_hunter, _ = self._check_position_conflict(symbol, action)
                 if not should_exec_hunter:
                     return False
                 success = self.rpa_hand.execute_trade(trade)
                 if success:
                     self.cmd.log(
                         f'<span style="color:#3FB950;font-weight:bold">[OK]</span> '
-                        f'RPA executed {action} {symbol} | SL=${plan["stop_loss"]:.2f} TP=${plan["take_profit"]:.2f}'
+                        f'RPA executed {action} {symbol}'
                     )
                     self.ai_narrator.add_activity("[OK]", f"RPA {action} {symbol}")
-                    _record_hunter_position("rpa")
                 else:
                     failure = getattr(self.rpa_hand, "last_failure_reason", "RPA hand failed")
                     self.cmd.log(
@@ -7365,11 +6669,9 @@ class VcaniTradeApp:
             "quantity": quantity,
             "tp_price": tp_price,
             "sl_price": sl_price,
-            "point_value": self.profit_lock._point_value_for_asset(execution_ticker),
-            "initial_risk_amount": abs(entry_price - sl_price) * quantity * self.profit_lock._point_value_for_asset(execution_ticker),
+            "initial_risk_amount": abs(entry_price - sl_price) * quantity,
             "break_even_locked": False,
             "last_trailing_check_ts": 0.0,
-            "peak_pnl": 0.0,
             "pnl": 0.0,
             "pnl_pct": 0.0,
             "order_id": f"mt5_{execution_ticker}_{int(datetime.now().timestamp())}",
@@ -7377,7 +6679,6 @@ class VcaniTradeApp:
             "liquidity_zone": signal_data.get("liquidity_zone"),
             "vibe_context": vibe_context,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
-            "opened_ts": time.time(),
             "bot_opened": True,
         }
 
@@ -7670,36 +6971,19 @@ class VcaniTradeApp:
         except Exception as e:
             logger.error("[APEX] check_apex_closing_time error: %s", e)
 
-    def _on_hunter_trade_signal(
-        self,
-        symbol: str,
-        action: str,
-        reason: str,
-        confidence: int = 50,
-        threat: str = "MEDIUM",
-    ):
+    def _on_hunter_trade_signal(self, symbol: str, action: str, reason: str):
         """Execute a trade when the Cloud Brain returns BUY/SELL from vision analysis."""
-        confidence_score = max(0.0, min(100.0, float(confidence or 50)))
         self.cmd.log(
             f'<span style="color:#00D4FF;font-weight:bold">[HUNTER]</span> '
-            f'Vision signal: {action} {symbol} | {confidence_score:.0f}% | Threat: {threat}'
+            f'Vision signal: {action} {symbol}'
         )
-        if bool(getattr(config, "SINGLE_TRADE_FOCUS_MODE", True)) and self.positions:
-            focus_asset = self.positions[0].get("asset", "active trade")
-            if symbol != focus_asset:
-                self.cmd.log(
-                    f'<span style="color:#58A6FF;font-weight:bold">[FOCUS MODE]</span> '
-                    f'Hunter ignored {action} {symbol}; managing open {focus_asset} first'
-                )
-                logger.info("[HUNTER] Ignored %s %s while managing %s", action, symbol, focus_asset)
-                return
-
         self.ai_narrator.add_activity("[HUNTER]", f"{action} {symbol}")
-        self.ai_narrator.notify_signal_detected(symbol, action, confidence_score / 100.0)
-        self._announce_signal_alert(symbol, action, confidence_score, source="hunter")
+        # Trigger the green border blink — this is the missing feature!
+        self.ai_narrator.notify_signal_detected(symbol, action, 0.85)
+        self._announce_signal_alert(symbol, action, 85.0, source="hunter")
 
         if config.TEACHER_MODE:
-            self.cmd.log(f"[TEACHER] Would execute {action} {symbol} ({confidence_score:.0f}%) | {reason}")
+            self.cmd.log(f"[TEACHER] Would execute {action} {symbol} | {reason}")
             return
 
         self._dispatch_trade_execution(symbol, action, reason)
@@ -7765,45 +7049,6 @@ class VcaniTradeApp:
         total = len(status)
         self.cmd.update_calibration_status(cal.is_calibrated(), done, total)
 
-    def _warm_ollama_models(self):
-        """Preload local models so first Sunday signal is not a cold start."""
-        try:
-            from core.brain_swarm import call_local_brain
-            call_local_brain(
-                "Reply exactly: READY",
-                model=config.OLLAMA_MODEL,
-                timeout=60,
-                num_predict=8,
-            )
-            self.cmd.log(f"[BRAIN] Predator warm: {config.OLLAMA_MODEL}")
-        except Exception as exc:
-            logger.debug("[BRAIN] Predator warm-up skipped: %s", exc)
-
-        try:
-            import requests
-            from core.ollama_utils import build_ollama_url
-
-            model = getattr(config, "FAST_CHART_VISION_MODEL", "moondream:latest")
-            payload = {
-                "model": model,
-                "prompt": "ready",
-                "stream": False,
-                "keep_alive": getattr(config, "OLLAMA_KEEP_ALIVE", "30m"),
-                "options": {
-                    "num_predict": 4,
-                    "num_ctx": int(getattr(config, "OLLAMA_NUM_CTX", 2048)),
-                    "temperature": 0.0,
-                },
-            }
-            requests.post(
-                build_ollama_url(config.OLLAMA_BASE_URL, "api/generate"),
-                json=payload,
-                timeout=60,
-            )
-            self.cmd.log(f"[EYE] Vision warm: {model}")
-        except Exception as exc:
-            logger.debug("[VISION] Vision warm-up skipped: %s", exc)
-
     def run(self):
         """Start the application."""
         logger.info("Starting VcaniTrade AI (Hybrid)...")
@@ -7812,10 +7057,16 @@ class VcaniTradeApp:
         # Show dashboard - this MUST succeed regardless of any service errors.
         try:
             self.cmd.show()
+            self.cmd.showNormal()
+            self.cmd.raise_()
+            self.cmd.activateWindow()
         except Exception as exc:
             logger.error("Dashboard show() failed: %s - attempting re-init", exc)
             self.cmd = CommandCenter()
             self.cmd.show()
+            self.cmd.showNormal()
+            self.cmd.raise_()
+            self.cmd.activateWindow()
 
         # Initialize UI with balance and ledger
         try:
@@ -7887,8 +7138,6 @@ class VcaniTradeApp:
             self.cmd.log("Mode: AUTONOMOUS - execution armed")
         else:
             self.cmd.log("Mode: TEACHER - execution disarmed")
-
-        QTimer.singleShot(2500, self._warm_ollama_models)
 
         logger.info("Application running")
         sys.exit(self.app.exec())

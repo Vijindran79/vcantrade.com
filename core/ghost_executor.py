@@ -149,13 +149,98 @@ class GhostExecutor:
         self._mt5_executor = executor
 
     async def execute_trade(self, symbol: str, action: str, volume: float = 0.0) -> bool:
-        """Primary entry point: execute via TradingView JS injection or MT5."""
+        """Primary entry point: execute via TradingView JS injection.
+
+        After every click attempt:
+          1. Saves a screenshot to assets/last_trade_attempt.png so the user
+             can SEE what TradingView looked like at the moment of execution.
+          2. Polls TradingView's positions/orders panel for up to 5 seconds.
+             Returns True only when a position actually appears for this
+             symbol — not just because a button was clicked.
+        """
         action = str(action).strip().upper()
+        clicked = False
         if action in ("BUY", "SELL", "CLOSE"):
-            success = await self.execute_js(action)
-            if success:
+            clicked = await self.execute_js(action)
+
+        # Save a screenshot regardless of click result so the user can
+        # debug TradingView's state at the click instant.
+        await self._save_post_click_screenshot(symbol, action, clicked)
+
+        # CLOSE is verified by the absence of a position; we don't poll for it.
+        if action == "CLOSE":
+            return clicked or self.execute_mt5(symbol, action, volume)
+
+        if clicked:
+            verified = await self._verify_position_opened(symbol, action, timeout_seconds=5.0)
+            if verified:
+                logger.info("[GHOST-VERIFY] %s %s position confirmed in TradingView panel", action, symbol)
                 return True
+            logger.warning(
+                "[GHOST-VERIFY] %s %s click registered but no matching position appeared "
+                "in TradingView within 5s — order may have been blocked or sent to wrong panel",
+                action, symbol,
+            )
+            # Fall through to MT5 attempt only if MT5 executor is wired
+            return self.execute_mt5(symbol, action, volume)
+
         return self.execute_mt5(symbol, action, volume)
+
+    async def _save_post_click_screenshot(self, symbol: str, action: str, clicked: bool) -> None:
+        """Snapshot the TradingView page right after the click attempt.
+        Saved to assets/last_trade_attempt.png so the user can verify what
+        TradingView actually showed at the click moment."""
+        if not self.is_connected:
+            return
+        try:
+            import os
+            os.makedirs("assets", exist_ok=True)
+            path = "assets/last_trade_attempt.png"
+            await self._page.screenshot(path=path, full_page=False, timeout=3000)
+            logger.info(
+                "[GHOST-SHOT] %s %s post-click screenshot saved to %s (clicked=%s)",
+                action, symbol, path, clicked,
+            )
+        except Exception as exc:
+            logger.debug("[GHOST-SHOT] Could not save screenshot: %s", exc)
+
+    async def _verify_position_opened(self, symbol: str, action: str, timeout_seconds: float = 5.0) -> bool:
+        """Poll TradingView's bottom panel for a new position matching this
+        symbol. Returns True as soon as one appears, False if the timeout
+        expires."""
+        if not self.is_connected:
+            return False
+        # Strip prefixes like CME_MINI: so the symbol matches what TV displays.
+        sym = str(symbol or "").upper().split(":")[-1].rstrip("!")
+        action_upper = action.upper()
+        deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            try:
+                found = await self._page.evaluate(f"""() => {{
+                    const sym = "{sym}";
+                    const action = "{action_upper}";
+                    // TradingView puts open positions in the bottom widget.
+                    const rows = document.querySelectorAll(
+                        '[data-name*="position" i] tr, ' +
+                        '[class*="positions-row" i], ' +
+                        '[class*="open-position" i], ' +
+                        'div[role="row"]'
+                    );
+                    for (const row of rows) {{
+                        const text = (row.textContent || '').toUpperCase();
+                        if (text.includes(sym)) {{
+                            // Bonus: row text usually contains BUY/SELL or LONG/SHORT
+                            return true;
+                        }}
+                    }}
+                    return false;
+                }}""")
+                if found:
+                    return True
+            except Exception as exc:
+                logger.debug("[GHOST-VERIFY] poll error: %s", exc)
+            await asyncio.sleep(0.4)
+        return False
 
     def execute_mt5(self, symbol: str, action: str, volume: float = 0.0) -> bool:
         """Execute through the attached MT5 executor if one is available."""
@@ -181,8 +266,17 @@ class GhostExecutor:
     # ------------------------------------------------------------------
     async def execute_js(self, action: str) -> bool:
         """
-        Execute Buy/Sell/Close via JavaScript DOM injection in TradingView.
-        Dispatches synthesized MouseEvent sequences directly on the button element.
+        Execute Buy/Sell/Close on TradingView's paper-trading order panel.
+
+        Strategy:
+        1. Try TradingView's stable button selectors first via Playwright click
+           (real event firing, not synthetic). Selectors live on the
+           bottom-panel order ticket.
+        2. Fall back to Playwright role-based locator click.
+        3. Fall back to JS-injected MouseEvent dispatch (last resort; least
+           reliable on React apps, restricted to in-panel scope).
+        4. After any click, wait for and confirm any "Place order" /
+           "Confirm" / "Buy at market" dialog.
         """
         if not self.is_connected:
             logger.warning("[GHOST-JS] Not connected to TradingView Desktop")
@@ -194,88 +288,133 @@ class GhostExecutor:
         try:
             await self._page.bring_to_front()
 
-            # Build array of possible button text matches depending on action
+            # ---- STRATEGY 1: TradingView-specific stable selectors ----
+            # These target the React-rendered order panel buttons. data-name
+            # attributes are stable across TV redesigns.
             if action == "CLOSE":
-                search_actions = ['close', 'close position', 'flatten', 'exit']
+                tv_selectors = [
+                    'button[data-name="close-positions-button"]',
+                    'button[data-name="flatten-button"]',
+                    'button[aria-label*="Close Position" i]',
+                    'button[aria-label*="Flatten" i]',
+                ]
             elif action == "SELL":
-                search_actions = ['sell', 'sell market', 'short', 'short market', 'sell mkt']
-            else:
-                search_actions = ['buy', 'buy market', 'long', 'long market', 'buy mkt']
+                tv_selectors = [
+                    'button[data-name="order-panel-sell-button"]',
+                    'button[data-name="sell-button"]',
+                    'button[data-name*="sell" i]',
+                    'button[data-type="sell-mkt"]',
+                    'button[aria-label*="Sell" i]',
+                    'div[data-name="legacy-order-panel"] button.sell-button',
+                ]
+            else:  # BUY
+                tv_selectors = [
+                    'button[data-name="order-panel-buy-button"]',
+                    'button[data-name="buy-button"]',
+                    'button[data-name*="buy" i]',
+                    'button[data-type="buy-mkt"]',
+                    'button[aria-label*="Buy" i]',
+                    'div[data-name="legacy-order-panel"] button.buy-button',
+                ]
 
-            actions_js = '", "'.join(search_actions)
+            for selector in tv_selectors:
+                try:
+                    locator = self._page.locator(selector).first
+                    if await locator.count() > 0 and await locator.is_visible(timeout=500):
+                        await locator.click(timeout=2000, force=False)
+                        logger.info(
+                            "[GHOST-JS] %s clicked via TV selector: %s",
+                            action, selector,
+                        )
+                        await self._confirm_order_dialog(action)
+                        return True
+                except Exception as sel_err:
+                    logger.debug("[GHOST-JS] Selector %s failed: %s", selector, sel_err)
+                    continue
 
+            # ---- STRATEGY 2: Playwright role-based click ----
+            search_text_map = {
+                "BUY": ["Buy", "Buy market", "Long", "Place buy"],
+                "SELL": ["Sell", "Sell market", "Short", "Place sell"],
+                "CLOSE": ["Close position", "Flatten", "Close", "Exit"],
+            }
+            for name in search_text_map.get(action, [action.title()]):
+                try:
+                    btn = self._page.get_by_role("button", name=name).first
+                    if await btn.count() > 0 and await btn.is_visible(timeout=500):
+                        await btn.click(timeout=2000)
+                        logger.info(
+                            "[GHOST-JS] %s clicked via role-based locator: %s",
+                            action, name,
+                        )
+                        await self._confirm_order_dialog(action)
+                        return True
+                except Exception:
+                    continue
+
+            # ---- STRATEGY 3: JS MouseEvent injection (last resort) ----
+            # Restricted to elements within the trading panel only — prevents
+            # matching navigation/tooltip elements that have "buy" in their text.
             clicked = await self._page.evaluate(f"""() => {{
-                const actions = ["{actions_js}"];
-                const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span[role="button"]'));
-                let best = null, bestScore = 0;
-                for (const btn of buttons) {{
-                    const text = (btn.textContent || btn.innerText || '').toLowerCase().trim();
-                    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    let score = 0;
-                    for (const a of actions) {{
-                        if (text.includes(a)) score += 15;
-                        else if (text.startsWith(a)) score += 12;
-                        if (aria.includes(a)) score += 8;
+                const action = "{action_lower}";
+                const panels = document.querySelectorAll(
+                    '[data-name*="order" i], [data-name*="trading" i], ' +
+                    '[class*="order-panel" i], [class*="trading-panel" i], ' +
+                    '[class*="bottom-widget" i]'
+                );
+                const candidates = [];
+                if (panels.length > 0) {{
+                    for (const p of panels) {{
+                        for (const b of p.querySelectorAll('button, div[role="button"]')) {{
+                            candidates.push(b);
+                        }}
                     }}
-                    const style = window.getComputedStyle(btn);
-                    const bg = (style.backgroundColor || '').toLowerCase();
-                    // For Buy: green-ish bg. For Sell: red-ish bg. For Close: any visible button
-                    if ('{action_lower}' === 'buy' && (bg.includes('0,255') || bg.includes('green') || bg.includes('34,197') || bg.includes('16,185'))) score += 10;
-                    if ('{action_lower}' === 'sell' && (bg.includes('255,0') || bg.includes('red') || bg.includes('239,68'))) score += 10;
-                    // Prefer visible clickable buttons
+                }}
+                if (candidates.length === 0) {{ return false; }}
+                let best = null, bestScore = 0;
+                for (const btn of candidates) {{
+                    const text = (btn.textContent || '').toLowerCase().trim();
+                    const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const dn = (btn.getAttribute('data-name') || '').toLowerCase();
+                    let score = 0;
+                    if (text === action) score += 30;
+                    else if (text.startsWith(action + ' ')) score += 25;
+                    else if (text.includes(action)) score += 10;
+                    if (aria.includes(action)) score += 8;
+                    if (dn.includes(action)) score += 20;
                     if (btn.offsetParent !== null) score += 5;
+                    let p = btn.parentElement;
+                    let inHeader = false;
+                    while (p) {{
+                        const pcls = (p.className || '').toString().toLowerCase();
+                        if (pcls.includes('header') || pcls.includes('nav') || pcls.includes('menu')) {{
+                            inHeader = true; break;
+                        }}
+                        p = p.parentElement;
+                    }}
+                    if (inHeader) score -= 50;
                     if (score > bestScore) {{ bestScore = score; best = btn; }}
                 }}
-                if (best && bestScore >= 10) {{
+                if (best && bestScore >= 20) {{
+                    best.scrollIntoView({{ block: 'center' }});
                     const rect = best.getBoundingClientRect();
                     const x = rect.left + rect.width / 2;
                     const y = rect.top + rect.height / 2;
-                    // Synthesized MouseEvent sequence — no physical mouse
-                    best.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, clientX: x, clientY: y }}));
-                    best.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, clientX: x, clientY: y }}));
-                    best.dispatchEvent(new MouseEvent('click', {{ bubbles: true, clientX: x, clientY: y }}));
+                    best.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }}));
+                    best.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }}));
+                    best.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }}));
                     return true;
-                }}
-                // Fallback: try clicking first element whose class/id contains 'buy', 'sell', or 'close'
-                const fallbackKeywords = ['{action_lower}', '{action_lower[:1]}'];
-                const all = document.querySelectorAll(
-                    'button, [class*="{' + action_lower + '}"], [id*="{' + action_lower + '}"], [data-*="{' + action_lower + '}"]'
-                );
-                for (const el of all) {{
-                    const cls = (el.className || '').toLowerCase();
-                    const elId = (el.id || '').toLowerCase();
-                    for (const kw of fallbackKeywords) {{
-                        if (cls.includes(kw) || elId.includes(kw)) {{
-                            if (el.offsetParent !== null) {{
-                                const rect = el.getBoundingClientRect();
-                                const x = rect.left + rect.width / 2;
-                                const y = rect.top + rect.height / 2;
-                                el.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, clientX: x, clientY: y }}));
-                                el.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, clientX: x, clientY: y }}));
-                                el.dispatchEvent(new MouseEvent('click', {{ bubbles: true, clientX: x, clientY: y }}));
-                                return true;
-                            }}
-                        }}
-                    }}
                 }}
                 return false;
             }}""")
 
             if clicked:
-                logger.info("[GHOST-JS] %s executed via JS injection on TradingView Desktop", action)
+                logger.info(
+                    "[GHOST-JS] %s clicked via JS injection (in-panel scope) on TradingView Desktop",
+                    action,
+                )
+                await self._confirm_order_dialog(action)
                 return True
-
-            # Fallback: Playwright locator click (still no physical mouse pointer movement)
-            logger.info("[GHOST-JS] JS injection failed, trying Playwright locator for %s", action)
-            try:
-                for name in search_actions:
-                    btn = self._page.get_by_role("button", name=name).first
-                    if await btn.count() > 0:
-                        await btn.click(timeout=2000)
-                        logger.info("[GHOST-JS] %s executed via locator click", action)
-                        return True
-            except Exception:
-                pass
 
             logger.error("[GHOST-JS] All click strategies failed for %s", action)
             return False
@@ -283,6 +422,46 @@ class GhostExecutor:
         except Exception as e:
             logger.error("[GHOST-JS] Execution error for %s: %s", action, e)
             return False
+
+    async def _confirm_order_dialog(self, action: str) -> None:
+        """After clicking Buy/Sell/Close, TradingView usually shows a
+        confirmation dialog ("Place order" / "Buy at market" / etc.). Click
+        through it. Without this, the click registered but the order never
+        actually reached the broker."""
+        if not self.is_connected:
+            return
+        try:
+            await asyncio.sleep(0.4)  # wait for dialog to render
+            confirm_selectors = [
+                'button[data-name="place-and-line-button"]',
+                'button[data-name="confirm-button"]',
+                'button[data-name="submit-button"]',
+                'button[data-name*="place" i]',
+                'div[role="dialog"] button:has-text("Buy")',
+                'div[role="dialog"] button:has-text("Sell")',
+                'div[role="dialog"] button:has-text("Place")',
+                'div[role="dialog"] button:has-text("Confirm")',
+                'div[role="dialog"] button:has-text("OK")',
+                'div[role="dialog"] button:has-text("Yes")',
+            ]
+            for selector in confirm_selectors:
+                try:
+                    btn = self._page.locator(selector).first
+                    if await btn.count() > 0 and await btn.is_visible(timeout=500):
+                        await btn.click(timeout=1500)
+                        logger.info(
+                            "[GHOST-JS] %s confirmation dialog cleared via: %s",
+                            action, selector,
+                        )
+                        return
+                except Exception:
+                    continue
+            logger.debug(
+                "[GHOST-JS] No confirmation dialog found for %s (might be one-click order)",
+                action,
+            )
+        except Exception as exc:
+            logger.debug("[GHOST-JS] Confirm dialog handler error: %s", exc)
 
     # ------------------------------------------------------------------
     # SLAM CLOSE — zero-delay emergency flatten via JS or cursor teleport

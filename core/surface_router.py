@@ -206,7 +206,7 @@ class SurfaceRouter:
                 import asyncio
 
                 future = asyncio.run_coroutine_threadsafe(ghost.execute_js(action), browser_loop)
-                ok = bool(future.result(timeout=5.0))
+                ok = bool(future.result(timeout=15.0))
             else:
                 # Fallback if a loop is unavailable: drive the coroutine to
                 # completion synchronously. This blocks the caller for at most
