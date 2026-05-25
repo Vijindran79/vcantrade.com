@@ -161,6 +161,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Silence yfinance "possibly delisted" noise — Apex micro futures (MNQ=F,
+# MES=F, etc.) are not on Yahoo, and the warnings drown out real trade events.
+for _noisy in ("yfinance", "peewee", "urllib3", "asyncio"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR if _noisy != "yfinance" else logging.CRITICAL)
+
 
 def _teacher_mode_forced_by_config() -> bool:
     """Return True when env/config explicitly pins the app to Teacher mode."""
@@ -1798,14 +1803,38 @@ class VcaniTradeApp:
 
             current_market_price = None
 
-            # PRICE SOURCE PIVOT: M6 contract codes (NQM6, ESM6, MCLM6) and XAUUSD/Gold are WealthCharts-specific
-            # and NOT recognized by Yahoo Finance. Use MT5 as source of truth for these.
-            if ticker and (ticker.upper().endswith("M6") or ticker.upper() in {"XAUUSD", "GC", "GC=F", "MGC", "COMEX:MGC1!"}):
+            # PRICE SOURCE PIVOT: Apex micro futures (MNQ1!, MES1!, MCL1!, MGC1!,
+            # MYM1!, M2K1!, M6A1!, M6E1!, MBT1!, MET1!) and the legacy M6 codes
+            # are NOT carried by Yahoo Finance. MT5 is the only live source.
+            # Anything ending in "1!" or matching a micro alias goes to MT5 first.
+            ticker_upper = (ticker or "").upper()
+            futures_aliases = {
+                "MNQ", "MES", "MCL", "MGC", "MYM", "M2K", "M6A", "M6E", "MBT", "MET",
+                "NQ", "ES", "CL", "GC", "YM", "RTY", "MNQ=F", "MES=F", "MCL=F",
+                "MGC=F", "NQ=F", "ES=F", "CL=F", "GC=F", "YM=F", "RTY=F",
+                "XAUUSD", "BTCUSD", "ETHUSD", "COMEX:MGC1!",
+            }
+            is_micro_futures = (
+                ticker_upper.endswith("1!")
+                or ticker_upper.endswith("M6")
+                or ticker_upper in futures_aliases
+                or ticker_upper.startswith("M") and ticker_upper.endswith("=F")
+            )
+            if is_micro_futures:
                 current_market_price = self._fetch_mt5_price_for_m6(ticker)
                 if current_market_price and current_market_price > 0:
                     logger.info("[GATEKEEPER] MT5 price for %s: %.4f", ticker, current_market_price)
+                else:
+                    # MT5 unavailable: fall back to the dispatched setup price
+                    # rather than aborting on a missing live tick. This stops
+                    # yfinance from killing every Apex micro futures trade.
+                    logger.warning(
+                        "[GATEKEEPER] MT5 price unavailable for %s — using setup entry price as audit reference",
+                        ticker,
+                    )
+                    current_market_price = entry_price
 
-            # Fallback to Yahoo Finance for everything else
+            # Fallback to Yahoo Finance only for non-futures (stocks, FX, crypto pairs)
             if current_market_price is None:
                 import yfinance as yf
                 market_ticker = self._canonical_market_ticker(ticker)
@@ -3269,6 +3298,24 @@ class VcaniTradeApp:
                 return None
 
         for label, period, interval in tf_map:
+            # FUTURES BYPASS: MNQ1!, MES1!, MCL1!, etc. are not on yfinance.
+            # Skip the network call entirely so we do not flood the log with
+            # "possibly delisted" errors. The regime detector already supplies
+            # the trend bias for futures.
+            ticker_upper = (ticker or "").upper()
+            mt_upper = (market_ticker or "").upper()
+            futures_alias_set = {
+                "MNQ", "MES", "MCL", "MGC", "MYM", "M2K", "M6A", "M6E", "MBT", "MET",
+                "NQ", "ES", "CL", "GC", "YM", "RTY",
+            }
+            looks_like_futures = (
+                ticker_upper.endswith("1!") or mt_upper.endswith("1!")
+                or ticker_upper.endswith("=F") or mt_upper.endswith("=F")
+                or ticker_upper in futures_alias_set or mt_upper in futures_alias_set
+            )
+            if looks_like_futures:
+                votes[label] = "WAIT"
+                continue
             try:
                 if interval == "3m":
                     one_min_df = yf.Ticker(market_ticker).history(period=period, interval="1m")

@@ -770,6 +770,11 @@ Return JSON only:
                 return await asyncio.to_thread(call_local_brain, liquidity_prompt, secondary_model, self.timeout)
 
             async def _run_vision():
+                # Honor config.USE_VISION. The local vision models (moondream,
+                # llava) cannot reliably read TradingView charts and waste
+                # ~20s per swarm cycle returning generic descriptions.
+                if not getattr(config, "USE_VISION", False):
+                    return None, "", "Vision agent disabled by config — using technical indicators only."
                 if not chart_image_base64:
                     return None, "", "Vision agent: no chart image supplied."
                 vr = await asyncio.to_thread(
@@ -1175,7 +1180,10 @@ JSON schema only:
         output: LLMAnalysisOutput,
         vision_result: Optional[Dict[str, Any]],
     ) -> LLMAnalysisOutput:
-        if not vision_result:
+        # When vision is disabled, vision_result is None and we MUST NOT apply
+        # any penalty. The local VLMs (moondream/llava) cannot read TradingView
+        # charts and would otherwise downgrade every trade.
+        if not vision_result or not getattr(config, "USE_VISION", False):
             return output
 
         vision_signal = str(vision_result.get("signal") or "NONE").upper()
@@ -1206,7 +1214,14 @@ JSON schema only:
         context = session_context or {}
         if output.action == SignalAction.HOLD:
             return output
-        if context.get("is_holiday_us") or context.get("is_holiday_hk"):
+        # FUTURES BYPASS: CME / Apex micro futures trade through US partial
+        # holidays. Only force HOLD when futures are actually closed (hard
+        # close days like Christmas / Thanksgiving). active_markets always
+        # includes "Futures" when CME is open.
+        active_markets = [str(m).lower() for m in (context.get("active_markets") or [])]
+        futures_open_on_holiday = any("futures" in m for m in active_markets)
+        hard_close = bool(context.get("is_hard_close") or context.get("equities_and_futures_closed"))
+        if (context.get("is_holiday_us") or context.get("is_holiday_hk")) and (hard_close or not futures_open_on_holiday):
             holiday_name = str(context.get("holiday_name") or "Market holiday")
             output.action = SignalAction.HOLD
             output.confidence = ConfidenceLevel.LOW

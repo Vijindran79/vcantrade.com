@@ -399,7 +399,9 @@ MT5_SYMBOL_MAP = {
     "AAPL": "AAPL",
 }
 MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream:latest")
-MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "True").lower() == "true"
+# Hunter thread is vision-based; the local vision models cannot reliably read
+# trading charts. Disabled by default. Re-enable only with a stronger VLM.
+MULTI_ASSET_ENABLED = os.getenv("MULTI_ASSET_ENABLED", "False").lower() == "true"
 
 # ===== EXECUTION MODE SWITCH =====
 # "TV_DESKTOP" = Connect to TradingView Desktop via CDP on port 9222 (ghost JS injection)

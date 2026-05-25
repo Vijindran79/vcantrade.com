@@ -1941,13 +1941,18 @@ class CloudScanner:
                 ).upper()
 
                 # REGIME GUARD: Don't allow counter-trend liquidity sweeps in strong regimes
-                regime = str(market_data.indicators.get("REGIME", "")).upper()
+                # The regime detector data lives in signal.metadata["regime"], not
+                # in market_data.indicators (which only carries the formatted label).
+                regime_payload = signal.metadata.get("regime") or {}
+                regime = str(regime_payload.get("regime") or market_data.indicators.get("REGIME", "")).upper()
                 if "LIQUIDITY" in signal.signal_type:
                     if regime == "STRONG_BULL" and technical_action == "SELL":
                         logger.warning("[REGIME] REJECTED: SELL %s in STRONG_BULL regime", signal.ticker)
+                        self._emit_status(signal.ticker, "trade_rejected")
                         continue
                     if regime == "STRONG_BEAR" and technical_action == "BUY":
                         logger.warning("[REGIME] REJECTED: BUY %s in STRONG_BEAR regime", signal.ticker)
+                        self._emit_status(signal.ticker, "trade_rejected")
                         continue
                 # If the model collapses to HOLD while the deterministic scanner
                 # has a strong directional setup, keep the trade candidate alive.
@@ -2072,7 +2077,31 @@ class CloudScanner:
                     self._emit_status(signal.ticker, f"brain_fallback:{brain_used}")
                 self._emit_status(signal.ticker, f"brain_verdict:{brain_verdict}")
                 if brain_verdict != approved_brain_verdict:
-                    if (
+                    # FAST-PATH BYPASS: when the deterministic scanner already
+                    # has a regime-aligned high-strength signal AND the swarm
+                    # has agreed (analysis.action == technical_action), the
+                    # final brain veto is just the same local model giving a
+                    # contradictory answer. Trust the swarm + regime instead.
+                    regime_aligned = (
+                        (regime in ("STRONG_BULL", "LEAN_BULL") and analysis.action.value == "BUY")
+                        or (regime in ("STRONG_BEAR", "LEAN_BEAR") and analysis.action.value == "SELL")
+                    )
+                    fast_path = (
+                        signal.strength >= 0.82
+                        and analysis.action.value == technical_action
+                        and "LIQUIDITY" in signal.signal_type
+                        and regime_aligned
+                    )
+                    if fast_path:
+                        logger.info(
+                            "[FAST-PATH] %s %s strength=%.2f regime=%s — bypassing brain re-vote",
+                            analysis.action.value,
+                            signal.ticker,
+                            signal.strength,
+                            regime,
+                        )
+                        brain_verdict = approved_brain_verdict
+                    elif (
                         self._brain_unavailable(brain_decision)
                         and signal.strength >= 0.60
                         and confidence_score >= float(getattr(config, "SWARM_CONFIDENCE_THRESHOLD", 0.60))
