@@ -336,6 +336,27 @@ TRADINGVIEW_SYMBOL_MAP = {
 # Pepperstone UK DEMO account — Spread Betting (GBP) uses _SB suffix.
 # Chart tabs show: Crude_SB, NAS100_SB, US500_SB
 MT5_SYMBOL_MAP = {
+    # ===== Direct Apex micro futures aliases (executor receives these) =====
+    # Pepperstone Spread Betting account uses _SB suffix on CFD/index symbols.
+    "MNQ1!": "NAS100_SB",
+    "MES1!": "US500_SB",
+    "MCL1!": "Crude_SB",
+    "MGC1!": "Gold_SB",
+    "MYM1!": "DJ30_SB",
+    "M2K1!": "RUS2000_SB",
+    "M6A1!": "AUDUSD",
+    "M6E1!": "EURUSD",
+    "MBT1!": "BTCUSD",
+    "MET1!": "ETHUSD",
+    # Plain root tickers
+    "MNQ": "NAS100_SB",
+    "MES": "US500_SB",
+    "MCL": "Crude_SB",
+    "MGC": "Gold_SB",
+    "MYM": "DJ30_SB",
+    "M2K": "RUS2000_SB",
+    "MBT": "BTCUSD",
+    "MET": "ETHUSD",
     # ===== TradingView futures aliases -> Pepperstone broker symbols =====
     # These are the symbols the scanner receives - map them FIRST.
     "CL=F": "Crude_SB",
