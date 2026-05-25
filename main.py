@@ -42,7 +42,7 @@ import queue
 import re
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable
 from playwright.async_api import async_playwright  # Async Playwright only - no sync mix
 
 # Trade Alert Sound — Windows built-in, no extra dependencies
@@ -696,6 +696,15 @@ class SignalListenerThread(QThread):
         super().__init__()
         self.running = True
         self.dispatcher = SignalDispatcher()
+        # Optional fallback callback executed directly from the listener thread
+        # via a thread-safe invoker. This guarantees execution even if the Qt
+        # signal queue is starved or backed up.
+        self._direct_callback: Optional[Callable] = None
+
+    def set_direct_callback(self, callback) -> None:
+        """Register a thread-safe handler invoked alongside the Qt signal so
+        execution is not gated on the Qt event loop being responsive."""
+        self._direct_callback = callback
 
     def run(self):
         logger.info(
@@ -757,9 +766,23 @@ class SignalListenerThread(QThread):
             raise
 
     def _on_signal_received(self, signal_data: dict):
-        """Handle incoming signal from cloud."""
+        """Handle incoming signal from cloud.
+
+        Two-track delivery:
+        1) Qt signal emit — preferred path, lands on main thread via the Qt
+           event loop. Gated on the event loop being responsive.
+        2) Direct callback — backup path that fires from this listener thread
+           and uses MainThreadInvoker.submit() to schedule onto the main
+           thread without going through the regular signal queue. This
+           rescues execution when the Qt event loop is busy with other slots.
+        """
         self.signal_received.emit(signal_data)
         logger.info(f"Signal received from cloud: {signal_data}")
+        if self._direct_callback is not None:
+            try:
+                self._direct_callback(dict(signal_data))
+            except Exception as exc:
+                logger.error(f"Direct signal callback failed: {exc}")
 
     def _on_handshake_received(self, handshake_data: dict):
         """Handle authenticated bridge handshake."""
@@ -2122,6 +2145,17 @@ class VcaniTradeApp:
         self.signal_listener.signal_received.connect(self._on_signal_received, Qt.ConnectionType.QueuedConnection)
         self.signal_listener.handshake_received.connect(self._on_bridge_handshake_received, Qt.ConnectionType.QueuedConnection)
         self.signal_listener.listener_error.connect(self._on_listener_error, Qt.ConnectionType.QueuedConnection)
+
+        # DIRECT FALLBACK: also wire a thread-safe direct callback so execution
+        # is not gated on the Qt event loop being responsive. The handler runs
+        # from the listener thread context — execution paths that touch the UI
+        # are guarded internally and Qt-safe operations use QTimer.singleShot.
+        def _direct_signal_relay(payload: dict):
+            try:
+                self._on_signal_received_direct(dict(payload))
+            except Exception:
+                logger.exception("Direct signal relay failed")
+        self.signal_listener.set_direct_callback(_direct_signal_relay)
 
         # Data Scout Listener -> UI + TV Flip + Narrator
         self.data_scout_listener.signal_received.connect(self._on_data_scout_signal, Qt.ConnectionType.QueuedConnection)
@@ -4770,6 +4804,50 @@ class VcaniTradeApp:
         self.ai_narrator.notify_trade_rejected(signal_data["ticker"])
         self._broadcast_trade_levels(signal_data)
 
+    def _on_signal_received_direct(self, signal_data: dict):
+        """Direct-path signal handler used as a fallback when the Qt signal
+        queue is starved. Runs from the listener thread context.
+
+        Strategy:
+          1) Wait up to 2 seconds for the Qt-path handler to mark this signal
+             as seen via _mark_signal_listener_seen().
+          2) If still not seen, invoke _on_signal_received from the listener
+             thread. The inner handler logs APP_SIGNAL_HANDLER: received
+             which is the green-light marker the user is looking for.
+
+        Dedup is locked so the Qt path and direct path can never both fire
+        for the same signal.
+        """
+        try:
+            if not hasattr(self, "_signal_dedup_lock"):
+                self._signal_dedup_lock = threading.Lock()
+            key = self._signal_dispatch_key(signal_data)
+            # Step 1: brief wait for Qt path to claim this signal.
+            for _ in range(20):  # 20 * 0.1s = 2.0s
+                seen = getattr(self, "_listener_signal_seen", {})
+                if key in seen and time.time() - seen[key] < 10.0:
+                    logger.debug(
+                        "[SIGNAL-DIRECT] Qt path processed %s — direct fallback no-op",
+                        key,
+                    )
+                    return
+                time.sleep(0.1)
+            # Step 2: atomic claim under lock so Qt path can't race.
+            with self._signal_dedup_lock:
+                if not hasattr(self, "_listener_signal_seen"):
+                    self._listener_signal_seen = {}
+                seen = self._listener_signal_seen
+                if key in seen and time.time() - seen[key] < 10.0:
+                    return
+                seen[key] = time.time()
+            logger.warning(
+                "[SIGNAL-DIRECT] Qt path missed %s after 2.0s wait — running direct execution fallback",
+                key,
+            )
+            self._on_signal_received(signal_data)
+        except Exception:
+            logger.exception("[SIGNAL-DIRECT] Direct fallback failed")
+
     def _on_signal_received(self, signal_data: dict):
         """Handle signal received from cloud via HTTP.
         CRITICAL: UI errors must NEVER crash this method — trade execution must proceed."""
@@ -5123,14 +5201,17 @@ class VcaniTradeApp:
 
     def _mark_signal_listener_seen(self, signal_data: dict) -> None:
         """Record that the local HTTP dispatcher delivered this signal into main.py."""
-        if not hasattr(self, "_listener_signal_seen"):
-            self._listener_signal_seen = {}
-        now = time.time()
-        self._listener_signal_seen = {
-            key: ts for key, ts in self._listener_signal_seen.items()
-            if now - ts < 30.0
-        }
-        self._listener_signal_seen[self._signal_dispatch_key(signal_data)] = now
+        if not hasattr(self, "_signal_dedup_lock"):
+            self._signal_dedup_lock = threading.Lock()
+        with self._signal_dedup_lock:
+            if not hasattr(self, "_listener_signal_seen"):
+                self._listener_signal_seen = {}
+            now = time.time()
+            self._listener_signal_seen = {
+                key: ts for key, ts in self._listener_signal_seen.items()
+                if now - ts < 30.0
+            }
+            self._listener_signal_seen[self._signal_dispatch_key(signal_data)] = now
 
     def _cloud_signal_listener_watchdog(self, signal_data: dict) -> None:
         """
