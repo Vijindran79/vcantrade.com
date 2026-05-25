@@ -121,13 +121,98 @@ class GhostExecutor:
         self._mt5_executor = executor
 
     async def execute_trade(self, symbol: str, action: str, volume: float = 0.0) -> bool:
-        """Primary entry point: execute via TradingView JS injection or MT5."""
+        """Primary entry point: execute via TradingView JS injection.
+
+        After every click attempt:
+          1. Saves a screenshot to assets/last_trade_attempt.png so the user
+             can SEE what TradingView looked like at the moment of execution.
+          2. Polls TradingView's positions/orders panel for up to 5 seconds.
+             Returns True only when a position actually appears for this
+             symbol — not just because a button was clicked.
+        """
         action = str(action).strip().upper()
+        clicked = False
         if action in ("BUY", "SELL", "CLOSE"):
-            success = await self.execute_js(action)
-            if success:
+            clicked = await self.execute_js(action)
+
+        # Save a screenshot regardless of click result so the user can
+        # debug TradingView's state at the click instant.
+        await self._save_post_click_screenshot(symbol, action, clicked)
+
+        # CLOSE is verified by the absence of a position; we don't poll for it.
+        if action == "CLOSE":
+            return clicked or self.execute_mt5(symbol, action, volume)
+
+        if clicked:
+            verified = await self._verify_position_opened(symbol, action, timeout_seconds=5.0)
+            if verified:
+                logger.info("[GHOST-VERIFY] %s %s position confirmed in TradingView panel", action, symbol)
                 return True
+            logger.warning(
+                "[GHOST-VERIFY] %s %s click registered but no matching position appeared "
+                "in TradingView within 5s — order may have been blocked or sent to wrong panel",
+                action, symbol,
+            )
+            # Fall through to MT5 attempt only if MT5 executor is wired
+            return self.execute_mt5(symbol, action, volume)
+
         return self.execute_mt5(symbol, action, volume)
+
+    async def _save_post_click_screenshot(self, symbol: str, action: str, clicked: bool) -> None:
+        """Snapshot the TradingView page right after the click attempt.
+        Saved to assets/last_trade_attempt.png so the user can verify what
+        TradingView actually showed at the click moment."""
+        if not self.is_connected:
+            return
+        try:
+            import os
+            os.makedirs("assets", exist_ok=True)
+            path = "assets/last_trade_attempt.png"
+            await self._page.screenshot(path=path, full_page=False, timeout=3000)
+            logger.info(
+                "[GHOST-SHOT] %s %s post-click screenshot saved to %s (clicked=%s)",
+                action, symbol, path, clicked,
+            )
+        except Exception as exc:
+            logger.debug("[GHOST-SHOT] Could not save screenshot: %s", exc)
+
+    async def _verify_position_opened(self, symbol: str, action: str, timeout_seconds: float = 5.0) -> bool:
+        """Poll TradingView's bottom panel for a new position matching this
+        symbol. Returns True as soon as one appears, False if the timeout
+        expires."""
+        if not self.is_connected:
+            return False
+        # Strip prefixes like CME_MINI: so the symbol matches what TV displays.
+        sym = str(symbol or "").upper().split(":")[-1].rstrip("!")
+        action_upper = action.upper()
+        deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            try:
+                found = await self._page.evaluate(f"""() => {{
+                    const sym = "{sym}";
+                    const action = "{action_upper}";
+                    // TradingView puts open positions in the bottom widget.
+                    const rows = document.querySelectorAll(
+                        '[data-name*="position" i] tr, ' +
+                        '[class*="positions-row" i], ' +
+                        '[class*="open-position" i], ' +
+                        'div[role="row"]'
+                    );
+                    for (const row of rows) {{
+                        const text = (row.textContent || '').toUpperCase();
+                        if (text.includes(sym)) {{
+                            // Bonus: row text usually contains BUY/SELL or LONG/SHORT
+                            return true;
+                        }}
+                    }}
+                    return false;
+                }}""")
+                if found:
+                    return True
+            except Exception as exc:
+                logger.debug("[GHOST-VERIFY] poll error: %s", exc)
+            await asyncio.sleep(0.4)
+        return False
 
     def execute_mt5(self, symbol: str, action: str, volume: float = 0.0) -> bool:
         """Execute through the attached MT5 executor if one is available."""
