@@ -1,0 +1,3 @@
+config.py: OK
+core/brain_swarm.py: OK
+core/symbol_mapper.py: OK

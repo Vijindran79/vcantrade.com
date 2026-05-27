@@ -602,8 +602,18 @@ def main():
         
         logger.info("[BOOT] VcaniTrade AI Engine successfully bound to graphical application thread.")
         
-        # STEP 3: RELEASE CONTROL TO THE PYQT GRAPHICAL EVENT LOOP
-        sys.exit(app.exec())
+        # STEP 3: START THE ENGINE (starts threads, monitoring, etc.)
+        engine.start()
+        
+        # STEP 4: RELEASE CONTROL TO THE PYQT GRAPHICAL EVENT LOOP
+        # This blocks until the application exits (e.g., user closes the window)
+        exit_code = app.exec()
+        
+        # STEP 5: CLEANUP WHEN EVENT LOOP ENDS
+        logger.info("[SHUTDOWN] Event loop ended, stopping engine...")
+        engine.stop()
+        
+        sys.exit(exit_code)
         
     except Exception as e:
         logger.critical(f"[BOOT-CRASH] Critical failure during unified system startup loop: {str(e)}")
