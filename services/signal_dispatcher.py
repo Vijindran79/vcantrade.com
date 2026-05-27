@@ -40,6 +40,7 @@ class SignalDispatcher:
         self.app.router.add_get('/api/health', self.health_check)
         self.app.router.add_get('/api/status', self.status_check)
         
+        self.started_at = datetime.utcnow()
         self.latest_signal: Optional[dict] = None
         self.signal_count = 0
         self.last_signal_time: Optional[datetime] = None
@@ -254,12 +255,17 @@ class SignalDispatcher:
     
     async def status_check(self, request: web.Request) -> web.Response:
         """Status check with signal statistics."""
+        now = datetime.utcnow()
         return web.json_response({
             "status": "running",
             "signal_count": self.signal_count,
             "latest_signal": self.latest_signal,
             "last_signal_time": self.last_signal_time.isoformat() if self.last_signal_time else None,
             "last_handshake_time": self.last_handshake_time.isoformat() if self.last_handshake_time else None,
+            "started_at": self.started_at.isoformat(),
+            "uptime_seconds": int((now - self.started_at).total_seconds()),
+            "seconds_since_last_signal": int((now - self.last_signal_time).total_seconds()) if self.last_signal_time else None,
+            "seconds_since_last_handshake": int((now - self.last_handshake_time).total_seconds()) if self.last_handshake_time else None,
             "confidence_threshold": config.SWARM_CONFIDENCE_THRESHOLD,
             "incubation_floor": getattr(config, "SWARM_INCUBATION_FLOOR", 60.0),
             "high_priority_threshold": getattr(config, "SWARM_HIGH_PRIORITY_THRESHOLD", 85.0),
