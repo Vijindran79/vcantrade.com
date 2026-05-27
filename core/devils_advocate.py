@@ -91,7 +91,7 @@ class DevilsAdvocate:
     def __init__(self):
         self.base_url = normalize_ollama_base_url(config.OLLAMA_BASE_URL)
         self.model = config.OLLAMA_MODEL
-        self.timeout = config.LLM_TIMEOUT
+        self.timeout = config.OLLAMA_TIMEOUT
         self.challenge_count = 0
         self.total_challenges = 0
         logger.info("[DEVIL] Devil's Advocate agent initialized")
