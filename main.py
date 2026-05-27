@@ -41,7 +41,7 @@ from services.signal_dispatcher import SignalDispatcher
 from threads.cloud_scanner import CloudScannerThread
 from threads.signal_listener import SignalListenerThread
 from threads.data_scout_listener import DataScoutListenerThread
-from ui.dashboard import Dashboard
+from ui.dashboard import CommandCenter as Dashboard
 from ui.ai_narrator import AINarratorOverlay as AINarrator
 from ui.lion_switchboard import LionSwitchboardDialog as LionSwitchboard
 from PyQt6.QtCore import QObject, pyqtSignal
