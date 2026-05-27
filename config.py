@@ -18,6 +18,9 @@ WINDOW_SETTLE_TIME = 1.5       # Seconds to wait for window focus
 MOUSE_HUMAN_DELAY_MIN = 0.8    # Min reaction time
 MOUSE_HUMAN_DELAY_MAX = 1.6    # Max reaction time
 
+# ===== STRUCTURAL AI FEATURE FLAGS =====
+USE_VISION = False  # Explicitly matches 'Vision: Disabled' initialization profile
+
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
 # If only one symbol, the scanner locks onto it and executes directly.
