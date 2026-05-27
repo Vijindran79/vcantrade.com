@@ -242,14 +242,14 @@ def call_local_brain(
             logger.info("[OK] Local brain responded with SIGNAL line")
             return signal_line
         
-        logger.info(f"[OK] Local brain responded successfully")
+        logger.info("[OK] Local brain responded successfully")
         return parse_json_response(raw_response)
     except requests.exceptions.ConnectionError:
         logger.error("[FAIL] Cannot connect to Ollama! Is Ollama running on localhost:11434?")
         logger.error("   Run: ollama serve")
         return {"error": "Ollama not running"}
     except Exception as e:
-        logger.error(f"[FAIL] Local AI Error: {e}")
+        logger.error("[FAIL] Local AI Error: %s", e)
         return {"error": str(e)}
 
 
@@ -633,7 +633,7 @@ def parse_json_response(raw: str) -> dict:
             json_str = raw[start:end]
             return json.loads(json_str)
         except (ValueError, json.JSONDecodeError):
-            logger.debug(f"Non-JSON LLM response (non-critical): {raw[:200]}")
+            logger.debug("Non-JSON LLM response (non-critical): %s", raw[:200])
             return {"error": "Invalid JSON", "raw": raw}
 
 
@@ -646,12 +646,23 @@ class OllamaSwarmConsensus:
         self.timeout = max(int(getattr(config, "OLLAMA_TIMEOUT", 180)), 180)
         self.devils_advocate = DevilsAdvocate()
         self.mia = MarketIntelligenceAgent()
-        logger.info(f"[BRAIN] Local Brain initialized: {self.model} at {self.base_url}")
+        logger.info("[BRAIN] Local Brain initialized: %s at %s", self.model, self.base_url)
         if _is_openrouter_url(self.base_url) and _looks_like_local_ollama_model(self.model):
             logger.error(
                 "[BRAIN] Misconfigured local brain: %s is an Ollama model, but OLLAMA_BASE_URL points to OpenRouter.",
                 self.model,
             )
+    
+    def resolve_active_model_string(self, targeted_model: str) -> str:
+        """Safely converts descriptive quantized strings to basic continuous system aliases."""
+        clean_string = targeted_model.lower()
+        if "qwen2.5-coder" in clean_string:
+            return "qwen2.5-coder:1.5b"
+        if "qwen2.5" in clean_string:
+            return "qwen2.5:1.5b" # Strip out custom extensions to avoid 404 registry faults
+        if "gemma" in clean_string:
+            return "gemma:2b"
+        return "qwen2.5:1.5b" # Master fallback prediction engine node
     
     def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
         """Fallback strike gate used when the cloud brain is unavailable."""
@@ -735,7 +746,7 @@ Return JSON only:
         verdicts = []
         base_url = "http://127.0.0.1:11434/api/generate"
         
-        logger.info(f"[SWARM-ENGINE] Starting sequential model computation matrix for ticker: {ticker}")
+        logger.info("[SWARM-ENGINE] Starting sequential model computation matrix for ticker: %s", ticker)
         
         # 8-SECOND THREAD-GATE PROTECTION: Prevents VRAM allocation hangs
         THREAD_GATE_TIMEOUT = 8.0  # 8 seconds max per model
@@ -755,13 +766,13 @@ Return JSON only:
                             if response.status == 200:
                                 res_json = await response.json()
                                 verdicts.append(res_json.get("response", ""))
-                                logger.info(f"[SWARM-ENGINE] Model node {model} resolved successfully.")
+                                logger.info("[SWARM-ENGINE] Model node %s resolved successfully.", model)
                 
                 except asyncio.TimeoutError:
-                    logger.error(f"[SWARM-ENGINE] Model node {model} timed out after {THREAD_GATE_TIMEOUT}s. Advancing engine loop.")
+                    logger.error("[SWARM-ENGINE] Model node %s timed out after %ss. Advancing engine loop.", model, THREAD_GATE_TIMEOUT)
                     continue
                 except Exception as e:
-                    logger.error(f"[SWARM-ENGINE] Failure on node {model}: {str(e)}")
+                    logger.error("[SWARM-ENGINE] Failure on node %s: %s", model, str(e))
                     continue
         
         # Parse the compiled verdicts array and generate a unified risk matrix output...

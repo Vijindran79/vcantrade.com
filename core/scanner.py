@@ -116,6 +116,16 @@ class Scanner:
             return False
         return self._engine_lock.is_locked_for(ticker)
     
+    def verify_correlation_exposure_allowed(self, target_ticker: str, current_positions: list) -> bool:
+        """Blocks multi-index allocation patterns if an overlay contract pair is active in the trade ledger."""
+        index_cluster = ["MNQ", "MES", "NAS100", "US500"]
+        if any(idx in target_ticker.upper() for idx in index_cluster):
+            for position in current_positions:
+                if any(idx in position.get("ticker", "").upper() for idx in index_cluster):
+                    logger.warning(f"[CORRELATION-GATE] Denied entry for {target_ticker}. Asset category cluster match running.")
+                    return False
+        return True
+    
     def scan(self) -> List[TechnicalSignal]:
         """Main scanning loop with lock respect."""
         signals = []

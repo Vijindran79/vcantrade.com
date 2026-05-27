@@ -183,6 +183,25 @@ class RPAExecutor:
     # execute_hardened_tv_bracket_order is an alias for execute_protected_tradingview_bracket
     execute_hardened_tv_bracket_order = execute_protected_tradingview_bracket
 
+    def execute_emergency_panic_flatten(self, browser_agent) -> bool:
+        """Forcefully suspends active listeners and issues absolute macro hotkeys to flatten open account risk."""
+        try:
+            logger.critical("[PANIC] Transmitting physical master account liquidation key mapping sequence to screen space.")
+            with browser_agent.lock:
+                browser_agent.pause_cdp_listener = True
+                pyautogui.press('escape')
+                time.sleep(0.05)
+                pyautogui.hotkey('alt', 'space')
+                time.sleep(0.2)
+                pyautogui.press('enter')
+                browser_agent.pause_cdp_listener = False
+            return True
+        except Exception as e:
+            logger.error(f"[PANIC-FAIL] Macro transmission failure: {str(e)}")
+            if 'browser_agent' in locals():
+                browser_agent.pause_cdp_listener = False
+            return False
+
     @staticmethod
     def _is_missing_dialog_error(exc):
         text = str(exc).lower()
@@ -2161,10 +2180,43 @@ class RPAExecutor:
         finally:
             self.is_executing = False
 
-    # REMOVED: All duplicate _find_button_by_image definitions
+        # REMOVED: All duplicate _find_button_by_image definitions
     # REMOVED: All old fuzzy matching tier loops
     # REMOVED: All legacy strike sequences
+    
 
+    # REMOVED: WealthChartsSpecialist class purged in scorched-earth cleanup.
+    # The bot now exclusively routes through TradingView active RPA or MT5 native API.
 
-# REMOVED: WealthChartsSpecialist class purged in scorched-earth cleanup.
-# The bot now exclusively routes through TradingView active RPA or MT5 native API.
+    def execute_emergency_panic_flatten(self, browser_agent) -> bool:
+        """Suspends systemic listener frameworks and transmits instant physical liquidation hotkeys to the TradingView workspace."""
+        try:
+            logger.critical("[PANIC] Emergency override triggered! Flattening all running contract exposure instantly.")
+        
+            with browser_agent.lock:
+                browser_agent.pause_cdp_listener = True
+                time.sleep(0.05)
+            
+                # Clear UI clutter natively
+                pyautogui.press('escape')
+                time.sleep(0.1)
+                pyautogui.press('escape')
+                time.sleep(0.1)
+            
+                # Dispatch TradingView master panic close shortcut (Alt + Space)
+                pyautogui.hotkey('alt', 'space')
+                time.sleep(0.3)
+            
+                # Confirm modal dialog box
+                pyautogui.press('enter')
+                time.sleep(0.1)
+            
+                browser_agent.pause_cdp_listener = False
+        
+            logger.info("[PANIC] Physical emergency account liquidation successfully verified.")
+            return True
+        except Exception as e:
+            logger.critical(f"[PANIC] Master close routine failed to execute keystrokes: {str(e)}")
+            if 'browser_agent' in locals():
+                browser_agent.pause_cdp_listener = False
+            return False

@@ -166,58 +166,14 @@ SYMBOL_MAP = {
 
 # ----- MT5 Symbol Map (TradingView alias -> Exact MT5 terminal name) -----
 MT5_SYMBOL_MAP = {
-    # Apex micro futures -> Pepperstone Spread Betting symbols
-    "MNQ1!": "NAS100_SB",
-    "MES1!": "US500_SB",
-    "MCL1!": "Crude_SB",
-    "MGC1!": "Gold_SB",
-    "MYM1!": "DJ30_SB",
-    "M2K1!": "RUS2000_SB",
-    "M6A1!": "AUDUSD",
-    "M6E1!": "EURUSD",
-    "MBT1!": "BTCUSD",
-    "MET1!": "ETHUSD",
-    # Continuous contracts -> MT5 symbols
-    "CL=F": "Crude_SB",
-    "GC=F": "Gold_SB",
-    "NQ=F": "NAS100_SB",
-    "ES=F": "US500_SB",
-    "YM=F": "DJ30_SB",
-    "RTY=F": "RUS2000_SB",
-    # Plain roots -> MT5 symbols
-    "MNQ": "NAS100_SB",
-    "MES": "US500_SB",
-    "MCL": "Crude_SB",
-    "MGC": "Gold_SB",
-    "MYM": "DJ30_SB",
-    "M2K": "RUS2000_SB",
-    "M6A": "AUDUSD",
-    "M6E": "EURUSD",
-    "MBT": "BTCUSD",
-    "MET": "ETHUSD",
-    # TradingView prefixed forms
-    "CME_MINI:MNQ1!": "NAS100_SB",
-    "CME_MINI:MES1!": "US500_SB",
-    "NYMEX:MCL1!": "Crude_SB",
-    "COMEX:MGC1!": "Gold_SB",
-    "CBOT_MINI:MYM1!": "DJ30_SB",
-    "CME_MINI:M2K1!": "RUS2000_SB",
-    # Yahoo-style aliases
-    "CL1!": "Crude_SB",
-    "GC1!": "Gold_SB",
-    "NQ1!": "NAS100_SB",
-    "ES1!": "US500_SB",
-    # Pepperstone exact terminal names (self-references)
-    "NAS100_SB": "NAS100_SB",
-    "US500_SB": "US500_SB",
-    "Crude_SB": "Crude_SB",
-    "Gold_SB": "Gold_SB",
-    "DJ30_SB": "DJ30_SB",
-    "RUS2000_SB": "RUS2000_SB",
-    "AUDUSD": "AUDUSD",
-    "EURUSD": "EURUSD",
-    "BTCUSD": "BTCUSD",
-    "ETHUSD": "ETHUSD",
+    "CME_MINI:MNQ1!": "NAS100_SB",   # Nasdaq E-Mini Index Connection
+    "CME_MINI:MES1!": "US500_SB",    # S&P 500 E-Mini Index Connection
+    "CL=F": "Crude_SB",              # Standard West Texas Intermediate
+    "MCL1!": "Crude_SB",             # Micro Crude Future Mapping Override
+    "NYMEX:MCL1!": "Crude_SB",       
+    "GC=F": "Gold_SB",               # Standard Comex Spot Gold
+    "MGC1!": "Gold_SB",              # Micro Gold Future Mapping Override
+    "COMEX:MGC1!": "Gold_SB"
 }
 
 # ----- TradingView Symbol Map (Any alias -> Exact TradingView chart symbol) -----
@@ -317,10 +273,10 @@ SYMBOL_FUZZY_TERMS = {
 
 # ===== ACTIVE WATCHLIST =====
 ACTIVE_WATCHLIST = [
-    "CME_MINI:MNQ1!",   # Nasdaq Futures Index
-    "CME_MINI:MES1!",   # S&P 500 Futures Index
-    "CL=F",             # Continuous West Texas Crude Oil Index
-    "GC=F"              # Continuous Comex Spot Gold Index
+    "CME_MINI:MNQ1!",
+    "CME_MINI:MES1!",
+    "MCL1!",
+    "MGC1!"
 ]
 
 # ===== MULTI-ASSET HUNTER =====

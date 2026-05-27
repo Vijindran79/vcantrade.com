@@ -336,6 +336,24 @@ class RiskGovernor:
             ]
         }
 
+    def validate_bracket_risk_symmetry(self, entry: float, sl: float, tp: float) -> bool:
+        """Enforces an institutional minimum 1:1.5 Risk-to-Reward profile gate."""
+        try:
+            risk_distance = abs(entry - sl)
+            reward_distance = abs(tp - entry)
+            if risk_distance == 0: return False
+            
+            rr_ratio = reward_distance / risk_distance
+            if rr_ratio < 1.5:
+                logger.warning(f"[RISK-REJECT] Asymmetric profile detected: {round(rr_ratio, 2)}x below 1.5x minimum baseline.")
+                return False
+                
+            logger.info(f"[RISK-PASS] Parameter symmetry checked clean at {round(rr_ratio, 2)}x.")
+            return True
+        except Exception as e:
+            logger.error(f"[RISK-ERR] Failed to compute risk matrix boundaries: {str(e)}")
+            return False
+    
     def get_strongest_signal(self, signals: List[Dict]) -> Optional[Dict]:
         """
         From multiple correlated signals, pick the strongest one.
@@ -393,7 +411,7 @@ class RiskGovernor:
         )
         
         return best_signals[0] if best_signals else None
-
+    
     def _confidence_to_float(self, confidence: str) -> float:
         """Convert confidence string to numeric."""
         mapping = {

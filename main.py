@@ -44,8 +44,44 @@ from threads.data_scout_listener import DataScoutListenerThread
 from ui.dashboard import Dashboard
 from ui.ai_narrator import AINarratorOverlay as AINarrator
 from ui.lion_switchboard import LionSwitchboardDialog as LionSwitchboard
+from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
+
+
+class AutomatedSignalBridge(QObject):
+    """Enforces strict, thread-safe cross-boundary slot execution using native PyQt asymmetric communication slots."""
+    execution_signal = pyqtSignal(dict)
+    panic_reset_signal = pyqtSignal()
+
+    def __init__(self, engine_context):
+        super().__init__()
+        self.engine = engine_context
+        # Connect our communication vectors safely to slots bound to the core graphical surface thread
+        self.execution_signal.connect(self._safe_slot_execute_trade)
+        self.panic_reset_signal.connect(self._safe_slot_execute_panic_purge)
+
+    def dispatch_execution_request(self, payload: dict):
+        """Background worker threads invoke this thread-safe gateway instead of touching visual properties directly."""
+        self.execution_signal.emit(payload)
+
+    def dispatch_panic_request(self):
+        """Thread-safe interface to pass emergency containment triggers down to the visual environment layout."""
+        self.panic_reset_signal.emit()
+
+    def _safe_slot_execute_trade(self, payload: dict):
+        """This routine executes safely on the primary graphical thread canvas."""
+        logger.info(f"[THREAD-SAFE-SLOT] Processing trade routing request safely for symbol: {payload.get('ticker')}")
+        try:
+            self.engine.process_validated_execution_path(payload)
+        except Exception as e:
+            logger.error(f"[SLOT-CRASH] Execution sequence failed inside slot handler: {str(e)}")
+
+    def _safe_slot_execute_panic_purge(self):
+        """This routine executes safely on the primary graphical thread canvas to handle panic flattens."""
+        logger.warning("[THREAD-SAFE-SLOT] Processing master emergency panic reset request safely.")
+        self.engine.execute_hardened_panic_reset()
+
 
 # =========================================================================
 # SINGLE-ASSET TARGET LOCK (ZERO OVERLAP)

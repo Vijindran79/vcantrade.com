@@ -8,6 +8,7 @@ name like MNQ-JUN26 instead of a TradingView/Yahoo symbol.
 from __future__ import annotations
 
 import re
+import config
 from dataclasses import asdict, dataclass
 
 
@@ -121,8 +122,8 @@ _TEXT_HINTS = (
     (("MICRO", "NASDAQ"), "MNQ"),
     (("NASDAQ", "100", "MICRO"), "MNQ"),
     (("NASDAQ", "100"), "NQ"),
-    (("MICRO", "S&P"), "MES"),
     (("MICRO", "SP500"), "MES"),
+    (("MICRO", "S&P"), "MES"),
     (("S&P", "500"), "ES"),
     (("MICRO", "CRUDE"), "MCL"),
     (("CRUDE", "OIL"), "CL"),
@@ -146,6 +147,8 @@ def translate_chart_symbol(raw_symbol: str | None) -> SymbolTranslation | None:
         return None
 
     instrument_name, family, tradingview_symbol, yahoo_symbol = details
+    # Use MT5_SYMBOL_MAP from config for mt5_symbol if available
+    mt5_symbol = config.MT5_SYMBOL_MAP.get(raw, raw)
     return SymbolTranslation(
         raw_symbol=raw,
         root=root,
@@ -153,7 +156,7 @@ def translate_chart_symbol(raw_symbol: str | None) -> SymbolTranslation | None:
         family=family,
         tradingview_symbol=tradingview_symbol,
         yahoo_symbol=yahoo_symbol,
-        mt5_symbol=raw,
+        mt5_symbol=mt5_symbol,
         confidence=0.95 if root in _canonicalize(raw) else 0.82,
     )
 
