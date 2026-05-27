@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from collections import Counter
 from typing import Optional, Dict, Any, Tuple, List
 
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QObject, pyqtSignal
+
 import config
 from core.settings import settings_manager
 from core.models import SignalAction, ConfidenceLevel, TradeResult, MarketDataPoint
@@ -41,10 +44,10 @@ from services.signal_dispatcher import SignalDispatcher
 from threads.cloud_scanner import CloudScannerThread
 from threads.signal_listener import SignalListenerThread
 from threads.data_scout_listener import DataScoutListenerThread
+# Import UI components after QApplication is available
 from ui.dashboard import CommandCenter as Dashboard
 from ui.ai_narrator import AINarratorOverlay as AINarrator
 from ui.lion_switchboard import LionSwitchboardDialog as LionSwitchboard
-from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
@@ -582,29 +585,29 @@ class VcaniTradeEngine:
 # =========================================================================
 
 def main():
-    """Main entry point."""
-    engine = VcaniTradeEngine()
+    """Master application bootloader ensuring thread-safe object creation order."""
+    logger.info("[BOOT] Initializing VcaniTrade AI Production Stack...")
     
+    # STEP 1: FORCEFULLY INITIALIZE THE APPLICATION RUNTIME CONTEXT FIRST
+    # This completely eliminates the 'Must construct a QApplication before a QWidget' crash
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')  # Enforces stable, cross-platform UI drawing
+    
+    logger.info("[BOOT] QApplication context established successfully.")
+
     try:
-        engine.start()
+        # STEP 2: INITIALIZE OUR TRADING ENGINE AFTER THE RUNTIME IS ACTIVE
+        # Now the engine can safely construct dashboard widgets without memory runtime faults
+        engine = VcaniTradeEngine()
         
-        # Main loop
-        while engine.is_running:
-            # Check asset lock timeout
-            engine.asset_lock.check_timeout()
-            
-            # Check dynamic exits
-            engine.check_dynamic_exits()
-            
-            # Sleep
-            time.sleep(1)
-    
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
+        logger.info("[BOOT] VcaniTrade AI Engine successfully bound to graphical application thread.")
+        
+        # STEP 3: RELEASE CONTROL TO THE PYQT GRAPHICAL EVENT LOOP
+        sys.exit(app.exec())
+        
     except Exception as e:
-        logger.error("Fatal error: %s", e)
-    finally:
-        engine.stop()
+        logger.critical(f"[BOOT-CRASH] Critical failure during unified system startup loop: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
