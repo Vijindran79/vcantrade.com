@@ -141,6 +141,14 @@ class GhostExecutor:
 
     def set_page(self, page):
         """Set an externally managed Playwright page (from main.py's browser agent)."""
+        try:
+            url = (getattr(page, "url", "") or "").lower() if page is not None else ""
+            if page is not None and "tradingview" not in url:
+                logger.warning("[GHOST] Ignoring non-TradingView controlled page: %s", url[:80])
+                return
+        except Exception:
+            logger.warning("[GHOST] Ignoring controlled page with unreadable URL")
+            return
         self._page = page
         self._connected = page is not None and not page.is_closed()
 
@@ -159,8 +167,15 @@ class GhostExecutor:
              symbol — not just because a button was clicked.
         """
         action = str(action).strip().upper()
+        if not self.is_connected or "tradingview" not in ((self._page.url or "").lower() if self._page else ""):
+            await self.connect()
         clicked = False
-        if action in ("BUY", "SELL", "CLOSE"):
+        if action in ("BUY", "SELL"):
+            if not await self._ensure_chart_symbol(symbol):
+                logger.error("[GHOST-NUKE] Refusing %s: TradingView chart is not confirmed as %s", action, symbol)
+                return self.execute_mt5(symbol, action, volume)
+            clicked = await self.execute_js(action)
+        elif action == "CLOSE":
             clicked = await self.execute_js(action)
 
         # Save a screenshot regardless of click result so the user can
@@ -210,14 +225,13 @@ class GhostExecutor:
         expires."""
         if not self.is_connected:
             return False
-        # Strip prefixes like CME_MINI: so the symbol matches what TV displays.
-        sym = str(symbol or "").upper().split(":")[-1].rstrip("!")
+        terms = self._symbol_terms(symbol)
         action_upper = action.upper()
         deadline = time.monotonic() + max(0.5, float(timeout_seconds))
         while time.monotonic() < deadline:
             try:
                 found = await self._page.evaluate(f"""() => {{
-                    const sym = "{sym}";
+                    const terms = {terms!r};
                     const action = "{action_upper}";
                     // TradingView puts open positions in the bottom widget.
                     const rows = document.querySelectorAll(
@@ -228,7 +242,7 @@ class GhostExecutor:
                     );
                     for (const row of rows) {{
                         const text = (row.textContent || '').toUpperCase();
-                        if (text.includes(sym)) {{
+                        if (terms.some((term) => term && text.includes(term))) {{
                             // Bonus: row text usually contains BUY/SELL or LONG/SHORT
                             return true;
                         }}
@@ -253,11 +267,182 @@ class GhostExecutor:
             logger.error("[GHOST-MT5] MT5 execution failed for %s %s: %s", action, symbol, exc)
             return False
 
+    def _symbol_for_tradingview_search(self, symbol: str) -> str:
+        """Map an internal ticker to the exact symbol TradingView should load."""
+        raw = str(symbol or "").strip().upper()
+        tv_map = getattr(config, "TRADINGVIEW_SYMBOL_MAP", {}) or {}
+        mapped = tv_map.get(raw)
+        if mapped:
+            return str(mapped).strip().upper()
+        if raw.endswith("=F"):
+            raw = raw[:-2]
+        if ":" in raw:
+            raw = raw.split(":", 1)[-1]
+        return raw
+
+    def _symbol_terms(self, symbol: str) -> list[str]:
+        """Build robust terms for chart and position matching."""
+        terms = []
+        for candidate in {str(symbol or "").strip().upper(), self._symbol_for_tradingview_search(symbol)}:
+            if not candidate:
+                continue
+            stripped = candidate.split(":", 1)[-1]
+            variants = {candidate, stripped, stripped.rstrip("!")}
+            root = "".join(ch for ch in stripped.rstrip("!") if ch.isalpha())
+            if root:
+                variants.add(root)
+            for item in variants:
+                item = item.strip().upper()
+                if len(item) >= 2 and item not in terms:
+                    terms.append(item)
+        return terms
+
+    async def _chart_has_symbol(self, symbol: str) -> bool:
+        """Confirm the visible chart header/search pill is on the requested symbol."""
+        if not self.is_connected:
+            return False
+        terms = self._symbol_terms(symbol)
+        try:
+            return bool(await self._page.evaluate(f"""() => {{
+                const terms = {terms!r};
+                const haystacks = [];
+                for (const el of document.querySelectorAll('button, [role="button"], [data-name], [aria-label], [title]')) {{
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    if (rect.top > 80 || rect.left > 260) continue;
+                    const label = [
+                        el.textContent || '',
+                        el.getAttribute('aria-label') || '',
+                        el.getAttribute('title') || '',
+                    ].join(' ').toUpperCase();
+                    if (label.includes('SYMBOL SEARCH') || terms.some((term) => term && label.includes(term))) {{
+                        haystacks.push(label);
+                    }}
+                }}
+                const text = haystacks.join(' ').toUpperCase();
+                return terms.some((term) => term && text.includes(term));
+            }}"""))
+        except Exception as exc:
+            logger.debug("[GHOST-NAV] Chart symbol check failed for %s: %s", symbol, exc)
+            return False
+
+    async def _ensure_chart_symbol(self, symbol: str) -> bool:
+        """Nuclear guard: never click Buy/Sell until the active chart matches."""
+        if await self._chart_has_symbol(symbol):
+            return True
+        target = self._symbol_for_tradingview_search(symbol)
+        logger.warning("[GHOST-NUKE] Chart mismatch before trade; switching TradingView to %s (from %s)", target, symbol)
+        if not await self.navigate_to_symbol(symbol):
+            return False
+        for _ in range(8):
+            await asyncio.sleep(0.5)
+            if await self._chart_has_symbol(symbol):
+                logger.info("[GHOST-NUKE] Chart confirmed for %s", target)
+                return True
+        logger.error("[GHOST-NUKE] Could not confirm TradingView chart switched to %s", target)
+        return False
+
     @property
     def is_connected(self) -> bool:
         try:
             return self._connected and self._page is not None and not self._page.is_closed()
         except Exception:
+            return False
+
+    async def _click_top_left_quote_button(self, action: str) -> bool:
+        """Click TradingView's chart quote BUY/SELL button, not drawing tools."""
+        if not self.is_connected or action not in {"BUY", "SELL"}:
+            return False
+
+        action_lower = action.lower()
+        try:
+            return bool(await self._page.evaluate(
+                """(action) => {
+                    const forbidden = /(long position|short position|drawing|measure|brush|trend line|fib|projection|forecast|toolbar|object tree|magnet|lock drawings|hide drawings)/i;
+                    const nodes = Array.from(document.querySelectorAll(
+                        'button, div[role="button"], span[role="button"], [data-name], [aria-label], [title]'
+                    ));
+                    let best = null;
+                    let bestScore = 0;
+
+                    for (const el of nodes) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 45 || rect.height < 24) continue;
+                        if (rect.top < 55 || rect.top > 155) continue;
+                        if (rect.left < 65 || rect.left > 430) continue;
+                        if (el.offsetParent === null) continue;
+
+                        const text = [
+                            el.innerText,
+                            el.textContent,
+                            el.getAttribute && el.getAttribute('aria-label'),
+                            el.getAttribute && el.getAttribute('title'),
+                            el.getAttribute && el.getAttribute('data-name'),
+                        ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+                        if (!text || forbidden.test(text)) continue;
+
+                        let score = 0;
+                        if (text === action) score += 50;
+                        if (text.includes(action)) score += 45;
+                        if (text.includes('quote')) score += 8;
+                        if (text.includes('order')) score += 8;
+
+                        const style = getComputedStyle(el);
+                        const colorText = [
+                            style.backgroundColor,
+                            style.borderColor,
+                            style.color,
+                        ].join(' ');
+                        if (action === 'buy' && /(41,\\s*98,\\s*255|33,\\s*150,\\s*243|59,\\s*130,\\s*246|0,\\s*122,\\s*255)/i.test(colorText)) {
+                            score += 20;
+                        }
+                        if (action === 'sell' && /(242,\\s*54,\\s*69|239,\\s*68,\\s*68|255,\\s*82,\\s*82)/i.test(colorText)) {
+                            score += 20;
+                        }
+
+                        let p = el.parentElement;
+                        while (p) {
+                            const pText = [
+                                p.getAttribute && p.getAttribute('data-name'),
+                                p.getAttribute && p.getAttribute('aria-label'),
+                                p.className,
+                            ].join(' ').toLowerCase();
+                            if (forbidden.test(pText)) {
+                                score = 0;
+                                break;
+                            }
+                            p = p.parentElement;
+                        }
+
+                        if (score > bestScore) {
+                            best = el;
+                            bestScore = score;
+                        }
+                    }
+
+                    if (!best || bestScore < 40) return false;
+                    best.scrollIntoView({ block: 'center', inline: 'center' });
+                    const rect = best.getBoundingClientRect();
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    best.focus && best.focus();
+
+                    const base = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
+                    if (window.PointerEvent) {
+                        best.dispatchEvent(new PointerEvent('pointerdown', { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                    }
+                    best.dispatchEvent(new MouseEvent('mousedown', base));
+                    if (window.PointerEvent) {
+                        best.dispatchEvent(new PointerEvent('pointerup', { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                    }
+                    best.dispatchEvent(new MouseEvent('mouseup', base));
+                    best.dispatchEvent(new MouseEvent('click', base));
+                    return true;
+                }""",
+                action_lower,
+            ))
+        except Exception as exc:
+            logger.debug("[GHOST-JS] Top-left quote click failed for %s: %s", action, exc)
             return False
 
     # ------------------------------------------------------------------
@@ -269,13 +454,14 @@ class GhostExecutor:
         Execute Buy/Sell/Close on TradingView's paper-trading order panel.
 
         Strategy:
-        1. Try TradingView's stable button selectors first via Playwright click
+        1. Click TradingView's visible top-left red/blue quote buttons.
+        2. Try TradingView's stable button selectors first via Playwright click
            (real event firing, not synthetic). Selectors live on the
            bottom-panel order ticket.
-        2. Fall back to Playwright role-based locator click.
-        3. Fall back to JS-injected MouseEvent dispatch (last resort; least
+        3. Fall back to Playwright role-based locator click.
+        4. Fall back to JS-injected MouseEvent dispatch (last resort; least
            reliable on React apps, restricted to in-panel scope).
-        4. After any click, wait for and confirm any "Place order" /
+        5. After any click, wait for and confirm any "Place order" /
            "Confirm" / "Buy at market" dialog.
         """
         if not self.is_connected:
@@ -287,6 +473,15 @@ class GhostExecutor:
 
         try:
             await self._page.bring_to_front()
+
+            # ---- STRATEGY 0: Top-left chart quote buttons ----
+            # TradingView exposes real Sell/Buy quote buttons near the chart
+            # header. Avoid "Long"/"Short" entirely: those labels also exist
+            # in the left drawing toolbar and do not place trades.
+            if action in {"BUY", "SELL"} and await self._click_top_left_quote_button(action):
+                logger.info("[GHOST-JS] %s clicked via top-left quote button", action)
+                await self._confirm_order_dialog(action)
+                return True
 
             # ---- STRATEGY 1: TradingView-specific stable selectors ----
             # These target the React-rendered order panel buttons. data-name
@@ -334,14 +529,41 @@ class GhostExecutor:
 
             # ---- STRATEGY 2: Playwright role-based click ----
             search_text_map = {
-                "BUY": ["Buy", "Buy market", "Long", "Place buy"],
-                "SELL": ["Sell", "Sell market", "Short", "Place sell"],
+                "BUY": ["Buy", "Buy market", "Place buy"],
+                "SELL": ["Sell", "Sell market", "Place sell"],
                 "CLOSE": ["Close position", "Flatten", "Close", "Exit"],
             }
             for name in search_text_map.get(action, [action.title()]):
                 try:
                     btn = self._page.get_by_role("button", name=name).first
                     if await btn.count() > 0 and await btn.is_visible(timeout=500):
+                        in_panel = await btn.evaluate("""(el) => {
+                            const forbidden = /(long position|short position|drawing|measure|brush|trend line|fib|projection|forecast|toolbar)/i;
+                            const rect = el.getBoundingClientRect();
+                            const own = [
+                                el.innerText,
+                                el.textContent,
+                                el.getAttribute && el.getAttribute('aria-label'),
+                                el.getAttribute && el.getAttribute('title'),
+                                el.getAttribute && el.getAttribute('data-name'),
+                            ].join(' ').toLowerCase();
+                            if (forbidden.test(own)) return false;
+                            if (rect.left < 60) return false;
+                            let p = el;
+                            while (p) {
+                                const text = [
+                                    p.getAttribute && p.getAttribute('data-name'),
+                                    p.className,
+                                    p.getAttribute && p.getAttribute('aria-label'),
+                                ].join(' ').toLowerCase();
+                                if (forbidden.test(text)) return false;
+                                if (text.includes('order') || text.includes('trade') || text.includes('broker')) return true;
+                                p = p.parentElement;
+                            }
+                            return false;
+                        }""")
+                        if not in_panel:
+                            continue
                         await btn.click(timeout=2000)
                         logger.info(
                             "[GHOST-JS] %s clicked via role-based locator: %s",
@@ -357,6 +579,7 @@ class GhostExecutor:
             # matching navigation/tooltip elements that have "buy" in their text.
             clicked = await self._page.evaluate(f"""() => {{
                 const action = "{action_lower}";
+                const forbidden = /(long position|short position|drawing|measure|brush|trend line|fib|projection|forecast|toolbar)/i;
                 const panels = document.querySelectorAll(
                     '[data-name*="order" i], [data-name*="trading" i], ' +
                     '[class*="order-panel" i], [class*="trading-panel" i], ' +
@@ -376,6 +599,11 @@ class GhostExecutor:
                     const text = (btn.textContent || '').toLowerCase().trim();
                     const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
                     const dn = (btn.getAttribute('data-name') || '').toLowerCase();
+                    const title = (btn.getAttribute('title') || '').toLowerCase();
+                    const combined = [text, aria, dn, title].join(' ');
+                    const rect = btn.getBoundingClientRect();
+                    if (forbidden.test(combined)) continue;
+                    if (rect.left < 60) continue;
                     let score = 0;
                     if (text === action) score += 30;
                     else if (text.startsWith(action + ' ')) score += 25;
@@ -566,17 +794,18 @@ class GhostExecutor:
             return False
         try:
             await self._page.bring_to_front()
+            search_symbol = self._symbol_for_tradingview_search(symbol)
             # Click search bar via keyboard shortcut
             await self._page.keyboard.press("Control+o")
             await asyncio.sleep(0.3)
             # Clear and type symbol
             await self._page.keyboard.press("Control+a")
             await asyncio.sleep(0.1)
-            await self._page.keyboard.type(symbol, delay=20)
+            await self._page.keyboard.type(search_symbol, delay=20)
             await asyncio.sleep(0.3)
             await self._page.keyboard.press("Enter")
             await asyncio.sleep(2)
-            logger.info("[GHOST] Navigated TradingView to symbol: %s", symbol)
+            logger.info("[GHOST] Navigated TradingView to symbol: %s (typed: %s)", symbol, search_symbol)
             return True
         except Exception as e:
             logger.error("[GHOST] Navigation to %s failed: %s", symbol, e)

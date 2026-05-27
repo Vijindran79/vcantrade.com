@@ -15,6 +15,7 @@ Features:
 import asyncio
 import logging
 import base64
+import threading
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
@@ -40,6 +41,11 @@ class BrowserAgent:
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.is_running = False
+        self.lock = threading.RLock()
+        self.pause_cdp_listener = False
+        # Single-counter target lock: when True, ALL background threads should freeze
+        self.target_locked = False
+        self.target_locked_ticker: Optional[str] = None
 
         # STAGE 4: Self-Healing Logic
         self.error_count = 0  # Consecutive error counter
@@ -86,11 +92,36 @@ class BrowserAgent:
     def is_browser_busy(self) -> bool:
         """STURDY BRIDGE: Check if the browser is currently busy (navigating or loading).
         Returns True if the bot should SKIP this cycle and wait for the next one.
-        Thread-safe: uses only the _navigating boolean flag (no async/page.evaluate calls)."""
-        if self._navigating:
-            logger.debug("[BRIDGE] Browser is navigating — skipping cycle")
-            return True
+        Thread-safe: uses lock to read shared flags (pause_cdp_listener, _navigating, target_locked)."""
+        with self.lock:
+            if self.pause_cdp_listener:
+                logger.debug("[BRIDGE] Browser CDP listener paused for active RPA strike")
+                return True
+            if self._navigating:
+                logger.debug("[BRIDGE] Browser is navigating — skipping cycle")
+                return True
+            if self.target_locked:
+                logger.debug("[TARGET-LOCK] Browser frozen — single-counter target lock active for %s", self.target_locked_ticker)
+                return True
         return False
+
+    def set_target_lock(self, ticker: str) -> None:
+        """Single-counter target lock: freeze ALL background calculation threads.
+        Call this before executing a trade to prevent race conditions."""
+        with self.lock:
+            self.target_locked = True
+            self.target_locked_ticker = ticker
+            self.pause_cdp_listener = True  # Also pause CDP listener
+            logger.info("[TARGET-LOCK] Single-counter lock ENGAGED for %s — background threads frozen", ticker)
+
+    def clear_target_lock(self) -> None:
+        """Release the single-counter target lock and resume background threads."""
+        with self.lock:
+            ticker = self.target_locked_ticker
+            self.target_locked = False
+            self.target_locked_ticker = None
+            self.pause_cdp_listener = False  # Resume CDP listener
+            logger.info("[TARGET-LOCK] Single-counter lock RELEASED for %s — background threads resumed", ticker or "unknown")
 
     def _install_safe_dialog_handler(self):
         """Auto-accept JavaScript dialogs without letting ProtocolError crash navigation.
@@ -123,6 +154,8 @@ class BrowserAgent:
 
     async def get_current_url(self) -> str:
         """Get the current URL of the active browser tab."""
+        if self.pause_cdp_listener:
+            return "(paused)"
         if not self.is_running or not self.page:
             return ""
         
@@ -499,6 +532,8 @@ class BrowserAgent:
         while self.is_running:
             try:
                 await asyncio.sleep(60)
+                if self.pause_cdp_listener:
+                    continue
                 if self.page and self.is_running:
                     await self._apply_dom_only_mode()
                     await self._close_blocking_popups()

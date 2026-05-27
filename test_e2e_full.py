@@ -183,8 +183,14 @@ async def run_e2e_test():
                 mode="TEST",
                 status="OPEN",
             )
-            success = rpa.execute_trade(trade)
+            # Add timeout to prevent hanging
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(rpa.execute_trade, trade)
+                success = future.result(timeout=10)
             result.step("Execution Test", success, f"BUY {detected_symbol}: {'SUCCESS' if success else 'FAILED'}")
+        except concurrent.futures.TimeoutError:
+            result.step("Execution Test", False, "TIMEOUT after 10 seconds")
         except Exception as e:
             result.step("Execution Test", False, str(e))
 

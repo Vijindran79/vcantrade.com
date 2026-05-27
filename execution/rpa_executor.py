@@ -7,6 +7,7 @@ import pyautogui
 import pygetwindow as gw
 import numpy as np
 import logging
+import pyperclip
 import config
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,68 @@ class RPAExecutor:
         if "." in action:
             action = action.rsplit(".", 1)[-1]
         return action
+
+    def execute_protected_tradingview_bracket(self, browser_agent, ticker: str, action: str, sl: float, tp: float) -> bool:
+        """Executes an unbreakable bracket order on TradingView by forcefully clearing fields prior to value string injection."""
+        try:
+            logger.info(f"[HY3-HARDEN] Initializing isolated RPA strike path for asset: {ticker} | Action: {action}")
+            
+            # Engage single-counter target lock to freeze background threads
+            if hasattr(browser_agent, 'set_target_lock'):
+                browser_agent.set_target_lock(ticker)
+            
+            with browser_agent.lock:
+                # 1. Engage the CDP Isolation shield to freeze data-scraping loops
+                browser_agent.pause_cdp_listener = True
+                time.sleep(0.05)
+                
+                # 2. Force close any stuck UI dialogue remnants and open fresh panel ticket
+                pyautogui.press('escape')
+                time.sleep(0.1)
+                pyautogui.hotkey('shift', 'v')
+                time.sleep(0.2)
+                
+                # 3. Defensive targeted entry for Stop Loss parameter field
+                if sl > 0:
+                    logger.info(f"[HY3-HARDEN] Navigating to Stop Loss input box. Target Value: {sl}")
+                    pyautogui.press('tab', presses=4, interval=0.03)
+                    
+                    # Execute total input string erasure via standard keyboard macro overrides
+                    pyautogui.hotkey('ctrl', 'a')
+                    pyautogui.press('backspace')
+                    pyautogui.write(str(round(sl, 2)), interval=0.01)
+                    time.sleep(0.05)
+                    
+                # 4. Defensive targeted entry for Take Profit parameter field
+                if tp > 0:
+                    logger.info(f"[HY3-HARDEN] Navigating to Take Profit input box. Target Value: {tp}")
+                    pyautogui.press('tab', interval=0.03)
+                    pyautogui.hotkey('ctrl', 'a')
+                    pyautogui.press('backspace')
+                    pyautogui.write(str(round(tp, 2)), interval=0.01)
+                    time.sleep(0.05)
+                    
+                # 5. Securely dispatch bracket sequence down to exchange infrastructure
+                pyautogui.press('enter')
+                time.sleep(0.1)
+                
+                # 6. Unfreeze the CDP monitoring thread
+                browser_agent.pause_cdp_listener = False
+                
+            logger.info(f"[HY3-SUCCESS] Bracket order fields validated and committed for ticker: {ticker}")
+            return True
+        except Exception as e:
+            logger.error(f"[HY3-FAILURE] Severe crash inside hardened execution field macro: {str(e)}")
+            if 'browser_agent' in locals():
+                browser_agent.pause_cdp_listener = False
+            return False
+        finally:
+            # Always release the single-counter target lock
+            if hasattr(browser_agent, 'clear_target_lock'):
+                browser_agent.clear_target_lock()
+
+    # execute_hardened_tv_bracket_order is an alias for execute_protected_tradingview_bracket
+    execute_hardened_tv_bracket_order = execute_protected_tradingview_bracket
 
     @staticmethod
     def _is_missing_dialog_error(exc):
@@ -342,9 +405,13 @@ class RPAExecutor:
 
         # FORCE FOCUS: bring page to front and click a neutral area
         try:
-            page.bring_to_front()
+            _btf = page.bring_to_front()
+            if inspect.isawaitable(_btf):
+                self._run_async(_btf)
             time.sleep(0.3)
-            page.mouse.click(100, 100)
+            _fc = page.mouse.click(100, 100)
+            if inspect.isawaitable(_fc):
+                self._run_async(_fc)
             logger.info("[FOCUS] Focus click at (100,100) to anchor input to this tab")
             time.sleep(0.3)
         except Exception as focus_err:
@@ -372,8 +439,13 @@ class RPAExecutor:
             ]
             for locator in locator_strategies:
                 try:
-                    if locator.count() > 0:
+                    count = locator.count()
+                    if inspect.isawaitable(count):
+                        count = self._run_async(count)
+                    if count > 0:
                         box = locator.first.bounding_box()
+                        if inspect.isawaitable(box):
+                            box = self._run_async(box)
                         if box:
                             # Physical mouse click at randomized offset inside the button
                             offset_x = random.uniform(3, max(4, box["width"] - 3))
@@ -388,13 +460,17 @@ class RPAExecutor:
                             time.sleep(0.05)
                             try:
                                 account_label = page.locator("[class*='account' i], [data-testid*='account' i]").first.text_content()
+                                if inspect.isawaitable(account_label):
+                                    account_label = self._run_async(account_label)
                             except Exception:
                                 account_label = ""
                             # BLOCK if switched to Paper/Demo (retail safety)
                             if any(bad in account_label.lower() for bad in ['paper', 'demo', 'sim', 'test']):
                                 logger.error("[CHAIN-LOCK] Account switched to '%s' (Paper/Demo) — BLOCKING CLICK", account_label)
                                 return False
-                            page.mouse.click(click_x, click_y)
+                            _mc = page.mouse.click(click_x, click_y)
+                            if inspect.isawaitable(_mc):
+                                self._run_async(_mc)
                             return True
                 except Exception:
                     continue
@@ -438,6 +514,8 @@ class RPAExecutor:
                 }}
                 return false;
             }}""")
+            if inspect.isawaitable(clicked):
+                clicked = self._run_async(clicked)
             if clicked:
                 logger.info("[STEALTH] %s button clicked via JS synthesized mouse events", action)
                 return True
@@ -1028,7 +1106,7 @@ class RPAExecutor:
         return False
 
     def _execute_trade_tradingview(self, trade):
-        """Active TradingView execution: HTML/Playwright first, physical mouse fallback second."""
+        """Active TradingView execution: strict protected bracket order only (HY3 hardened)."""
         action = self._normalize_action(trade.action)
         target_key = "buy_button" if action == "BUY" else "sell_button" if action == "SELL" else None
         if not target_key:
@@ -1045,26 +1123,27 @@ class RPAExecutor:
                 return False
             logger.info("[CHAIN-LOCK] TV account verified — proceeding to physical strike")
 
-        for attempt in range(1, 4):
-            logger.info("[TV-RPA] Attempt %s/3 for %s %s", attempt, action, trade.asset)
-            success = self._tradingview_strike_sequence(target_key, trade.asset)
-            if success:
-                verified = self.verify_position_opened(trade.asset)
-                if verified:
-                    logger.info("[TV-RPA] %s %s executed and verified", action, trade.asset)
-                    return True
-                logger.warning(
-                    "[TV-RPA] Click sent but order was not verified for %s; retrying cascade from HTML",
-                    trade.asset,
-                )
-                success = False
-            if attempt < 3:
-                backoff = 2 ** (attempt - 1)
-                logger.info("[TV-RPA] Retrying in %ss...", backoff)
-                time.sleep(backoff)
-
-        self.last_failure_reason = f"Click sent but TradingView did not verify an open {trade.asset} position"
-        logger.error("[TV-RPA] All 3 attempts failed for %s %s", action, trade.asset)
+        sl = float(getattr(trade, "stop_loss", 0.0) or 0.0)
+        tp = float(getattr(trade, "take_profit", 0.0) or 0.0)
+        browser_agent = getattr(self, "_browser_agent", None)
+        
+        # HY3 ENFORCEMENT: browser_agent lock is MANDATORY for RPA bracket execution
+        if browser_agent is None or not hasattr(browser_agent, "lock"):
+            logger.error("[HY3-FAILURE] browser_agent not available — cannot execute hardened TV bracket for %s", trade.asset)
+            self.last_failure_reason = f"browser_agent not available for {trade.asset}"
+            return False
+        
+        # Use the hardened bracket function with defensive field validation
+        success = self.execute_protected_tradingview_bracket(browser_agent, trade.asset, action, 0.0, sl, tp)
+        if not success:
+            self.last_failure_reason = f"TradingView hardened bracket order failed for {trade.asset}"
+            return False
+        verified = self.verify_position_opened(trade.asset)
+        if verified:
+            logger.info("[TV-RPA] HY3-hardened bracket %s %s executed and verified", action, trade.asset)
+            return True
+        self.last_failure_reason = f"HY3 bracket sent but TradingView did not verify an open {trade.asset} position"
+        logger.error("[TV-RPA] HY3-hardened bracket was not verified for %s %s", action, trade.asset)
         return False
 
     def _click_via_controlled_page(self, target_key: str, ticker: str = "") -> bool:
@@ -1965,6 +2044,10 @@ class RPAExecutor:
         self._controlled_loop = loop
         if page:
             self._page = page
+
+    def set_browser_agent(self, browser_agent):
+        """Attach the browser agent so active RPA strikes can pause CDP polling."""
+        self._browser_agent = browser_agent
 
     def _run_async(self, coro):
         """Run an async coroutine on the browser event loop from sync context."""

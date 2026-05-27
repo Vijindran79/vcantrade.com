@@ -12,7 +12,7 @@ import time
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import config
-from core.scanner import CloudScanner
+from core.scanner import Scanner as CloudScanner
 
 logger = logging.getLogger(__name__)
 

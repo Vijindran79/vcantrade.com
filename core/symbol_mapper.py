@@ -216,14 +216,16 @@ def root_matches(left: str | None, right: str | None) -> bool:
 
 def _extract_root(raw_symbol: str) -> str:
     canonical = _canonicalize(raw_symbol)
+    symbol_part = raw_symbol.rsplit(":", 1)[-1]
+    symbol_canonical = _canonicalize(symbol_part)
 
     for hint_words, root in _TEXT_HINTS:
         words = hint_words if isinstance(hint_words, tuple) else (hint_words,)
         if all(str(word).replace("&", "").replace(" ", "") in canonical for word in words):
             return root
 
-    candidates = [canonical]
-    without_suffix = _CONTRACT_SUFFIX_RE.sub("", raw_symbol).strip()
+    candidates = [canonical, symbol_canonical]
+    without_suffix = _CONTRACT_SUFFIX_RE.sub("", symbol_part).strip()
     candidates.append(_canonicalize(without_suffix))
 
     tokens = re.findall(r"[A-Z0-9]+", raw_symbol.upper())
@@ -236,7 +238,9 @@ def _extract_root(raw_symbol: str) -> str:
     for root in sorted(_ROOTS, key=len, reverse=True):
         if re.search(rf"(^|[^A-Z0-9]){re.escape(root)}([^A-Z0-9]|$)", raw_symbol.upper()):
             return root
-        if canonical.startswith(root) and len(canonical) <= len(root) + 8:
+        if symbol_canonical.startswith(root) and len(symbol_canonical) <= len(root) + 8:
+            return root
+        if root in symbol_canonical:
             return root
     return ""
 

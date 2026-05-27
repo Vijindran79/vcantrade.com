@@ -61,21 +61,33 @@ class TradeRecord(BaseModel):
     closed_at: Optional[datetime] = None
 
 
+class TradeResult(BaseModel):
+    """Result of a trade execution attempt"""
+    
+    status: str = Field(..., description="EXECUTED|REJECTED_LOCK|REJECTED_AUDIT|REJECTED_ASSET_CLASS|FAILED|ERROR")
+    ticker: str = ""
+    action: str = ""
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    reason: str = ""
+
+
 class SafetyState(BaseModel):
     """Current safety control state"""
-
+    
     kill_switch_active: bool = False
     daily_pnl: float = 0.0
     daily_loss_limit_hit: bool = False
     open_positions: int = 0
     cooldown_remaining_seconds: int = 0
     can_trade: bool = True
-
+    
     def update_trade_ability(self):
         """Update whether trading is allowed based on safety rules"""
         import config
-
-        # MAX_DAILY_LOSS=0 means disabled (e.g. Apex has no daily limit)
+        
+        # MAX_DAILY_LOSS=0 means disabled (e.g., Apex has no daily limit)
         daily_loss_ok = (config.MAX_DAILY_LOSS <= 0) or (abs(self.daily_pnl) < config.MAX_DAILY_LOSS)
         self.can_trade = (
             not self.kill_switch_active

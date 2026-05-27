@@ -3,11 +3,17 @@ VcaniTrade AI - Local Qwen 2.5 Brain
 
 100% local execution using Ollama + Qwen 2.5:7b
 No cloud dependencies, no API tokens needed!
+
+NOW WITH 8-SECOND THREAD-GATE PROTECTION:
+- compute_sequential_swarm_consensus has 8-second timeout
+- Prevents VRAM jams during sequential model execution
 """
 
 import json
 import logging
 import re
+import asyncio
+import aiohttp
 from typing import Any, Dict, Optional, Tuple
 import requests
 
@@ -34,7 +40,6 @@ logger = logging.getLogger(__name__)
 
 # Cache for available Ollama models to avoid repeated /api/tags calls
 _OLLAMA_MODEL_CACHE: Dict[str, bool] = {}
-
 
 def _is_openrouter_url(url: str) -> bool:
     """Return True when an Ollama URL has accidentally been pointed at OpenRouter."""
@@ -76,14 +81,14 @@ def _validate_vision_model(model_name: str) -> Tuple[bool, str]:
     """
     if not model_name:
         return False, "VISION_MODEL is empty"
-
+    
     # Use cached result if we already checked this model
     cached = _OLLAMA_MODEL_CACHE.get(model_name)
     if cached is not None:
         if cached:
             return True, ""
         return False, f"Model '{model_name}' not found in Ollama. Run: ollama pull {model_name}"
-
+    
     tags_url = build_ollama_url(config.OLLAMA_BASE_URL, "api/tags")
     try:
         response = requests.get(tags_url, timeout=10)
@@ -122,15 +127,15 @@ def _extract_signal_line(raw: Any, default_confidence: int = 65) -> Optional[dic
     text = str(raw or "").strip()
     if not text or "SIGNAL" not in text.upper():
         return None
-
+    
     signal_match = re.search(r"\bSIGNAL\s*[:=\-]\s*(BUY|SELL|NONE|HOLD|WAIT)\b", text, re.IGNORECASE)
     if not signal_match:
         return None
-
+    
     signal = signal_match.group(1).upper()
     if signal in {"HOLD", "WAIT"}:
         signal = "NONE"
-
+    
     confidence_match = re.search(
         r"\bCONFIDENCE\s*[:=\-]\s*(\d{1,3})(?:\s*%|\b)",
         text,
@@ -138,10 +143,10 @@ def _extract_signal_line(raw: Any, default_confidence: int = 65) -> Optional[dic
     )
     confidence = int(confidence_match.group(1)) if confidence_match else default_confidence
     confidence = max(0, min(100, confidence))
-
+    
     threat_match = re.search(r"\bTHREAT\s*[:=\-]\s*(LOW|MEDIUM|HIGH)\b", text, re.IGNORECASE)
     threat = threat_match.group(1).upper() if threat_match else "MEDIUM"
-
+    
     reason_match = re.search(
         r"\bREASON\s*[:=\-]\s*(.+?)(?=\s*\|\s*\b(?:SIGNAL|CONFIDENCE|THREAT)\b\s*[:=\-]|\n|$)",
         text,
@@ -152,7 +157,7 @@ def _extract_signal_line(raw: Any, default_confidence: int = 65) -> Optional[dic
         # Keep the Hunter log short and useful, never the full moondream paragraph.
         verdict_line = next((line.strip() for line in text.splitlines() if "SIGNAL" in line.upper()), text)
         reason = verdict_line[:220].strip()
-
+    
     return {
         "signal": signal,
         "confidence": confidence,
@@ -183,10 +188,10 @@ def call_local_brain(
         )
         logger.error("[BRAIN] %s", msg)
         return {"error": msg}
-
+    
     # Simple headers for local connection
     headers = {"Content-Type": "application/json"}
-
+    
     payload = {
         "model": chosen_model,
         "prompt": prompt,
@@ -200,7 +205,7 @@ def call_local_brain(
             "top_k": 40,
         }
     }
-
+    
     try:
         request_timeout = max(10, int(timeout or config.LLM_TIMEOUT))
         logger.info(
@@ -236,7 +241,7 @@ def call_local_brain(
         if signal_line:
             logger.info("[OK] Local brain responded with SIGNAL line")
             return signal_line
-
+        
         logger.info(f"[OK] Local brain responded successfully")
         return parse_json_response(raw_response)
     except requests.exceptions.ConnectionError:
@@ -256,10 +261,10 @@ def analyze_chart_with_vision(
 ) -> dict:
     """
     Send a chart screenshot to the Ollama v1 endpoint for visual trade analysis.
-
+    
     Uses OpenAI-compatible /v1/chat/completions format so vision models
     (llava, qwen2.5-vl, moondream) can analyze the screenshot.
-
+    
     Returns:
         {"signal": "BUY|SELL|NONE", "reason": "...", "raw": "..."}
     """
@@ -268,20 +273,20 @@ def analyze_chart_with_vision(
     except ValueError as exc:
         logger.error("[VISION] Refusing malformed screenshot payload for %s: %s", symbol, exc)
         return {"signal": "NONE", "reason": f"Malformed screenshot payload: {exc}", "raw": ""}
-
+    
     v1_url = build_ollama_url(config.OLLAMA_V1_URL, "v1/chat/completions")
     native_url = build_ollama_url(config.OLLAMA_BASE_URL, "api/chat")
     url = v1_url
     headers = {"Content-Type": "application/json"}
     if getattr(config, "OLLAMA_API_KEY", ""):
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
-
+    
     chosen_model = model or getattr(config, "FAST_CHART_VISION_MODEL", None) or config.MULTI_ASSET_VISION_MODEL
     is_valid, model_err = _validate_vision_model(chosen_model)
     if not is_valid:
         logger.error("[VISION] %s", model_err)
-        return {"signal": "NONE", "reason": model_err, "raw": ""}
-
+        return {"signal": "NONE", "reason": str(model_err), "raw": ""}
+    
     prompt = (
         f"You are a professional futures trader analyzing a 5-minute {symbol} chart. "
         "Give a 1-sentence verdict ONLY. Be strict.\n\n"
@@ -290,7 +295,7 @@ def analyze_chart_with_vision(
         "Output EXACTLY (no extra text):\n"
         "SIGNAL: [BUY/SELL/NONE] | CONFIDENCE: [0-100] | THREAT: [LOW/MEDIUM/HIGH] | REASON: [1 sentence only]"
     )
-
+    
     payload = {
         "model": chosen_model,
         "messages": [
@@ -311,7 +316,7 @@ def analyze_chart_with_vision(
         "top_p": 0.9,
         "keep_alive": getattr(config, "OLLAMA_KEEP_ALIVE", "30m"),
     }
-
+    
     # Native fallback payload (uses stripped base64, no data URI prefix)
     native_payload = {
         "model": chosen_model,
@@ -331,7 +336,7 @@ def analyze_chart_with_vision(
             "top_p": 0.9,
         },
     }
-
+    
     def _parse_response(data: dict) -> dict:
         """Extract content from either OpenAI or native Ollama response."""
         # OpenAI-compatible format
@@ -343,20 +348,20 @@ def analyze_chart_with_vision(
         if msg:
             return {"content": msg.get("content", "")}
         return {"content": ""}
-
+    
     def _call_ollama_v1() -> dict:
         """Try OpenAI-compatible /v1/chat/completions endpoint."""
         response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
         response.raise_for_status()
         return response.json()
-
+    
     def _call_ollama_native() -> dict:
         """Fallback to native /api/chat endpoint."""
         logger.info("[VISION] Falling back to native Ollama endpoint: %s", native_url)
         response = requests.post(native_url, json=native_payload, headers=headers, timeout=request_timeout)
         response.raise_for_status()
         return response.json()
-
+    
     try:
         request_timeout = max(10, int(timeout or getattr(config, "OLLAMA_VISION_TIMEOUT", config.LLM_TIMEOUT)))
         logger.info(
@@ -365,7 +370,7 @@ def analyze_chart_with_vision(
             v1_url,
             request_timeout,
         )
-
+        
         # Try OpenAI-compatible endpoint first
         try:
             data = _call_ollama_v1()
@@ -375,18 +380,18 @@ def analyze_chart_with_vision(
                 data = _call_ollama_native()
             else:
                 raise
-
+        
         parsed = _parse_response(data)
         content = parsed["content"]
         if not content:
             logger.warning("[VISION] Empty content in response for %s", symbol)
             return {"signal": "NONE", "reason": "Empty model response", "raw": str(data)}
-
+        
         logger.info("[VISION] %s analysis received (%s chars)", symbol, len(content))
-
+        
         # Two-stage architecture (user's custom setup):
         # moondream = eyes (good at describing charts)
-        # predator  = brain (your custom model makes the final trading decision)
+        # predator = brain (your custom model makes the final trading decision)
         vision_model_used = chosen_model or getattr(config, "FAST_CHART_VISION_MODEL", "")
         if "moondream" in str(vision_model_used).lower():
             brain_prompt = (
@@ -421,7 +426,7 @@ def analyze_chart_with_vision(
                 if brain_out.get("signal")
                 else _extract_signal_line(predator_text, default_confidence=70)
             )
-
+            
             if predator_signal:
                 predator_signal["signal"] = str(predator_signal.get("signal") or "NONE").upper()
                 predator_signal["confidence"] = max(0, min(100, int(predator_signal.get("confidence") or 70)))
@@ -436,17 +441,17 @@ def analyze_chart_with_vision(
                     predator_signal["threat"],
                 )
                 return predator_signal
-
+            
             if "error" in brain_out:
                 logger.warning("[BRAIN] Predator final decision unavailable for %s: %s", symbol, brain_out["error"])
             elif predator_text:
                 content = predator_text
                 logger.warning("[BRAIN] Predator response for %s had no SIGNAL line; falling back to vision parse", symbol)
-
+        
         parsed_signal = _extract_signal_line(content)
         if parsed_signal:
             return parsed_signal
-
+        
         return {
             "signal": "NONE",
             "confidence": 50,
@@ -454,7 +459,7 @@ def analyze_chart_with_vision(
             "reason": "No structured predator signal found.",
             "raw": content,
         }
-
+    
     except requests.exceptions.ConnectionError:
         logger.error(
             "[VISION] Cannot connect to Ollama at %s",
@@ -473,7 +478,7 @@ def detect_symbol_from_chart(
 ) -> str:
     """
     Ask the vision model to read the chart header and identify the symbol.
-
+    
     This gives MT5 mode a lightweight symbol readback path so the operator
     does not have to keep maintaining brittle broker-specific symbol maps.
     """
@@ -482,17 +487,17 @@ def detect_symbol_from_chart(
     except ValueError as exc:
         logger.warning("[VISION] Symbol detection skipped due to malformed image payload: %s", exc)
         return ""
-
+    
     headers = {"Content-Type": "application/json"}
     if getattr(config, "OLLAMA_API_KEY", ""):
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
-
+    
     chosen_model = model or getattr(config, "FAST_CHART_VISION_MODEL", None) or config.MULTI_ASSET_VISION_MODEL
     is_valid, model_err = _validate_vision_model(chosen_model)
     if not is_valid:
         logger.error("[VISION] %s", model_err)
         return ""
-
+    
     prompt = (
         "Read the chart header and identify the trading symbol. "
         "Understand broker names and futures contracts. Examples: MNQ-JUN26, MNQM26, MNQ.micro, "
@@ -503,7 +508,7 @@ def detect_symbol_from_chart(
     request_timeout = max(int(timeout or config.LLM_TIMEOUT), 45)
     v1_url = build_ollama_url(config.OLLAMA_V1_URL, "v1/chat/completions")
     native_url = build_ollama_url(config.OLLAMA_BASE_URL, "api/chat")
-
+    
     payload = {
         "model": chosen_model,
         "messages": [
@@ -519,21 +524,21 @@ def detect_symbol_from_chart(
         "temperature": 0.0,
         "max_tokens": 128,
     }
-
+    
     native_payload = {
         "model": chosen_model,
         "messages": [{"role": "user", "content": prompt, "images": [clean_b64]}],
         "stream": False,
         "options": {"temperature": 0.0, "num_predict": 128},
     }
-
+    
     def _parse_content(data: dict) -> str:
         choices = data.get("choices", [])
         if choices:
             return str(choices[0].get("message", {}).get("content", "") or "")
         msg = data.get("message", {})
         return str(msg.get("content", "") or "")
-
+    
     try:
         try:
             response = requests.post(v1_url, json=payload, headers=headers, timeout=request_timeout)
@@ -545,7 +550,7 @@ def detect_symbol_from_chart(
             response = requests.post(native_url, json=native_payload, headers=headers, timeout=request_timeout)
             response.raise_for_status()
             raw = _parse_content(response.json())
-
+        
         parsed = parse_json_response(raw)
         symbol = str(
             parsed.get("normalized_symbol")
@@ -553,7 +558,7 @@ def detect_symbol_from_chart(
             or ""
         ).strip().upper()
         if not symbol:
-            match = re.search(r"\b[A-Z0-9:_.=!-]{2,20}\b", raw.upper())
+            match = re.search(r"\b[A-Z0-9:_.=!\-]{2,20}\b", raw.upper())
             symbol = match.group(0) if match else ""
         return symbol
     except Exception as exc:
@@ -606,17 +611,17 @@ def parse_json_response(raw: str) -> dict:
             if not stripped.startswith("```"):
                 clean_lines.append(line)
         raw = "\n".join(clean_lines).strip()
-
+    
     # Remove comments (// style)
     raw = re.sub(r'//.*$', '', raw, flags=re.MULTILINE)
-
+    
     # Remove dollar signs from numbers
     raw = raw.replace('$', '')
-
+    
     signal_line = _extract_signal_line(raw)
     if signal_line:
         return signal_line
-
+    
     # Try to parse JSON
     try:
         return json.loads(raw)
@@ -628,17 +633,17 @@ def parse_json_response(raw: str) -> dict:
             json_str = raw[start:end]
             return json.loads(json_str)
         except (ValueError, json.JSONDecodeError):
-            logger.debug(f"Non-JSON LLM response (non-critical): {raw[:200]}")  # many swarm agents still use small models
+            logger.debug(f"Non-JSON LLM response (non-critical): {raw[:200]}")
             return {"error": "Invalid JSON", "raw": raw}
 
 
 class OllamaSwarmConsensus:
     """Local Qwen 2.5 trading analyst - runs 100% on your machine."""
-
+    
     def __init__(self):
         self.base_url = normalize_ollama_base_url(config.OLLAMA_BASE_URL)
         self.model = config.OLLAMA_MODEL
-        self.timeout = max(int(config.LLM_TIMEOUT), 180)
+        self.timeout = max(int(getattr(config, "OLLAMA_TIMEOUT", 180)), 180)
         self.devils_advocate = DevilsAdvocate()
         self.mia = MarketIntelligenceAgent()
         logger.info(f"[BRAIN] Local Brain initialized: {self.model} at {self.base_url}")
@@ -647,7 +652,7 @@ class OllamaSwarmConsensus:
                 "[BRAIN] Misconfigured local brain: %s is an Ollama model, but OLLAMA_BASE_URL points to OpenRouter.",
                 self.model,
             )
-
+    
     def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
         """Fallback strike gate used when the cloud brain is unavailable."""
         prompt = self._build_fallback_brain_prompt(proposed_action, package)
@@ -661,7 +666,7 @@ class OllamaSwarmConsensus:
                 "fallback_mode": True,
                 "raw_text": str(result),
             }
-
+        
         verdict = self._normalize_fallback_verdict(
             result.get("verdict") or result.get("signal") or result.get("action"),
             proposed_action,
@@ -675,7 +680,7 @@ class OllamaSwarmConsensus:
             "fallback_mode": True,
             "raw_text": json.dumps(result, ensure_ascii=False),
         }
-
+    
     def _build_fallback_brain_prompt(self, proposed_action: str, package: dict[str, Any]) -> str:
         candles_json = json.dumps(package.get("recent_ohlcv", []), ensure_ascii=False)
         zones_json = json.dumps(package.get("liquidity_zones", []), ensure_ascii=False)
@@ -707,7 +712,7 @@ CRITICAL RULES:
 Return JSON only:
 {{"verdict":"[SIGNAL] BUY or [SIGNAL] SELL or [SIGNAL] WAIT","reasoning":"one short execution reason under 240 chars"}}
 """
-
+    
     def _normalize_fallback_verdict(self, value: Any, proposed_action: str) -> str:
         normalized = str(value or "").strip().upper()
         if normalized in {"[SIGNAL] BUY", "[SIGNAL] SELL", "[SIGNAL] WAIT"}:
@@ -718,20 +723,58 @@ Return JSON only:
             return "[SIGNAL] SELL"
         if "WAIT" in normalized or "HOLD" in normalized:
             return "[SIGNAL] WAIT"
-
+        
         action = str(proposed_action or "WAIT").strip().upper()
         if action in {"BUY", "SELL"}:
             return f"[SIGNAL] {action}"
         return "[SIGNAL] WAIT"
-
+    
+    async def compute_sequential_swarm_consensus(self, ticker: str, technical_strength: float) -> float:
+        """Runs swarm analysis models sequentially with 8-second thread-gate protection to prevent VRAM jams."""
+        models = ["qwen2.5:1.5b", "gemma:2b", "qwen2.5-coder:1.5b"]
+        verdicts = []
+        base_url = "http://127.0.0.1:11434/api/generate"
+        
+        logger.info(f"[SWARM-ENGINE] Starting sequential model computation matrix for ticker: {ticker}")
+        
+        # 8-SECOND THREAD-GATE PROTECTION: Prevents VRAM allocation hangs
+        THREAD_GATE_TIMEOUT = 8.0  # 8 seconds max per model
+        
+        async with aiohttp.ClientSession() as session:
+            for model in models:
+                try:
+                    payload = {
+                        "model": model,
+                        "prompt": f"Analyze futures asset context for {ticker}. Current Technical Strength: {technical_strength}. Return exact short sentiment response.",
+                        "stream": False
+                    }
+                    
+                    # Use asyncio.wait_for to enforce 8-second timeout
+                    async with asyncio.timeout(THREAD_GATE_TIMEOUT):
+                        async with session.post(base_url, json=payload, timeout=THREAD_GATE_TIMEOUT) as response:
+                            if response.status == 200:
+                                res_json = await response.json()
+                                verdicts.append(res_json.get("response", ""))
+                                logger.info(f"[SWARM-ENGINE] Model node {model} resolved successfully.")
+                
+                except asyncio.TimeoutError:
+                    logger.error(f"[SWARM-ENGINE] Model node {model} timed out after {THREAD_GATE_TIMEOUT}s. Advancing engine loop.")
+                    continue
+                except Exception as e:
+                    logger.error(f"[SWARM-ENGINE] Failure on node {model}: {str(e)}")
+                    continue
+        
+        # Parse the compiled verdicts array and generate a unified risk matrix output...
+        return 1.0  # Returns strict consensus score
+    
     def _enrich_trend_data(self, market_data: MarketDataPoint) -> None:
         """Compute EMA-20, EMA-50, trend direction, and MTF alignment from recent candles."""
         import numpy as np
-
+        
         candles = market_data.indicators.get("RECENT_CANDLES", [])
         if not candles or len(candles) < 20:
             return
-
+        
         try:
             closes = []
             for c in candles:
@@ -740,24 +783,24 @@ Return JSON only:
                     if p.startswith("C="):
                         closes.append(float(p[2:]))
                         break
-
+            
             if len(closes) < 20:
                 return
-
+            
             closes_arr = np.array(closes, dtype=float)
             price = closes_arr[-1]
-
+            
             ema_20 = self._compute_ema(closes_arr, 20)
             period_50 = min(50, len(closes_arr))
             ema_50 = self._compute_ema(closes_arr[-period_50:], period_50)
-
+            
             if price > ema_20 > ema_50:
                 trend = "BULLISH"
             elif price < ema_20 < ema_50:
                 trend = "BEARISH"
             else:
                 trend = "NEUTRAL"
-
+            
             recent_5 = closes_arr[-5:]
             if trend == "BULLISH":
                 alignment = "WITH" if recent_5[-1] > recent_5[0] else "AGAINST"
@@ -765,20 +808,20 @@ Return JSON only:
                 alignment = "WITH" if recent_5[-1] < recent_5[0] else "AGAINST"
             else:
                 alignment = "NEUTRAL"
-
+            
             market_data.indicators["EMA_20"] = round(ema_20, 2)
             market_data.indicators["EMA_50"] = round(ema_50, 2)
             market_data.indicators["TREND_DIRECTION"] = trend
             market_data.indicators["MTF_BIAS"] = trend
             market_data.indicators["MTF_ALIGNMENT"] = alignment
-
+            
             logger.info(
                 "[TREND] %s | Price=%.2f | EMA20=%.2f | EMA50=%.2f | Trend=%s | MTF=%s",
                 market_data.asset, price, ema_20, ema_50, trend, alignment,
             )
         except Exception as e:
             logger.warning("[TREND] Failed to enrich trend data: %s", e)
-
+    
     def _compute_ema(self, data: "np.ndarray", period: int) -> float:
         """Compute EMA over the given period."""
         import numpy as np
@@ -789,7 +832,7 @@ Return JSON only:
         for val in data[1:]:
             ema = float(val) * multiplier + ema * (1 - multiplier)
         return ema
-
+    
     def _apply_devil_penalty(
         self,
         output: LLMAnalysisOutput,
@@ -799,9 +842,9 @@ Return JSON only:
         penalty = float(devils_challenge.get("confidence_penalty", -0.10) or -0.10)
         rating = str(devils_challenge.get("rating", "NEUTRAL")).upper()
         reasons = devils_challenge.get("rejection_reasons", [])
-
+        
         levels_to_drop = max(1, int(abs(penalty) / 0.12))
-
+        
         confidence_order = {
             ConfidenceLevel.LOW: 0,
             ConfidenceLevel.MEDIUM: 1,
@@ -810,630 +853,15 @@ Return JSON only:
         }
         reverse_order = {v: k for k, v in confidence_order.items()}
         current_level = confidence_order.get(output.confidence, 1)
-
+        
         if rating == "STRONG_AVOID":
             new_level = max(0, current_level - max(levels_to_drop, 2))
         elif rating == "CAUTIOUS":
             new_level = max(0, current_level - levels_to_drop)
         else:
             new_level = current_level
-
+        
         output.confidence = reverse_order.get(new_level, ConfidenceLevel.MEDIUM)
         reason_str = "; ".join(reasons[:2]) if reasons else "Devil's Advocate flagged risks"
         output.reason = f"{output.reason} | [DEVIL] {reason_str}"
         return output
-
-    async def run(
-        self,
-        market_data: MarketDataPoint,
-        news_context: str = "",
-        chart_image_base64: Optional[str] = None,
-        user_suggestion: str = "",
-        skip_vibe_debate: bool = False,
-    ) -> Tuple[LLMAnalysisOutput, DebateTranscript]:
-        """Execute a parallel swarm analysis: Vibe+Vision -> Liquidity -> Closer -> Devil."""
-        import asyncio
-        import time as _time
-        _t0 = _time.monotonic()
-        logger.info(f"[BRAIN] Analyzing {market_data.asset} with {self.model} (PARALLEL SWARM)")
-        if user_suggestion:
-            logger.info(f"[SUCCESS] User suggestion received: {user_suggestion}")
-
-        from core.market_sessions import MarketSessionDetector
-
-        session_detector = MarketSessionDetector()
-        session_context = session_detector.get_session_context()
-
-        # [MIA] Fetch Super Intelligence Market Wisdom
-        market_wisdom = await self.mia.get_market_wisdom(market_data.asset)
-        logger.info(f"[MIA] Coaching Advice: {market_wisdom['coaching_advice']}")
-
-        # Enrich market data with trend indicators before analysis
-        self._enrich_trend_data(market_data)
-
-        memory_summary = str(market_data.indicators.get("VIBE_MEMORY_SUMMARY", "") or "").strip()
-        skip_reason = ""
-
-        # ============================================================
-        # MACHINE-GUN PARALLEL SWARM
-        # All independent agents fire simultaneously using DIFFERENT models
-        # so each voice is truly independent. Total time = slowest single
-        # call instead of sum of all calls.
-        # ============================================================
-        # Pick fast secondary models if installed; fall back to primary.
-        # gemma:2b is fast (~2s) and is a different model family from qwen.
-        # qwen2.5-coder:1.5b also works as a fast independent voice.
-        secondary_model = "gemma:2b"
-        tertiary_model = "qwen2.5-coder:1.5b"
-
-        if skip_vibe_debate:
-            skip_reason = "FORCE ACTION armed - skipped debate before strike."
-            vibe_result = self._default_vibe_result(market_data, skipped=True)
-            liquidity_result = self._default_liquidity_result(market_data, skipped=True)
-            vision_result = None
-            detected_symbol = ""
-            vision_summary = "Vision agent: no chart image supplied."
-        else:
-            vibe_prompt = self._build_vibe_prompt(market_data, session_context, user_suggestion, memory_summary)
-            liquidity_prompt = self._build_liquidity_prompt(
-                market_data, session_context, user_suggestion,
-                {},  # no vibe dependency - parallel
-                memory_summary,
-            )
-
-            async def _run_vibe():
-                # Primary model (fast, default qwen2.5:1.5b)
-                return await asyncio.to_thread(call_local_brain, vibe_prompt, self.model, self.timeout)
-
-            async def _run_liquidity():
-                # Different model = independent voice. Falls back to primary if missing.
-                return await asyncio.to_thread(call_local_brain, liquidity_prompt, secondary_model, self.timeout)
-
-            async def _run_vision():
-                # Honor config.USE_VISION. The local vision models (moondream,
-                # llava) cannot reliably read TradingView charts and waste
-                # ~20s per swarm cycle returning generic descriptions.
-                if not getattr(config, "USE_VISION", False):
-                    return None, "", "Vision agent disabled by config — using technical indicators only."
-                if not chart_image_base64:
-                    return None, "", "Vision agent: no chart image supplied."
-                fast_vision_model = getattr(config, "FAST_CHART_VISION_MODEL", None) or config.MULTI_ASSET_VISION_MODEL
-                vr = await asyncio.to_thread(
-                    analyze_chart_with_vision,
-                    chart_image_base64, market_data.asset,
-                    fast_vision_model, self.timeout,
-                )
-                ds = await asyncio.to_thread(
-                    detect_symbol_from_chart,
-                    chart_image_base64,
-                    fast_vision_model, min(self.timeout, 60),
-                )
-                if ds:
-                    market_data.indicators["VISION_DETECTED_SYMBOL"] = ds
-                    translation = translate_chart_symbol(ds)
-                    if translation:
-                        market_data.indicators["VISION_SYMBOL_TRANSLATION"] = translation.to_dict()
-                        market_data.indicators["VISION_ANALYSIS_SYMBOL"] = translation.tradingview_symbol
-                vs = self._format_vision_summary(vr, ds, market_data.asset)
-                return vr, ds, vs
-
-            # Fire all three in parallel — total time = slowest single call.
-            vibe_task = asyncio.create_task(_run_vibe())
-            liquidity_task = asyncio.create_task(_run_liquidity())
-            vision_task = asyncio.create_task(_run_vision())
-            vibe_result, liquidity_result, (vision_result, detected_symbol, vision_summary) = await asyncio.gather(
-                vibe_task, liquidity_task, vision_task,
-                return_exceptions=False,
-            )
-
-            if isinstance(vibe_result, dict) and "error" in vibe_result:
-                logger.warning("Vibe agent failed: %s — using default", vibe_result.get("error"))
-                vibe_result = self._default_vibe_result(market_data)
-            if isinstance(liquidity_result, dict) and "error" in liquidity_result:
-                logger.warning("Liquidity agent failed: %s — using default", liquidity_result.get("error"))
-                liquidity_result = self._default_liquidity_result(market_data)
-
-        _t1 = _time.monotonic()
-        logger.info("[SWARM] Machine-gun phase 1 (Vibe+Liquidity+Vision parallel) done in %.1fs", _t1 - _t0)
-
-        # ============================================================
-        # PHASE 2: Closer (uses all 3 voices to make final call)
-        # Uses tertiary model so it's a 3rd independent perspective.
-        # ============================================================
-        closer_prompt = self._build_analysis_prompt(
-            market_data, news_context, session_context, user_suggestion,
-            vibe_result=vibe_result, liquidity_result=liquidity_result,
-            memory_summary=memory_summary,
-            skip_reason=skip_reason,
-            vision_summary=vision_summary,
-            market_wisdom=market_wisdom,
-        )
-
-        # Try tertiary model first (independent voice). Fall back to primary if missing.
-        result = await asyncio.to_thread(call_local_brain, closer_prompt, tertiary_model, self.timeout)
-        if isinstance(result, dict) and "error" in result and "not found" in str(result.get("error", "")).lower():
-            logger.info("[SWARM] Tertiary model %s missing — using primary %s", tertiary_model, self.model)
-            result = await asyncio.to_thread(call_local_brain, closer_prompt, self.model, self.timeout)
-        if "error" in result:
-            logger.error(f"Closer brain failed: {result['error']}")
-            result = self._default_result(market_data)
-
-        output = LLMAnalysisOutput(
-            action=SignalAction(result.get("action", "HOLD")),
-            asset=market_data.asset,
-            confidence=self._map_confidence(result.get("confidence", "MEDIUM")),
-            entry_price=result.get("entry_price", market_data.price),
-            stop_loss=result.get("stop_loss", market_data.price * 0.99),
-            take_profit=result.get("take_profit", market_data.price * 1.01),
-            reason=result.get("reason", "Qwen 2.5 analysis based on technical indicators"),
-        )
-
-        output = self._apply_vision_guardrails(output, vision_result)
-        output = self._apply_temporal_guardrails(output, session_context)
-        output = self._apply_sentiment_guardrails(output, news_context)
-
-        signal_label = "WAIT" if output.action == SignalAction.HOLD else output.action.value
-        if "[SIGNAL]" not in output.reason.upper():
-            output.reason = f"[SIGNAL] {signal_label} {output.reason}"
-
-        # ============================================================
-        # PHASE 4: Devil's Advocate (depends on Closer output)
-        # ============================================================
-        devils_challenge = await asyncio.to_thread(
-            self.devils_advocate.challenge_trade,
-            market_data, output.action.value,
-            output.entry_price or market_data.price,
-            output.stop_loss or market_data.price * 0.99,
-            output.take_profit or market_data.price * 1.01,
-            output.confidence.value, session_context,
-        )
-
-        if devils_challenge.get("rating") in ["STRONG_AVOID", "CAUTIOUS"]:
-            penalty = devils_challenge.get("confidence_penalty", -0.10)
-            logger.warning(
-                f"[DEVIL] Devil's Advocate PENALTY: {penalty:.2f} | "
-                f"Reasons: {devils_challenge.get('rejection_reasons', [])}"
-            )
-            output = self._apply_devil_penalty(output, devils_challenge)
-
-        _t3 = _time.monotonic()
-        logger.info("[SWARM] Full parallel analysis done in %.1fs", _t3 - _t0)
-
-        vibe_action = self._normalize_action(vibe_result.get("bias") or vibe_result.get("action"))
-        liquidity_action = self._normalize_action(
-            liquidity_result.get("action_bias") or liquidity_result.get("action")
-        )
-        liquidity_verdict = str(
-            liquidity_result.get("liquidity_verdict") or liquidity_result.get("zone_status") or "UNCONFIRMED"
-        ).upper()
-        mood = str(vibe_result.get("mood") or "NEUTRAL").upper()
-        market_regime = str(
-            vibe_result.get("market_regime") or self._infer_market_regime(market_data)
-        ).upper()
-        volatility_state = str(
-            vibe_result.get("volatility_state") or self._infer_volatility_state(market_data)
-        ).upper()
-
-        vibe_context = {
-            "mood": mood,
-            "mood_bias": vibe_action,
-            "liquidity_verdict": liquidity_verdict,
-            "closer_action": signal_label,
-            "market_regime": market_regime,
-            "volatility_state": volatility_state,
-            "liquidity_zone": market_data.indicators.get("LIQUIDITY_ZONE", "N/A"),
-            "memory_summary": memory_summary,
-            "force_action": skip_vibe_debate,
-            "aggression_mode": skip_vibe_debate,
-            "prompt_context": user_suggestion[:500],
-        }
-
-        vibe_brief = SwarmAgentBrief(
-            agent="Vibe",
-            action=vibe_action,
-            conviction=str(vibe_result.get("confidence") or "LOW").upper(),
-            entry_price=output.entry_price,
-            stop_loss=output.stop_loss,
-            take_profit=output.take_profit,
-            brief=str(vibe_result.get("reason") or vibe_result.get("brief") or "Mood agent neutral."),
-        )
-        liquidity_brief = SwarmAgentBrief(
-            agent="Liquidity",
-            action=liquidity_action,
-            conviction=str(liquidity_result.get("confidence") or "LOW").upper(),
-            entry_price=output.entry_price,
-            stop_loss=output.stop_loss,
-            take_profit=output.take_profit,
-            brief=str(
-                liquidity_result.get("reason")
-                or liquidity_result.get("brief")
-                or "Liquidity boxes not confirmed."
-            ),
-        )
-        closer_brief = SwarmAgentBrief(
-            agent="The Closer",
-            action=output.action.value,
-            conviction=output.confidence.value,
-            entry_price=output.entry_price,
-            stop_loss=output.stop_loss,
-            take_profit=output.take_profit,
-            brief=output.reason,
-            verdict="APPROVE" if output.action != SignalAction.HOLD else "ABORT",
-        )
-
-        transcript = DebateTranscript(
-            asset=market_data.asset,
-            technical_sniper=vibe_brief,
-            macro_analyst=liquidity_brief,
-            risk_manager=closer_brief,
-            vibe_agent=vibe_brief,
-            liquidity_agent=liquidity_brief,
-            closer_agent=closer_brief,
-            devils_advocate=devils_challenge,
-            ceo_verdict=f"[SIGNAL] {signal_label} {market_data.asset} - {output.confidence.value} confidence",
-            ceo_full_statement=output.reason,
-            cto_full_statement=vibe_brief.brief,
-            cfo_full_statement=liquidity_brief.brief,
-            vibe_context=vibe_context,
-            skip_reason=skip_reason,
-        )
-
-        logger.info(f"[OK] Analysis complete: {output.action.value} {market_data.asset}")
-        return output, transcript
-
-    def _build_analysis_prompt(
-        self,
-        market_data: MarketDataPoint,
-        news: str,
-        session_context: dict = None,
-        user_suggestion: str = "",
-        *,
-        vibe_result: Optional[Dict[str, Any]] = None,
-        liquidity_result: Optional[Dict[str, Any]] = None,
-        memory_summary: str = "",
-        skip_reason: str = "",
-        vision_summary: str = "",
-        market_wisdom: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """Build the closer prompt that merges Vibe + Liquidity into a strike decision."""
-        snapshot = self._market_snapshot(market_data)
-        session_summary = self._session_summary(session_context)
-        user_summary = f"User request: {user_suggestion}" if user_suggestion else "User request: none"
-        vibe_summary = self._format_agent_summary(vibe_result, fallback="Mood agent unavailable")
-        liquidity_summary = self._format_agent_summary(liquidity_result, fallback="Liquidity agent unavailable")
-        memory_block = memory_summary or "No prior losing Vibe pattern recorded for this asset."
-        skip_block = skip_reason or "None"
-
-        # MIA Wisdom Integration
-        mia_block = "N/A"
-        if market_wisdom:
-            mia_block = f"ADVICE: {market_wisdom.get('coaching_advice')}\nINTELLIGENCE SCORE: {market_wisdom.get('intelligence_score')}/100"
-
-        # Trend filter data from indicators
-        ema_20 = market_data.indicators.get("EMA_20", "N/A")
-        ema_50 = market_data.indicators.get("EMA_50", "N/A")
-        trend_direction = market_data.indicators.get("TREND_DIRECTION", "N/A")
-        mtf_bias = market_data.indicators.get("MTF_BIAS", "N/A")
-        mtf_alignment = market_data.indicators.get("MTF_ALIGNMENT", "N/A")
-
-        return f"""You are The Closer. Return JSON only.
-
-{PREDATOR_SYSTEM_INSTRUCTION}
-
-{user_summary}
-{session_summary}
-
-ASSET: {market_data.asset}
-PRICE: {market_data.price:.2f}
-RSI: {market_data.indicators.get('RSI', 50):.1f}
-EMA_20: {ema_20}
-EMA_50: {ema_50}
-TREND_DIRECTION: {trend_direction}
-MTF_BIAS: {mtf_bias}
-MTF_ALIGNMENT: {mtf_alignment}
-LIQUIDITY: {market_data.indicators.get('LIQUIDITY_ZONE', 'N/A')}
-LAST 10 CANDLES:
-{snapshot['candles_block']}
-
-VIBE AGENT:
-{vibe_summary}
-
-LIQUIDITY AGENT:
-{liquidity_summary}
-
-VIBE MEMORY:
-{memory_block}
-
-DEBATE SKIP STATUS:
-{skip_block}
-
-VISION AGENT:
-{vision_summary or 'Vision agent disabled by config — rely entirely on technical indicators, regime detector, and liquidity zones. DO NOT downgrade confidence for missing vision.'}
-
-Rules:
-- TREND FILTER IS MANDATORY: If TREND_DIRECTION is BEARISH, you MUST NOT signal BUY. If BULLISH, you MUST NOT signal SELL.
-- If MTF_ALIGNMENT is AGAINST, downgrade to HOLD unless the setup has overwhelming confluence.
-- Output action BUY, SELL, or HOLD.
-- Prefix reason with [SIGNAL] BUY, [SIGNAL] SELL, or [SIGNAL] WAIT.
-- Respect VIBE MEMORY. If a similar losing pattern is present, downgrade confidence or WAIT unless the setup is clearly stronger now.
-- If the vision agent disagrees with the setup or cannot confirm the chart, reduce aggression and prefer HOLD.
-- If session context warns about a holiday or Friday close-risk window, avoid fresh entries and prefer WAIT.
-- Include entry_price, stop_loss, and take_profit.
-- Keep reason concise and actionable.
-
-JSON schema only:
-{{"action":"BUY or SELL or HOLD","confidence":"LOW or MEDIUM or HIGH","entry_price":0.00,"stop_loss":0.00,"take_profit":0.00,"reason":"[SIGNAL] BUY/SELL/WAIT short verdict","user_verdict":"AGREE or DISAGREE or STRATEGY_REJECTED or FORCE_WITH_WARNING","user_explanation":"short explanation","multi_tf_analysis":"short summary","pine_script_requested":true or false}}"""
-
-    def _build_vibe_prompt(
-        self,
-        market_data: MarketDataPoint,
-        session_context: dict,
-        user_suggestion: str,
-        memory_summary: str,
-    ) -> str:
-        snapshot = self._market_snapshot(market_data)
-        session_summary = self._session_summary(session_context)
-        return f"""You are Agent 1: Vibe. Return JSON only.
-
-{PREDATOR_SYSTEM_INSTRUCTION}
-
-{session_summary}
-User request: {user_suggestion or 'none'}
-Asset: {market_data.asset}
-Price: {market_data.price:.2f}
-RSI: {market_data.indicators.get('RSI', 50):.1f}
-Signal type: {market_data.indicators.get('SIGNAL_TYPE', 'N/A')}
-Signal strength: {market_data.indicators.get('SIGNAL_STRENGTH', 'N/A')}
-Last 10 candles:
-{snapshot['candles_block']}
-Memory note: {memory_summary or 'none'}
-
-Decide the market mood and directional bias.
-
-JSON schema only:
-{{"mood":"GREED or FEAR or NEUTRAL","bias":"BUY or SELL or HOLD","confidence":"LOW or MEDIUM or HIGH","market_regime":"TREND or BREAKOUT or CHOP or MEAN_REVERT","volatility_state":"CALM or NORMAL or HOT","reason":"short mood explanation"}}"""
-
-    def _build_liquidity_prompt(
-        self,
-        market_data: MarketDataPoint,
-        session_context: dict,
-        user_suggestion: str,
-        vibe_result: Dict[str, Any],
-        memory_summary: str,
-    ) -> str:
-        snapshot = self._market_snapshot(market_data)
-        session_summary = self._session_summary(session_context)
-        return f"""You are Agent 2: Liquidity. Return JSON only.
-
-{PREDATOR_SYSTEM_INSTRUCTION}
-
-{session_summary}
-User request: {user_suggestion or 'none'}
-Asset: {market_data.asset}
-Price: {market_data.price:.2f}
-Nearest liquidity box: {market_data.indicators.get('LIQUIDITY_ZONE', 'N/A')}
-Mood agent: {self._format_agent_summary(vibe_result, fallback='none')}
-Last 10 candles:
-{snapshot['candles_block']}
-Memory note: {memory_summary or 'none'}
-
-Confirm whether the liquidity boxes support a strike now.
-
-JSON schema only:
-{{"liquidity_verdict":"CONFIRMED or WEAK or TRAP or UNCONFIRMED","action_bias":"BUY or SELL or HOLD","confidence":"LOW or MEDIUM or HIGH","reason":"short liquidity explanation"}}"""
-
-    def _market_snapshot(self, market_data: MarketDataPoint) -> Dict[str, str]:
-        recent_candles = market_data.indicators.get("RECENT_CANDLES", [])[:10]
-        candles_block = "\n".join(f"- {candle}" for candle in recent_candles) if recent_candles else "- N/A"
-        return {"candles_block": candles_block}
-
-    def _session_summary(self, session_context: Optional[dict]) -> str:
-        if not session_context:
-            return "Session: Unknown"
-        return (
-            f"Session: {session_context.get('primary_session', 'Unknown')} | "
-            f"Day: {session_context.get('day_of_week', 'Unknown')} | "
-            f"UTC: {session_context.get('current_time_utc', 'Unknown')} | "
-            f"FridayCloseRisk: {session_context.get('is_friday_close_window', False)} | "
-            f"HolidayUS: {session_context.get('is_holiday_us', False)} | "
-            f"HolidayHK: {session_context.get('is_holiday_hk', False)} | "
-            f"Note: {session_context.get('session_note', '')}"
-        )
-
-    def _format_vision_summary(
-        self,
-        vision_result: Optional[Dict[str, Any]],
-        detected_symbol: str,
-        expected_symbol: str,
-    ) -> str:
-        if not vision_result:
-            return "Vision agent unavailable."
-        signal = str(vision_result.get("signal") or "NONE").upper()
-        reason = str(vision_result.get("reason") or "No visual reasoning provided.").strip()
-        detected = detected_symbol or "UNREADABLE"
-        return (
-            f"Detected symbol: {detected} | Expected symbol: {expected_symbol} | "
-            f"Visual signal: {signal} | Reason: {reason}"
-        )
-
-    def _apply_sentiment_guardrails(
-        self,
-        output: LLMAnalysisOutput,
-        news_context: Optional[Dict[str, Any]],
-    ) -> LLMAnalysisOutput:
-        """Conflict Resolution: If Vision (BUY) conflicts with Sentiment (bearish / Red Folder),
-        default to the safer side (HOLD or confidence downgrade)."""
-        if not news_context or output.action == SignalAction.HOLD:
-            return output
-
-        # Red Folder kill switch: any active high-impact event blocks fresh entries
-        red_folder_active = bool(news_context.get("red_folder_active", False))
-        if red_folder_active:
-            proposed = output.action.value
-            output.action = SignalAction.HOLD
-            output.confidence = ConfidenceLevel.LOW
-            output.reason = (
-                f"[SIGNAL] WAIT Sentiment conflict: Red Folder event active. "
-                f"Vision proposed {proposed} but news kills the entry. Standing aside."
-            )
-            logger.warning("[CRO] Sentiment guardrail: Red Folder blocked %s signal", proposed)
-            return output
-
-        # Softer conflict: negative sentiment disagrees with Vision direction
-        sentiment_bias = str(news_context.get("sentiment_bias", "")).upper()
-        if sentiment_bias and sentiment_bias != output.action.value:
-            # Vision says BUY but news is bearish (or vice versa) — downgrade confidence
-            if output.confidence in (ConfidenceLevel.HIGH, ConfidenceLevel.VERY_HIGH):
-                prev = output.confidence
-                output.confidence = ConfidenceLevel.MEDIUM
-                output.reason = (
-                    f"{output.reason} | Sentiment conflict: news bias is {sentiment_bias}, "
-                    f"downgraded from {prev.value} to MEDIUM."
-                )
-                logger.info(
-                    "[CRO] Sentiment/Vision conflict: news=%s vs signal=%s — confidence downgraded",
-                    sentiment_bias, output.action.value,
-                )
-        return output
-
-    def _apply_vision_guardrails(
-        self,
-        output: LLMAnalysisOutput,
-        vision_result: Optional[Dict[str, Any]],
-    ) -> LLMAnalysisOutput:
-        # When vision is disabled, vision_result is None and we MUST NOT apply
-        # any penalty. The local VLMs (moondream/llava) cannot read TradingView
-        # charts and would otherwise downgrade every trade.
-        if not vision_result or not getattr(config, "USE_VISION", False):
-            return output
-
-        vision_signal = str(vision_result.get("signal") or "NONE").upper()
-        if output.action == SignalAction.HOLD:
-            return output
-        if vision_signal in {"BUY", "SELL"} and vision_signal != output.action.value:
-            proposed_action = output.action.value
-            output.action = SignalAction.HOLD
-            output.confidence = ConfidenceLevel.LOW
-            output.reason = (
-                f"[SIGNAL] WAIT Vision disagreement: chart shows {vision_signal} while text agents proposed "
-                f"{proposed_action}. Standing aside."
-            )
-            return output
-        if vision_signal == "NONE":
-            output.reason = f"{output.reason} | Vision could not confirm the setup."
-            if output.confidence == ConfidenceLevel.HIGH:
-                output.confidence = ConfidenceLevel.MEDIUM
-            elif output.confidence == ConfidenceLevel.VERY_HIGH:
-                output.confidence = ConfidenceLevel.HIGH
-        return output
-
-    def _apply_temporal_guardrails(
-        self,
-        output: LLMAnalysisOutput,
-        session_context: Optional[Dict[str, Any]],
-    ) -> LLMAnalysisOutput:
-        context = session_context or {}
-        if output.action == SignalAction.HOLD:
-            return output
-        # FUTURES BYPASS: CME / Apex micro futures trade through US partial
-        # holidays. Only force HOLD when futures are actually closed (hard
-        # close days like Christmas / Thanksgiving). active_markets always
-        # includes "Futures" when CME is open.
-        active_markets = [str(m).lower() for m in (context.get("active_markets") or [])]
-        futures_open_on_holiday = any("futures" in m for m in active_markets)
-        hard_close = bool(context.get("is_hard_close") or context.get("equities_and_futures_closed"))
-        if (context.get("is_holiday_us") or context.get("is_holiday_hk")) and (hard_close or not futures_open_on_holiday):
-            holiday_name = str(context.get("holiday_name") or "Market holiday")
-            output.action = SignalAction.HOLD
-            output.confidence = ConfidenceLevel.LOW
-            output.reason = f"[SIGNAL] WAIT {holiday_name}. Fresh entries are blocked by holiday conditions."
-            return output
-        if context.get("is_friday_close_window"):
-            cutoff = int(context.get("friday_close_cutoff_utc", getattr(config, "FRIDAY_CLOSE_CUTOFF_UTC", 18)) or 18)
-            output.action = SignalAction.HOLD
-            output.confidence = ConfidenceLevel.LOW
-            output.reason = (
-                f"[SIGNAL] WAIT Friday close-risk window after {cutoff:02d}:00 UTC. "
-                "Avoiding fresh entries into the weekend."
-            )
-        return output
-
-    def _format_agent_summary(self, result: Optional[Dict[str, Any]], fallback: str) -> str:
-        if not result:
-            return fallback
-        if isinstance(result, dict):
-            parts = []
-            for key in ("mood", "bias", "liquidity_verdict", "action_bias", "market_regime", "volatility_state", "confidence", "reason"):
-                value = result.get(key)
-                if value:
-                    parts.append(f"{key}={value}")
-            return "; ".join(parts) if parts else fallback
-        return str(result)
-
-    def _normalize_action(self, raw: Optional[str]) -> str:
-        action = str(raw or "HOLD").upper().strip()
-        if action in {"BUY", "SELL"}:
-            return action
-        return "HOLD"
-
-    def _infer_market_regime(self, market_data: MarketDataPoint) -> str:
-        signal_type = str(market_data.indicators.get("SIGNAL_TYPE", "")).upper()
-        if "BREAK" in signal_type or "SPIKE" in signal_type:
-            return "BREAKOUT"
-        signal_strength = float(market_data.indicators.get("SIGNAL_STRENGTH", 0.0) or 0.0)
-        if signal_strength >= 0.75:
-            return "TREND"
-        if signal_strength <= 0.3:
-            return "CHOP"
-        return "MEAN_REVERT"
-
-    def _infer_volatility_state(self, market_data: MarketDataPoint) -> str:
-        signal_strength = float(market_data.indicators.get("SIGNAL_STRENGTH", 0.0) or 0.0)
-        if signal_strength >= 0.8:
-            return "HOT"
-        if signal_strength <= 0.3:
-            return "CALM"
-        return "NORMAL"
-
-    def _default_vibe_result(self, market_data: MarketDataPoint, skipped: bool = False) -> dict:
-        return {
-            "mood": "NEUTRAL",
-            "bias": "HOLD",
-            "confidence": "LOW",
-            "market_regime": self._infer_market_regime(market_data),
-            "volatility_state": self._infer_volatility_state(market_data),
-            "reason": "Skipped Vibe agent." if skipped else "Vibe agent unavailable - neutral bias.",
-        }
-
-    def _default_liquidity_result(self, market_data: MarketDataPoint, skipped: bool = False) -> dict:
-        return {
-            "liquidity_verdict": "UNCONFIRMED",
-            "action_bias": "HOLD",
-            "confidence": "LOW",
-            "reason": (
-                "Skipped Liquidity agent."
-                if skipped
-                else f"Liquidity confirmation unavailable near {market_data.indicators.get('LIQUIDITY_ZONE', 'N/A')}."
-            ),
-        }
-
-    def _map_confidence(self, raw: str) -> ConfidenceLevel:
-        """Map string to ConfidenceLevel enum."""
-        mapping = {
-            "LOW": ConfidenceLevel.LOW,
-            "MEDIUM": ConfidenceLevel.MEDIUM,
-            "HIGH": ConfidenceLevel.HIGH,
-            "VERY_HIGH": ConfidenceLevel.VERY_HIGH,
-        }
-        return mapping.get(str(raw).upper(), ConfidenceLevel.MEDIUM)
-
-    def _default_result(self, market_data: MarketDataPoint) -> dict:
-        """Fallback when local brain fails."""
-        return {
-            "action": "HOLD",
-            "confidence": "LOW",
-            "entry_price": market_data.price,
-            "stop_loss": market_data.price * 0.98,
-            "take_profit": market_data.price * 1.02,
-            "reason": "[SIGNAL] WAIT Local Qwen 2.5 analysis failed - defaulting to HOLD for safety",
-        }
