@@ -1212,6 +1212,33 @@ class VcaniTradeApp:
         self.cmd.log(f"🚀 CO-PILOT COMMAND: {command}")
         self.cmd.update_copilot_status("Processing...")
 
+        # ========== HAWK PROTOCOL: PROFIT HARVEST COMMAND ==========
+        if command == "PROFIT_HARVEST":
+            self.cmd.log("🔴 ONE-CLICK PROFIT HARVEST EXECUTING...")
+            try:
+                # Execute global profit harvest from trade engine
+                results = self.trade_engine.execute_global_profit_harvest()
+                
+                # Log results to dashboard
+                self.cmd.log(
+                    f"✅ HARVEST COMPLETE: Closed {results['positions_closed']} positions | "
+                    f"Total PnL: ${results['total_pnl']:.2f}"
+                )
+                
+                # Announce via AI narrator
+                if results['positions_closed'] > 0:
+                    self.ai_narrator.add_activity(
+                        "💰", 
+                        f"Profit Harvest: Closed {results['positions_closed']} positions, PnL: ${results['total_pnl']:.2f}"
+                    )
+                    self.ai_narrator.speak(f"Profit harvest complete. Closed {results['positions_closed']} positions with total P and L of ${results['total_pnl']:.2f}. Ready for next opportunity.")
+                
+                self.cmd.update_copilot_status("Harvest Executed")
+            except Exception as e:
+                self.cmd.log(f"❌ Profit harvest failed: {e}")
+                self.cmd.update_copilot_status("Harvest Failed")
+            return
+
         # ========== DYNAMIC STYLE SWITCHING ==========
         command_upper = command.upper()
         
