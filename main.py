@@ -322,10 +322,16 @@ class VcaniTradeEngine:
             ghost_executor=self._ghost_executor
         )
         
-        # UI components
-        self.dashboard = Dashboard()
+        # UI components - PASS ENGINE REFERENCE TO DASHBOARD
+        self.dashboard = Dashboard(self)
         self.ai_narrator = AINarrator()
         self.lion_switchboard = LionSwitchboard()
+        
+        # HAWK PROTOCOL: Set up timer for U-TURN Radar (trailing stops)
+        self.hawk_timer = QTimer(self)
+        self.hawk_timer.timeout.connect(self.update_trailing_stops)
+        self.hawk_timer.start(1000)  # Check every 1 second
+        logger.info("[HAWK] U-Turn Radar timer initialized (1000ms interval)")
         
         # Signal Dispatcher & Thread Bridge
         self.signal_bridge = AutomatedSignalBridge(self)
@@ -344,6 +350,11 @@ class VcaniTradeEngine:
         self.current_watchlist = self._normalize_watchlist(config.ACTIVE_WATCHLIST)
         self.set_watchlist(self.current_watchlist)
         self._wire_ui_signals()
+        
+        # HAWK PROTOCOL: Single-Asset Lock
+        self.target_lock_active = False
+        self.locked_asset = None
+        self.hawk_mode = True  # Enable single-asset focus
         
         # Balance tracking
         self.balance = float(config.CURRENT_BALANCE)
@@ -736,6 +747,12 @@ class VcaniTradeEngine:
             
             if success:
                 logger.info("[EXEC] Trade executed: %s %s @ %.2f", action, ticker, entry)
+                # HAWK LOCK ACTIVATION
+                self.target_lock_active = True
+                self.locked_asset = ticker
+                logger.info(f"[HAWK] TARGET LOCKED: {ticker}. Scanners suspended.")
+                self.suspend_scanners()
+                
                 return TradeResult(
                     status="EXECUTED",
                     ticker=ticker,
@@ -846,6 +863,164 @@ class VcaniTradeEngine:
                 return self.scanner._fetch_market_data(ticker)["Close"].iloc[-1]
         except Exception:
             return 0.0
+
+    # ==================== HAWK PROTOCOL METHODS ====================
+    
+    def suspend_scanners(self):
+        """Halts all background scanning threads except for the locked asset."""
+        if hasattr(self, 'scanner') and self.scanner:
+            self.scanner.paused = True
+            logger.info("[SYSTEM] Multi-ticker scanners PAUSED.")
+        
+        if hasattr(self, 'cloud_scanner') and self.cloud_scanner:
+            if hasattr(self.cloud_scanner, 'stop'):
+                self.cloud_scanner.stop()
+            logger.info("[SYSTEM] Cloud scanner PAUSED.")
+    
+    def resume_scanners(self):
+        """Resumes scanning after position close."""
+        self.target_lock_active = False
+        self.locked_asset = None
+        
+        if hasattr(self, 'scanner') and self.scanner:
+            self.scanner.paused = False
+            logger.info("[SYSTEM] Multi-ticker scanners RESUMED.")
+        
+        if hasattr(self, 'cloud_scanner') and self.cloud_scanner:
+            if hasattr(self.cloud_scanner, 'start'):
+                self.cloud_scanner.start()
+            logger.info("[SYSTEM] Cloud scanner RESUMED.")
+    
+    def update_trailing_stops(self):
+        """U-TURN RADAR & TRAILING STOP for locked asset."""
+        if not hasattr(self, 'target_lock_active') or not self.target_lock_active:
+            return
+        
+        if not hasattr(self, 'locked_asset') or not self.locked_asset:
+            return
+        
+        # Get current price for locked asset
+        current_price = self._fetch_current_price(self.locked_asset)
+        if not current_price or current_price <= 0:
+            return
+        
+        # Calculate Dynamic ATR Buffer (using your existing atr_stops logic)
+        atr_value = self._calculate_atr(self.locked_asset, period=3)
+        if atr_value is None or atr_value <= 0:
+            return
+        
+        buffer = atr_value * 1.5  # 1:1.5 Risk Symmetry
+        
+        position = self._get_open_position(self.locked_asset)
+        if not position:
+            self.resume_scanners()
+            return
+        
+        # U-TURN LOGIC
+        if position.get('action') == 'BUY':
+            trailing_stop = current_price - buffer
+            entry_price = position.get('entry_price', 0)
+            if entry_price > 0 and current_price < entry_price + (buffer * 0.5):  # Reversal detected
+                logger.info(f"[HAWK U-TURN] Trend reversal detected on {self.locked_asset}. Exiting.")
+                self.execute_global_profit_harvest(symbol=self.locked_asset)
+        
+        elif position.get('action') == 'SELL':
+            trailing_stop = current_price + buffer
+            entry_price = position.get('entry_price', 0)
+            if entry_price > 0 and current_price > entry_price - (buffer * 0.5):  # Reversal detected
+                logger.info(f"[HAWK U-TURN] Trend reversal detected on {self.locked_asset}. Exiting.")
+                self.execute_global_profit_harvest(symbol=self.locked_asset)
+    
+    def _calculate_atr(self, ticker: str, period: int = 3) -> Optional[float]:
+        """Calculate ATR for ticker. Override this with actual implementation."""
+        # Placeholder - implement based on your ATR calculation
+        logger.debug(f"[HAWK] Calculating ATR for {ticker} (period={period})")
+        return None
+    
+    def _get_open_position(self, ticker: str) -> Optional[dict]:
+        """Get open position for ticker."""
+        for position in self.positions:
+            if isinstance(position, dict) and position.get('asset') == ticker:
+                return position
+            elif hasattr(position, 'asset') and position.asset == ticker:
+                return {
+                    'asset': position.asset,
+                    'action': position.action.value if hasattr(position.action, 'value') else str(position.action),
+                    'entry_price': position.entry_price,
+                    'stop_loss': position.stop_loss,
+                    'take_profit': position.take_profit,
+                }
+        return None
+    
+    def execute_global_profit_harvest(self, symbol=None):
+        """
+        Instantly closes positions. 
+        If symbol is provided, closes only that symbol (U-Turn).
+        If None, closes ALL (Manual Button Press).
+        """
+        symbols_to_close = [symbol] if symbol else self._get_all_open_symbols()
+        
+        total_profit = 0
+        for sym in symbols_to_close:
+            pos = self._get_open_position(sym)
+            if pos:
+                profit = pos.get('pnl', 0)
+                self._close_position(sym)
+                total_profit += profit
+                logger.info(f"[EXECUTION] Closed {sym}. Profit: ${profit}")
+        
+        # Reset State
+        self.resume_scanners()
+        
+        # Announce via AI Narrator
+        msg = f"Harvest complete. Total profit: ${total_profit:.2f}. Scanners re-engaged."
+        self._speak(msg)  # Ensure self.speak connects to your TTS engine
+        
+        return total_profit
+    
+    def _get_all_open_symbols(self) -> List[str]:
+        """Get all symbols with open positions."""
+        symbols = []
+        for position in self.positions:
+            if isinstance(position, dict):
+                asset = position.get('asset')
+            else:
+                asset = getattr(position, 'asset', None)
+            if asset and asset not in symbols:
+                symbols.append(asset)
+        return symbols
+    
+    def _close_position(self, symbol: str) -> bool:
+        """Close position for symbol."""
+        try:
+            if config.get_active_mode() == "TRADINGVIEW":
+                if hasattr(self, 'rpa_executor') and self.rpa_executor:
+                    self.rpa_executor.flatten_position(symbol)
+            else:
+                if hasattr(self, 'trade_executor') and self.trade_executor:
+                    self.trade_executor.close_position(symbol)
+            
+            # Remove from positions list
+            self.positions = [p for p in self.positions 
+                             if (isinstance(p, dict) and p.get('asset') != symbol) or
+                             (not isinstance(p, dict) and getattr(p, 'asset', None) != symbol)]
+            
+            logger.info(f"[HAWK] Position closed: {symbol}")
+            return True
+        except Exception as e:
+            logger.error(f"[HAWK] Error closing position {symbol}: {e}")
+            return False
+    
+    def _speak(self, msg: str):
+        """AI Narrator TTS. Override this with actual TTS implementation."""
+        logger.info(f"[AI NARRATOR] {msg}")
+        # Try to use AI narrator if available
+        if hasattr(self, 'ai_narrator') and self.ai_narrator:
+            try:
+                if hasattr(self.ai_narrator, 'speak'):
+                    self.ai_narrator.speak(msg)
+            except Exception:
+                pass
 
 # =========================================================================
 # MAIN ENTRY POINT

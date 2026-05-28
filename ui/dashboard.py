@@ -1340,9 +1340,45 @@ class CommandCenter(QWidget):
 
         stats_row.addStretch()
         layout.addLayout(stats_row)
-
+        
+        # --- HAWK PROTOCOL: ONE-CLICK HARVEST BUTTON ---
+        self.btn_harvest = QPushButton("💰 ONE-CLICK PROFIT HARVEST")
+        self.btn_harvest.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {GREEN}; color: white; 
+                font-weight: bold; font-size: 14px; padding: 10px;
+                border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background-color: #27ae60;
+            }}
+            QPushButton:pressed {{
+                background-color: #1e8449;
+            }}
+        """)
+        self.btn_harvest.clicked.connect(self.trigger_harvest)
+        layout.addWidget(self.btn_harvest)
+        
         return panel
-
+    
+    # =================== HAWK PROTOCOL METHODS ===================
+    def trigger_harvest(self):
+        """Direct link to the core execution engine."""
+        if hasattr(self, 'engine') and self.engine:
+            confirm = QMessageBox.question(
+                self, 
+                "Confirm Harvest", 
+                "Execute immediate market close on all positions?", 
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if confirm == QMessageBox.Yes:
+                self.engine.execute_global_profit_harvest()
+                self.log("[HARVEST] Profit harvest executed")
+        else:
+            self.log("[WARN] No engine connected for harvest")
+        
+        return panel
+    
     # =================== TRADE LOG PANEL ===================
     def _build_trade_log_panel(self) -> QWidget:
         """Trade History & Activity Log"""
@@ -1858,6 +1894,21 @@ class CommandCenter(QWidget):
         layout.addLayout(review_row)
 
         return panel
+
+    def trigger_harvest(self):
+        """Direct link to the core execution engine."""
+        if hasattr(self, 'engine') and self.engine:
+            confirm = QMessageBox.question(
+                self, 
+                "Confirm Harvest", 
+                "Execute immediate market close on all positions?", 
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                self.engine.execute_global_profit_harvest()
+                self.log("[HARVEST] Profit harvest executed")
+        else:
+            self.log("[WARN] No engine connected for harvest")
 
     def update_meta_cognition(self, data: Dict):
         """Update Meta-Cognition panel with learning progress data."""
