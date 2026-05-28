@@ -10,6 +10,10 @@ title VcanTrade AI
 REM --- Go to the bot folder ---
 cd /d "C:\Users\vijin\vcantrade.com-3"
 
+REM --- Quiet Qt/Windows DPI warnings before PyQt starts ---
+set QT_LOGGING_RULES=qt.qpa.window=false
+set QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough
+
 REM --- Kill any old bot still running ---
 taskkill /F /IM python.exe 2>nul >nul
 timeout /t 2 /nobreak >nul

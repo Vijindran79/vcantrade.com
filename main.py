@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from collections import Counter
 from typing import Optional, Dict, Any, Tuple, List
 
+# Keep Qt/Windows DPI negotiation quiet and stable on scaled laptop panels.
+# Must be set before importing/constructing QApplication.
+os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.window=false")
+os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
