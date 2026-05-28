@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QPropertyAnimation, 
-    QEasingCurve, QVariantAnimation, QEventLoop
+    QEasingCurve, QVariantAnimation, QEventLoop, QSize
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPainter, QBrush, QPen,
@@ -274,7 +274,7 @@ class GlassmorphicPanel(QWidget):
         super().mouseReleaseEvent(event)
 
 
-class AINarratorOverlay(GlassmorphicPanel):
+class AINarratorOverlayClassWindow(GlassmorphicPanel):
     """
     AI Narrator - Floating glassmorphic overlay that shows bot activity.
     
@@ -292,6 +292,8 @@ class AINarratorOverlay(GlassmorphicPanel):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        logger.info("[UI-INITIALIZATION] Initializing High-DPI safe narrator layout boundaries.")
+        
         self.activity_count = 0
         self._font_scale = 1.0
         # Start movable by default. Pinned means "locked on top", not mouse-dead.
@@ -304,6 +306,15 @@ class AINarratorOverlay(GlassmorphicPanel):
         self._signal_alert_deadline = 0.0
         self._signal_alert_kind = "signal"
         self._last_scan_activity = {}
+        
+        self._apply_screen_safe_geometry()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+
         glass_enabled = bool(getattr(config, "HUD_GLASS_ENABLED", True))
         self._current_opacity = (
             0.88 if glass_enabled and sys.platform == "win32"
@@ -320,14 +331,46 @@ class AINarratorOverlay(GlassmorphicPanel):
         # Connect signals
         self.activity_added.connect(self.add_activity)
         
-        logger.info("AI Narrator Overlay initialized")
+        logger.info("AI Narrator Overlay Class Window initialized")
+
+    def _apply_screen_safe_geometry(self):
+        """Clamp the narrator inside the available desktop, even under Windows DPI scaling."""
+        primary_screen = QApplication.primaryScreen()
+        self.setMinimumSize(QSize(340, 380))
+
+        if primary_screen:
+            available_geo = primary_screen.availableGeometry()
+            safe_width = max(340, int(available_geo.width() * 0.28))
+            safe_height = max(380, int(available_geo.height() * 0.65))
+
+            self.setMaximumSize(QSize(safe_width, safe_height))
+            self.resize(safe_width, safe_height)
+
+            margin = 20
+            x = max(available_geo.left() + margin, available_geo.left() + available_geo.width() - safe_width - margin)
+            y = available_geo.top() + margin
+            self.move(x, y)
+
+            logger.info(
+                "[UI-GEOMETRY] Narrator clamped to %sx%s within available desktop %s.",
+                safe_width,
+                safe_height,
+                available_geo,
+            )
+            return
+
+        self.setMaximumSize(QSize(400, 600))
+        self.resize(400, 600)
+        logger.warning("[UI-GEOMETRY] Screen detection offline - narrator using 400x600 fallback.")
     
     def init_ui(self):
         """Initialize the narrator UI."""
-        self.resize(440, 640)
+        # Note: resize is now handled in __init__ dynamically
+        content = QWidget(self)
+        content.setStyleSheet("background: transparent;")
         
         # Main layout
-        main_layout = QVBoxLayout()
+        main_layout = QVBoxLayout(content)
         main_layout.setContentsMargins(16, 16, 16, 16)
         main_layout.setSpacing(12)
         
@@ -597,7 +640,40 @@ class AINarratorOverlay(GlassmorphicPanel):
         bottom_bar.addWidget(self.size_grip)
         main_layout.addLayout(bottom_bar)
         
-        self.setLayout(main_layout)
+        # Put the full narrator body inside a scroll container. Without this,
+        # Windows High-DPI tries to expand the top-level frameless window to
+        # the layout's full size hint, ignoring our safe outer desktop clamp.
+        self.body_scroll_area = QScrollArea(self)
+        self.body_scroll_area.setWidgetResizable(True)
+        self.body_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.body_scroll_area.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: rgba(100, 120, 160, 30);
+                width: 7px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(100, 120, 160, 90);
+                border-radius: 3px;
+                min-height: 24px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none;
+                background: none;
+            }
+        """)
+        self.body_scroll_area.setWidget(content)
+
+        shell_layout = QVBoxLayout(self)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        shell_layout.addWidget(self.body_scroll_area)
+        self.setLayout(shell_layout)
         
         # Set initial status
         self._refresh_mode_label()
@@ -747,21 +823,28 @@ class AINarratorOverlay(GlassmorphicPanel):
 
     def _apply_window_mode(self):
         geometry = self.geometry()
-        if self._pinned:
-            flags = (
-                Qt.WindowType.FramelessWindowHint |
-                Qt.WindowType.WindowStaysOnTopHint |
-                Qt.WindowType.Tool
-            )
-            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
-        else:
-            # Normal tool window: movable, resizable, and allowed to go behind the chart.
-            flags = Qt.WindowType.Window
-            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        flags = (
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
 
         self.setWindowFlags(flags)
+        self._apply_screen_safe_geometry()
+        if geometry.isValid():
+            screen = QApplication.primaryScreen()
+            if screen:
+                desktop = screen.availableGeometry()
+                width = min(max(geometry.width(), self.minimumWidth()), self.maximumWidth(), desktop.width())
+                height = min(max(geometry.height(), self.minimumHeight()), self.maximumHeight(), desktop.height())
+                max_x = desktop.left() + desktop.width() - width
+                max_y = desktop.top() + desktop.height() - height
+                x = min(max(geometry.x(), desktop.left()), max_x)
+                y = min(max(geometry.y(), desktop.top()), max_y)
+                self.setGeometry(x, y, width, height)
         self.show()
-        self.setGeometry(geometry)
+        self.raise_()
         self._refresh_pin_state()
 
     def _refresh_pin_state(self, announce: bool = True):

@@ -241,7 +241,18 @@ class LionSwitchboardDialog(QDialog):
         self.selection = default_launch_profile()
         self.setWindowTitle("Lion Switchboard")
         self.setModal(True)
-        self.setMinimumWidth(520)
+        
+        # 2. Dynamic Desktop Screen Detection Architecture
+        from PyQt6.QtWidgets import QApplication
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            available_geometry = primary_screen.availableGeometry()
+            target_width = min(520, int(available_geometry.width() * 0.45))
+            target_height = min(400, int(available_geometry.height() * 0.50))
+            self.resize(target_width, target_height)
+        else:
+            self.setMinimumWidth(520)
+
         self._build_ui()
 
     def _build_ui(self) -> None:

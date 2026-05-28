@@ -89,6 +89,7 @@ class Scanner:
         self.consensus = SwarmConsensus()
         self.brain = GeminiBrain()
         self.code_architect = CodeArchitect()
+        self.session_detector = MarketSessionDetector()
         self.liquidity_engine = LiquidityEngine()
         self.recent_signals: Dict[str, datetime] = {}  # Legacy signal-type cooldown state
         self.last_signal_timestamps: Dict[str, datetime] = {}
@@ -146,6 +147,8 @@ class Scanner:
                 continue
             
             try:
+                if self.status_callback:
+                    self.status_callback(str(ticker), "scanning")
                 signal = self._scan_ticker(ticker)
                 if signal:
                     signals.append(signal)
@@ -153,6 +156,114 @@ class Scanner:
                 logger.warning("[SCANNER] Error scanning %s: %s", ticker, e)
         
         return signals
+
+    async def scan_all_tickers(self) -> List[TechnicalSignal]:
+        """Async compatibility wrapper used by CloudScannerThread."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.scan)
+
+    async def process_signals(self, signals: List[TechnicalSignal]) -> Optional[dict]:
+        """Run detected technical opportunities through the configured brain."""
+        if not signals:
+            return None
+
+        signal = max(signals, key=lambda item: float(getattr(item, "strength", 0.0) or 0.0))
+        ticker = str(getattr(signal, "ticker", "UNKNOWN") or "UNKNOWN")
+        action = self._action_from_signal(signal)
+        package = self._brain_package_from_signal(signal)
+
+        if self.status_callback:
+            self.status_callback(ticker, f"brain_reasoning:{action}")
+
+        loop = asyncio.get_running_loop()
+        decision = await loop.run_in_executor(
+            None,
+            lambda: self.brain.request_decision(action, package),
+        )
+
+        verdict = str(decision.get("verdict", "[SIGNAL] WAIT") or "[SIGNAL] WAIT").upper()
+        if self.status_callback:
+            if decision.get("fallback_mode"):
+                self.status_callback(ticker, f"brain_fallback:{decision.get('brain_used', 'OLLAMA_PREDATOR')}")
+            self.status_callback(ticker, f"brain_verdict:{verdict}")
+
+        if "BUY" not in verdict and "SELL" not in verdict:
+            logger.info("[SCANNER] Brain returned WAIT for %s: %s", ticker, decision.get("reasoning", ""))
+            return None
+
+        final_action = "BUY" if "BUY" in verdict else "SELL"
+        confidence = max(0.0, min(1.0, float(getattr(signal, "strength", 0.0) or 0.0)))
+        return {
+            "ticker": ticker,
+            "action": final_action,
+            "confidence": confidence,
+            "reason": str(decision.get("reasoning") or f"{signal.signal_type} approved by local brain")[:500],
+            "signal_type": str(getattr(signal, "signal_type", "SIGNAL") or "SIGNAL"),
+            "brain_used": decision.get("brain_used", "LOCAL_BRAIN"),
+            "fallback_mode": bool(decision.get("fallback_mode", False)),
+            "raw_decision": decision,
+            "metadata": getattr(signal, "metadata", {}) or {},
+        }
+
+    async def dispatch_to_local(self, trade_signal: dict) -> bool:
+        """Local scanner compatibility hook.
+
+        The desktop app already owns execution routing; returning True lets the
+        QThread emit the signal back onto the Qt main thread.
+        """
+        return bool(trade_signal)
+
+    def close(self):
+        """Compatibility no-op for scanner threads."""
+        return None
+
+    def _action_from_signal(self, signal: TechnicalSignal) -> str:
+        signal_type = str(getattr(signal, "signal_type", "") or "").upper()
+        metadata = getattr(signal, "metadata", {}) or {}
+        if "BULL" in signal_type or "OVERSOLD" in signal_type:
+            return "BUY"
+        if "BEAR" in signal_type or "OVERBOUGHT" in signal_type:
+            return "SELL"
+        action = str(
+            metadata.get("action_hint")
+            or metadata.get("liquidity_bias")
+            or metadata.get("direction")
+            or "WAIT"
+        ).upper()
+        if action in {"UP", "LONG"}:
+            return "BUY"
+        if action in {"DOWN", "SHORT"}:
+            return "SELL"
+        return action if action in {"BUY", "SELL"} else "WAIT"
+
+    def _brain_package_from_signal(self, signal: TechnicalSignal) -> dict:
+        ticker = str(getattr(signal, "ticker", "UNKNOWN") or "UNKNOWN")
+        metadata = getattr(signal, "metadata", {}) or {}
+        market_ticker = self._canonical_market_ticker(ticker)
+        cache_key = (market_ticker, "1d", "1m")
+        df = self.market_data_cache.get(cache_key)
+        recent_ohlcv = []
+        if df is not None and not df.empty:
+            for _, row in df.tail(10).iterrows():
+                recent_ohlcv.append({
+                    "open": float(row.get("Open", 0.0) or 0.0),
+                    "high": float(row.get("High", 0.0) or 0.0),
+                    "low": float(row.get("Low", 0.0) or 0.0),
+                    "close": float(row.get("Close", 0.0) or 0.0),
+                    "volume": float(row.get("Volume", 0.0) or 0.0),
+                })
+
+        return {
+            "asset": ticker,
+            "signal_type": str(getattr(signal, "signal_type", "SIGNAL") or "SIGNAL"),
+            "technical_strength": float(getattr(signal, "strength", 0.0) or 0.0),
+            "rsi": float(metadata.get("rsi", 50.0) or 50.0),
+            "atr": float(metadata.get("atr", 0.0) or 0.0),
+            "recent_ohlcv": recent_ohlcv,
+            "liquidity_zones": metadata.get("liquidity_zones", []),
+            "liquidity_zone_label": metadata.get("liquidity_zone_label", "N/A"),
+            "regime_context": metadata.get("regime_context", ""),
+        }
     
     def _scan_ticker(self, ticker: str) -> Optional[TechnicalSignal]:
         """Scan a single ticker for technical signals."""

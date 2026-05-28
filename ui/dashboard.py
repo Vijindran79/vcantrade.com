@@ -138,15 +138,33 @@ class CommandCenter(QWidget):
         # the dashboard "won't come back" after minimizing.
         self._always_on_top = False
 
-        # Get screen size and use 85% of height
+        # 2. Dynamic Desktop Screen Detection Architecture
         from PyQt6.QtWidgets import QApplication
-        screen = QApplication.primaryScreen().geometry()
-        width = 900
-        height = int(screen.height() * 0.85)
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            available_geometry = primary_screen.availableGeometry()
+            
+            # Calculate safety dimension matrices relative to the physical monitor sizes
+            # Dashboard needs more width than the narrator overlay
+            target_width = min(1100, int(available_geometry.width() * 0.70))
+            target_height = min(900, int(available_geometry.height() * 0.85))
+            
+            min_width = min(800, available_geometry.width())
+            min_height = min(620, available_geometry.height())
+            self.setMinimumSize(min_width, min_height)
+            self.setMaximumSize(available_geometry.width(), available_geometry.height())
+            self.resize(target_width, target_height)
+            x = max(available_geometry.left(), available_geometry.left() + available_geometry.width() - target_width - 20)
+            y = available_geometry.top() + 20
+            self.move(x, y)  # Right side of available desktop
+            logger.info(f"[UI-GEOMETRY] Dashboard resolution adjusted safely: {target_width}x{target_height} for High-DPI context.")
+        else:
+            # Safe baseline fallback values if primary display context hook fails
+            self.setMinimumSize(800, 700)
+            self.setMaximumSize(1100, 900)
+            self.resize(900, 800)
+            logger.warning("[UI-GEOMETRY] Screen detection offline - loading baseline dashboard dimensions.")
 
-        self.setMinimumSize(800, 700)
-        self.resize(width, height)
-        self.move(screen.width() - width - 20, 20)  # Right side of screen
         self.setStyleSheet(f"background-color: {BG_DARK};")
         # Always start fully opaque so the window is visible. The user can
         # adjust the transparency slider once the dashboard is up. A 0% opacity
@@ -423,8 +441,15 @@ class CommandCenter(QWidget):
         )
         self.bridge_status_widget.setStyleSheet(
             f"background: {BG_INPUT}; border: 1px solid {border_color}; border-radius: 6px;"
-            f" box-shadow: {shadow};"
         )
+
+    def set_bridge_status_connected(self):
+        """Convenience slot to set bridge status to online."""
+        self.set_bridge_status("online")
+
+    def set_bridge_status_disconnected(self):
+        """Convenience slot to set bridge status to disconnected."""
+        self.set_bridge_status("disconnected")
 
     # =================== ACCOUNT PANEL ===================
     def _build_account_panel(self) -> QWidget:

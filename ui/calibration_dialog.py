@@ -58,7 +58,18 @@ class CalibrationWizardDialog(QDialog):
     def _setup_ui(self):
         self.setWindowTitle("RPA Calibration Wizard")
         self.setModal(True)
-        self.setFixedSize(520, 340)
+        
+        # 2. Dynamic Desktop Screen Detection Architecture
+        from PyQt6.QtWidgets import QApplication
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            available_geometry = primary_screen.availableGeometry()
+            target_width = min(520, int(available_geometry.width() * 0.50))
+            target_height = min(340, int(available_geometry.height() * 0.45))
+            self.setFixedSize(target_width, target_height)
+        else:
+            self.setFixedSize(520, 340)
+
         self.setStyleSheet(f"background: {BG_DARK}; color: {WHITE};")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 

@@ -38,7 +38,17 @@ class SignalApprovalDialog(QDialog):
     def _setup_ui(self):
         self.setWindowTitle(f"[SUCCESS] Trade Signal: {self.signal_data['action']} {self.signal_data['ticker']}")
         self.setModal(True)
-        self.setFixedSize(500, 450)
+        
+        # 2. Dynamic Desktop Screen Detection Architecture
+        from PyQt6.QtWidgets import QApplication
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            available_geometry = primary_screen.availableGeometry()
+            target_width = min(500, int(available_geometry.width() * 0.45))
+            target_height = min(450, int(available_geometry.height() * 0.55))
+            self.setFixedSize(target_width, target_height)
+        else:
+            self.setFixedSize(500, 450)
 
         # Keep on top but don't block chart viewing
         self.setWindowFlags(

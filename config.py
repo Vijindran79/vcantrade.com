@@ -341,6 +341,36 @@ GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "20"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE = "vcani_trade.log"
 
+# ===== SIGNAL DISPATCHER / LISTENER =====
+LOCAL_LISTENER_HOST = os.getenv("LOCAL_LISTENER_HOST", "0.0.0.0")
+LOCAL_LISTENER_PORT = int(os.getenv("LOCAL_LISTENER_PORT", "17199"))
+LOCAL_LISTENER_HEALTH_HOST = os.getenv("LOCAL_LISTENER_HEALTH_HOST", "127.0.0.1")
+PUBLIC_SIGNAL_URL = os.getenv("PUBLIC_SIGNAL_URL", "")
+SIGNAL_API_KEY = os.getenv("SIGNAL_API_KEY", "")
+SIGNAL_API_HEADER = os.getenv("SIGNAL_API_HEADER", "X-VcanTrade-Key")
+SWARM_CONFIDENCE_THRESHOLD = float(os.getenv("SWARM_CONFIDENCE_THRESHOLD", "0.70"))
+SWARM_INCUBATION_FLOOR = float(os.getenv("SWARM_INCUBATION_FLOOR", "60.0"))
+SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "85.0"))
+
+# ===== CLOUD SCANNER =====
+CLOUD_SCANNER_URL = os.getenv("CLOUD_SCANNER_URL", "")
+SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "60"))
+
+# ===== SLIPPAGE PROTECTION =====
+MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "0.5"))
+
+# ===== TEACHER MODE =====
+TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
+
+# ===== UI FEATURE FLAGS =====
+HUD_GLASS_ENABLED = os.getenv("HUD_GLASS_ENABLED", "True").lower() == "true"
+AI_OVERLAY_START_PINNED = os.getenv("AI_OVERLAY_START_PINNED", "False").lower() == "true"
+CONFIDENCE_OVERLAY_ENABLED = os.getenv("CONFIDENCE_OVERLAY_ENABLED", "True").lower() == "true"
+VISUAL_ALERT_MIN_CONFIDENCE = float(os.getenv("VISUAL_ALERT_MIN_CONFIDENCE", "0.60"))
+ALERT_FLASH_DURATION_MS = int(os.getenv("ALERT_FLASH_DURATION_MS", "4500"))
+SCAN_ACTIVITY_THROTTLE_SECONDS = float(os.getenv("SCAN_ACTIVITY_THROTTLE_SECONDS", "8.0"))
+ENABLE_AUDIO_NARRATION = os.getenv("ENABLE_AUDIO_NARRATION", "True").lower() == "true"
+
 # ===== UNIFIED MODE HELPER =====
 def get_active_mode() -> str:
     """Single source of truth for execution mode."""

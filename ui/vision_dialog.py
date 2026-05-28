@@ -67,7 +67,17 @@ class VisionConfirmationDialog(QDialog):
     def _setup_ui(self):
         self.setWindowTitle(f"[EYE] Vision Confirmation: {self.signal_data['ticker']}")
         self.setModal(True)
-        self.setFixedSize(900, 700)
+        
+        # 2. Dynamic Desktop Screen Detection Architecture
+        from PyQt6.QtWidgets import QApplication
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen:
+            available_geometry = primary_screen.availableGeometry()
+            target_width = min(900, int(available_geometry.width() * 0.85))
+            target_height = min(700, int(available_geometry.height() * 0.85))
+            self.setFixedSize(target_width, target_height)
+        else:
+            self.setFixedSize(900, 700)
 
         self.setWindowFlags(
             self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint

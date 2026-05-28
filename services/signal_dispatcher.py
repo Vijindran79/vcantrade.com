@@ -27,13 +27,18 @@ from services.swarm_incubation import SwarmIncubationTracker
 logger = logging.getLogger(__name__)
 
 
-class SignalDispatcher:
+from PyQt6.QtCore import QObject, pyqtSignal
+
+class SignalDispatcher(QObject):
     """
     HTTP server that receives trade signals from Cloud Scanner
     and dispatches them to the local trading engine.
     """
     
+    signal_received = pyqtSignal(object)  # Added to support direct UI binding
+    
     def __init__(self):
+        super().__init__()
         self.app = web.Application()
         self.app.router.add_post('/api/signal', self.handle_signal)
         self.app.router.add_get('/api/handshake', self.handle_handshake)
@@ -133,6 +138,7 @@ class SignalDispatcher:
             self.latest_signal = data
             self.signal_count += 1
             self.last_signal_time = datetime.utcnow()
+            self.signal_received.emit(data)
 
             logger.info(
                 f"[SAT] Signal received: {data['action']} {data['ticker']} "
