@@ -434,8 +434,8 @@ class VcaniTradeEngine:
         
         # Update AI narrator confidence meter
         try:
-            self.ai_narrator.update_confidence_meter(confidence * 100, action, symbol)
-            self.ai_narrator.notify_signal_detected(symbol, action, reason, confidence)
+            self.ai_narrator.update_confidence_meter(symbol, action, confidence * 100)
+            self.ai_narrator.notify_signal_detected(symbol, action, confidence)
             self.ai_narrator.flash_brain_verdict(
                 symbol, f"[VISION] {action}", reason, hold_ms=1200,
                 brain_used="VISION_LLM"
@@ -465,8 +465,8 @@ class VcaniTradeEngine:
                 confidence = 0.30
             
             if confidence > 0:
-                self.dashboard.update_watchlist_status(symbol, status, message, confidence)
-                self.ai_narrator.update_confidence_meter(confidence * 100, status, symbol)
+                self.dashboard.update_watchlist_status(symbol, status, confidence, message)
+                self.ai_narrator.update_confidence_meter(symbol, status, confidence * 100)
         except Exception:
             pass
 
@@ -477,7 +477,8 @@ class VcaniTradeEngine:
             normalized = "TEACHER"
         self.current_mode = normalized
         try:
-            self.session_detector.set_runtime_mode(normalized)
+            if hasattr(self.session_detector, 'set_runtime_mode'):
+                getattr(self.session_detector, 'set_runtime_mode')(normalized)  # type: ignore[union-attr]
         except Exception:
             pass
         try:
@@ -585,7 +586,7 @@ class VcaniTradeEngine:
         try:
             self.ai_narrator.add_activity("[TARGET]", f"{ticker} {signal_type} -> {action}")
             # Update confidence meter and watchlist
-            self.ai_narrator.update_confidence_meter(confidence * 100, action, ticker)
+            self.ai_narrator.update_confidence_meter(ticker, action, confidence * 100)
             self.dashboard.update_watchlist_signal(ticker, action, confidence)
         except Exception:
             pass
@@ -598,7 +599,7 @@ class VcaniTradeEngine:
         self._log_dashboard(f"[BRAIN] {ticker}: {action} | {reason}")
         try:
             verdict = f"[SIGNAL] {action}"
-            self.ai_narrator.update_confidence_meter(confidence * 100, action, ticker)
+            self.ai_narrator.update_confidence_meter(ticker, action, confidence * 100)
             self.ai_narrator.flash_brain_verdict(
                 ticker,
                 verdict,
@@ -813,7 +814,8 @@ class VcaniTradeEngine:
                 df = self.scanner._fetch_market_data(ticker, period="1d", interval="1m")
                 if df is not None and len(df) >= 20:
                     from ta import momentum
-                    rsi = momentum.RSIIndicator(close=df["Close"], window=14).rsi()
+                    import pandas as _pd
+                    rsi = momentum.RSIIndicator(close=_pd.Series(df["Close"].values), window=14).rsi()
                     current_rsi = float(rsi.iloc[-1])
                     
                     # BUY position + RSI overbought = exit
@@ -977,7 +979,7 @@ class VcaniTradeEngine:
         self.is_running = False
         
         if hasattr(self.scanner, 'stop'):
-            self.scanner.stop()
+            getattr(self.scanner, 'stop')()
         if hasattr(self.trade_monitor, 'stop'):
             self.trade_monitor.stop()
         
@@ -1038,14 +1040,9 @@ class VcaniTradeEngine:
                     })()
                 )
             else:
-                # MT5 or other execution paths
-                success = self.trade_executor.execute(
-                    ticker=ticker,
-                    action=action,
-                    entry=entry,
-                    sl=sl,
-                    tp=tp
-                )
+                # MT5 path — not used for crypto (TradingView RPA handles it)
+                logger.warning("[EXEC] MT5 fallback not available for %s — use TradingView RPA", ticker)
+                success = False
             
             if success:
                 logger.info("[EXEC] Trade executed: %s %s @ %.2f", action, ticker, entry)
@@ -1102,18 +1099,18 @@ class VcaniTradeEngine:
             # Fetch current market data
             try:
                 market_data = self.scanner._fetch_market_data(ticker)
-                if not market_data:
+                if market_data is None or (hasattr(market_data, 'empty') and market_data.empty):
                     continue
                 
                 # Get regime context
                 regime = self.brain_swarm.mia.get_market_wisdom(ticker)
-                regime_context = regime.get("regime", "")
+                regime_context = regime.get("regime", "") if isinstance(regime, dict) else ""
                 
                 # Evaluate exit conditions
                 should_exit, reason = evaluate_dynamic_ai_exit_conditions(
                     ticker=ticker,
                     position_data=position,
-                    market_data=market_data,
+                    market_data=market_data,  # type: ignore[arg-type]
                     regime_context=regime_context
                 )
                 
@@ -1131,7 +1128,9 @@ class VcaniTradeEngine:
             if config.get_active_mode() == "TRADINGVIEW":
                 self.rpa_executor.flatten_position(ticker)
             else:
-                self.trade_executor.close_position(ticker)
+                self.trade_executor.process_signal(  # type: ignore[union-attr]
+                    type('CloseSignal', (), {'asset': ticker, 'action': 'CLOSE'})()
+                )
             
             # Remove from position tracking
             self.positions = [p for p in self.positions if (p.get("asset") or p.get("ticker")) != ticker]
@@ -1178,14 +1177,15 @@ class VcaniTradeEngine:
         """Fetch current price for a ticker."""
         try:
             if config.get_active_mode() == "TRADINGVIEW" and self.browser_agent:
-                price = self.browser_agent.get_current_price(ticker)
-                if price and price > 0:
-                    return price
+                if hasattr(self.browser_agent, 'get_current_price'):
+                    price = self.browser_agent.get_current_price(ticker)  # type: ignore[union-attr]
+                    if price and price > 0:
+                        return price
             
             # Try yfinance directly for crypto and other assets
             try:
                 from core.symbol_mapper import normalize_yfinance_symbol
-                import yfinance as yf
+                import yfinance as yf  # type: ignore[import-untyped]
                 yf_symbol = normalize_yfinance_symbol(ticker)
                 t = yf.Ticker(yf_symbol)
                 hist = t.history(period="1d", interval="1m")
