@@ -1,0 +1,53 @@
+
+    def __init__(self, engine_context):
+    def dispatch_execution_request(self, payload: dict):
+    def dispatch_panic_request(self):
+    def _safe_slot_execute_trade(self, payload: dict):
+    def _safe_slot_execute_panic_purge(self):
+    def __init__(self):
+    def acquire(self, ticker: str) -> bool:
+    def release(self):
+    def is_locked_for(self, ticker: str) -> bool:
+    def check_timeout(self) -> bool:
+def evaluate_dynamic_ai_exit_conditions(
+def is_futures_ticker(ticker: str) -> bool:
+def is_crypto_ticker(ticker: str) -> bool:
+    def __init__(self):
+    def _wire_ui_signals(self):
+    def _wire_hunter_signals(self):
+    def _on_hunter_trade_signal(self, symbol: str, action: str, reason: str):
+    def _on_hunter_status(self, symbol: str, status: str, message: str):
+    def set_runtime_mode(self, mode: str):
+    def set_watchlist(self, tickers):
+    def set_primary_ticker(self, ticker: str):
+    def _log_dashboard(self, message: str):
+    def _on_ticker_status(self, ticker: str, status: str):
+    def _on_scanner_error(self, message: str):
+    def _on_scanner_heartbeat(self, healthy: bool):
+    def _on_listener_error(self, message: str):
+    def _on_bridge_handshake_received(self, handshake_data: dict):
+    def _on_external_signal_received(self, payload: dict):
+    def _on_data_scout_received(self, payload: dict):
+    def _on_data_scout_error(self, message: str):
+    def _on_technical_signal_detected(self, payload: dict):
+    def _on_brain_signal_detected(self, payload: dict):
+    def process_validated_execution_path(self, payload: dict):
+    def execute_hardened_panic_reset(self):
+    def _normalize_watchlist(self, raw_list):
+    def _init_browser_agent(self):
+    def start(self):
+    def _start_scanner_timer(self):
+    def _start_exit_monitor(self):
+    def _check_position_exits(self):
+    def execute_market_scan_sequence(self):
+    def _run_scanner_cycle(self):
+    def _run_periodic_brain_commentary(self, tickers: list):
+    def stop(self):
+    def execute_trade(self, ticker: str, action: str, entry: float, sl: float, tp: float) -> TradeResult:
+    def check_dynamic_exits(self):
+    def close_position(self, ticker: str, reason: str = ""):
+    def _run_pretrade_market_audit(self, ticker: str, entry_price: float) -> bool:
+    def _fetch_current_price(self, ticker: str) -> float:
+def _force_window_visible(window, *, activate: bool = False, label: str = "window"):
+def main():
+

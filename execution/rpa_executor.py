@@ -121,7 +121,7 @@ class RPAExecutor:
             action = action.rsplit(".", 1)[-1]
         return action
 
-    def execute_protected_tradingview_bracket(self, browser_agent, ticker: str, action: str, sl: float, tp: float) -> bool:
+    def execute_protected_tradingview_bracket(self, browser_agent, ticker: str, action: str, entry_price: float, sl: float, tp: float) -> bool:
         """Executes an unbreakable bracket order on TradingView by forcefully clearing fields prior to value string injection."""
         try:
             logger.info(f"[HY3-HARDEN] Initializing isolated RPA strike path for asset: {ticker} | Action: {action}")

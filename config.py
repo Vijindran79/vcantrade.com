@@ -19,7 +19,12 @@ MOUSE_HUMAN_DELAY_MIN = 0.8    # Min reaction time
 MOUSE_HUMAN_DELAY_MAX = 1.6    # Max reaction time
 
 # ===== STRUCTURAL AI FEATURE FLAGS =====
-USE_VISION = False  # Explicitly matches 'Vision: Disabled' initialization profile
+USE_VISION = True
+FAST_VISION_ENABLED = os.getenv("FAST_VISION_ENABLED", "true").lower() == "true"
+VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream")
+MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.65"))
+SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() == "true"
 
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
@@ -276,14 +281,12 @@ SYMBOL_FUZZY_TERMS = {
 
 # ===== ACTIVE WATCHLIST =====
 ACTIVE_WATCHLIST = [
-    "CME_MINI:MNQ1!",
-    "CME_MINI:MES1!",
-    "MCL1!",
-    "MGC1!"
+    "BTCUSD",
+    "ETHUSD",
 ]
 
 # ===== MULTI-ASSET HUNTER =====
-MULTI_ASSET_TICKERS = ["MNQ1!", "MES1!", "CL=F", "GC=F"]
+MULTI_ASSET_TICKERS = ["BTCUSD", "ETHUSD", "MNQ1!", "MES1!", "CL=F", "GC=F"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # ===== EXECUTION MODE SWITCH =====

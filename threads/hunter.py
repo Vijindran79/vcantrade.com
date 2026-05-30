@@ -133,6 +133,8 @@ class MultiAssetHunterThread(QThread):
 
             agent = self._get_ready_browser_agent(symbol, require_page=True)
             if agent is None:
+                # FALLBACK: Direct brain analysis without browser screenshot
+                self._direct_brain_analysis(symbol)
                 return
 
             # STURDY BRIDGE: Skip if browser is busy
@@ -433,6 +435,79 @@ class MultiAssetHunterThread(QThread):
         """Return True if we are in the Sunday gap guard window (22:00-22:15 UTC)."""
         now = datetime.now(timezone.utc)
         return now.weekday() == 6 and now.hour == 22 and now.minute < 15
+
+    def _direct_brain_analysis(self, symbol: str):
+        """Fallback: analyze symbol via yfinance data + brain swarm (no browser needed)."""
+        try:
+            import yfinance as yf
+            from core.symbol_mapper import normalize_yfinance_symbol
+            
+            yf_symbol = normalize_yfinance_symbol(symbol)
+            ticker = yf.Ticker(yf_symbol)
+            hist = ticker.history(period="1d", interval="5m")
+            if hist.empty or len(hist) < 20:
+                return
+            
+            last_price = float(hist["Close"].iloc[-1])
+            high = float(hist["High"].max())
+            low = float(hist["Low"].min())
+            change_pct = ((last_price - float(hist["Open"].iloc[0])) / float(hist["Open"].iloc[0])) * 100
+            
+            # Build package for brain
+            recent_bars = []
+            for _, row in hist.tail(10).iterrows():
+                recent_bars.append({
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                    "volume": float(row.get("Volume", 0)),
+                })
+            
+            package = {
+                "asset": symbol,
+                "signal_type": "HUNTER_DIRECT",
+                "technical_strength": 0.0,
+                "rsi": 50.0,
+                "atr": high - low,
+                "recent_ohlcv": recent_bars,
+                "current_price": last_price,
+                "change_pct": change_pct,
+                "liquidity_zones": [],
+                "regime_context": f"Direct yfinance scan. Price ${last_price:.2f}, range ${low:.2f}-${high:.2f}, change {change_pct:+.2f}%",
+            }
+            
+            self.status_update.emit(symbol, "ANALYZING", f"Brain analyzing {symbol} @ ${last_price:.2f}")
+            
+            # Ask brain for decision
+            scanner = getattr(self.app, "scanner", None)
+            brain = getattr(scanner, "brain", None) if scanner else None
+            if not brain:
+                return
+            
+            decision = brain.request_decision("ANALYZE", package)
+            verdict = str(decision.get("verdict", "WAIT") or "WAIT").upper()
+            reasoning = str(decision.get("reasoning", "") or decision.get("reason", ""))[:200]
+            confidence = int(decision.get("confidence", 50) or 50) / 100.0
+            consensus = decision.get("consensus", "")
+            votes = decision.get("votes", {})
+            models_used = decision.get("models_used", [])
+            
+            swarm_info = f"[{consensus} {len(models_used)}L] " if models_used else ""
+            
+            if "BUY" in verdict or "SELL" in verdict:
+                action = "BUY" if "BUY" in verdict else "SELL"
+                status_msg = f"{swarm_info}Confidence: {confidence:.0%} | {reasoning[:100]}"
+                self.status_update.emit(symbol, action, status_msg)
+                self.trade_signal.emit(symbol, action, f"{swarm_info}{reasoning}")
+                logger.info("[HUNTER] Swarm signal: %s %s %s confidence=%d%% votes=%s", 
+                           action, symbol, consensus, confidence*100, votes)
+            else:
+                self.status_update.emit(symbol, "HOLD", f"{swarm_info}Confidence: {confidence:.0%} | {reasoning[:80]}")
+                
+        except Exception as e:
+            logger.debug("[HUNTER] Direct analysis error for %s: %s", symbol, e)
+            self.status_update.emit(symbol, "ERROR", str(e)[:80])
 
     def stop(self):
         self.running = False

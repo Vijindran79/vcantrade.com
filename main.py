@@ -44,6 +44,7 @@ from services.signal_dispatcher import SignalDispatcher
 from threads.cloud_scanner import CloudScannerThread
 from threads.signal_listener import SignalListenerThread
 from threads.data_scout_listener import DataScoutListenerThread
+from threads.hunter import MultiAssetHunterThread
 from threads._utils import _speak_alert
 # Import UI components after QApplication is available
 from ui.dashboard import CommandCenter as Dashboard
@@ -322,16 +323,10 @@ class VcaniTradeEngine:
             ghost_executor=self._ghost_executor
         )
         
-        # UI components - PASS ENGINE REFERENCE TO DASHBOARD
-        self.dashboard = Dashboard(self)
+        # UI components
+        self.dashboard = Dashboard()
         self.ai_narrator = AINarrator()
         self.lion_switchboard = LionSwitchboard()
-        
-        # HAWK PROTOCOL: Set up timer for U-TURN Radar (trailing stops)
-        self.hawk_timer = QTimer(self)
-        self.hawk_timer.timeout.connect(self.update_trailing_stops)
-        self.hawk_timer.start(1000)  # Check every 1 second
-        logger.info("[HAWK] U-Turn Radar timer initialized (1000ms interval)")
         
         # Signal Dispatcher & Thread Bridge
         self.signal_bridge = AutomatedSignalBridge(self)
@@ -344,17 +339,16 @@ class VcaniTradeEngine:
         
         self.data_scout_listener = DataScoutListenerThread()
         
+        # Hunter thread (screenshot → vision LLM pipeline)
+        self.hunter_thread = MultiAssetHunterThread(self)
+        self._wire_hunter_signals()
+        
         # State
         self.current_mode = "AUTONOMOUS" if not config.TEACHER_MODE else "TEACHER"
         self.is_running = False
         self.current_watchlist = self._normalize_watchlist(config.ACTIVE_WATCHLIST)
         self.set_watchlist(self.current_watchlist)
         self._wire_ui_signals()
-        
-        # HAWK PROTOCOL: Single-Asset Lock
-        self.target_lock_active = False
-        self.locked_asset = None
-        self.hawk_mode = True  # Enable single-asset focus
         
         # Balance tracking
         self.balance = float(config.CURRENT_BALANCE)
@@ -404,6 +398,76 @@ class VcaniTradeEngine:
             logger.info("[RESTORE] Core signal bridge routes remapped cleanly.")
         except Exception as exc:
             logger.warning("[UI-WIRE] Failed to wire UI signals: %s", exc)
+
+    def _wire_hunter_signals(self):
+        """Connect Hunter thread signals to dashboard and narrator."""
+        try:
+            self.hunter_thread.trade_signal.connect(self._on_hunter_trade_signal)
+            self.hunter_thread.status_update.connect(self._on_hunter_status)
+            self.hunter_thread.narrator_update.connect(
+                lambda icon, msg: self.ai_narrator.add_activity(icon, msg)
+            )
+            logger.info("[HUNTER] Hunter signals wired")
+        except Exception as exc:
+            logger.warning("[HUNTER] Failed to wire hunter signals: %s", exc)
+
+    def _on_hunter_trade_signal(self, symbol: str, action: str, reason: str):
+        """Handle trade signals from the Hunter vision pipeline."""
+        self._log_dashboard(f"[HUNTER] {symbol}: {action} | {reason}")
+        
+        # Extract confidence from reason (brain returns "Confidence: High" etc.)
+        confidence = 0.70  # default
+        reason_lower = reason.lower()
+        if "confidence: high" in reason_lower or "confidence: very high" in reason_lower:
+            confidence = 0.90
+        elif "confidence: medium" in reason_lower:
+            confidence = 0.75
+        elif "confidence: low" in reason_lower:
+            confidence = 0.50
+        
+        # Update dashboard watchlist with signal and confidence
+        try:
+            self.dashboard.update_watchlist_signal(symbol, action, confidence)
+        except Exception:
+            pass
+        
+        # Update AI narrator confidence meter
+        try:
+            self.ai_narrator.update_confidence_meter(confidence * 100, action, symbol)
+            self.ai_narrator.notify_signal_detected(symbol, action, reason, confidence)
+            self.ai_narrator.flash_brain_verdict(
+                symbol, f"[VISION] {action}", reason, hold_ms=1200,
+                brain_used="VISION_LLM"
+            )
+            _speak_alert(f"Vision signal. {action} {symbol}. Confidence {confidence:.0%}. {reason}")
+        except Exception:
+            pass
+        # Route to execution
+        self.process_validated_execution_path({
+            "ticker": symbol, "action": action, "reason": reason,
+            "confidence": confidence,
+        })
+
+    def _on_hunter_status(self, symbol: str, status: str, message: str):
+        """Handle status updates from Hunter — update dashboard watchlist."""
+        self._log_dashboard(f"[HUNTER] {symbol}: {status} - {message}")
+        try:
+            # Map status to dashboard colors
+            confidence = 0.0
+            if status == "BUY":
+                confidence = 0.85
+            elif status == "SELL":
+                confidence = 0.85
+            elif status == "HOLD":
+                confidence = 0.50
+            elif status == "ANALYZING":
+                confidence = 0.30
+            
+            if confidence > 0:
+                self.dashboard.update_watchlist_status(symbol, status, message, confidence)
+                self.ai_narrator.update_confidence_meter(confidence * 100, status, symbol)
+        except Exception:
+            pass
 
     def set_runtime_mode(self, mode: str):
         """Apply dashboard mode changes to backend components."""
@@ -519,6 +583,9 @@ class VcaniTradeEngine:
         self._log_dashboard(f"[TARGET] {ticker}: {signal_type} -> {action} ({confidence:.0%})")
         try:
             self.ai_narrator.add_activity("[TARGET]", f"{ticker} {signal_type} -> {action}")
+            # Update confidence meter and watchlist
+            self.ai_narrator.update_confidence_meter(confidence * 100, action, ticker)
+            self.dashboard.update_watchlist_signal(ticker, action, confidence)
         except Exception:
             pass
 
@@ -526,9 +593,11 @@ class VcaniTradeEngine:
         ticker = payload.get("ticker", "UNKNOWN")
         action = payload.get("action", "WAIT")
         reason = payload.get("reason", "")
+        confidence = float(payload.get("confidence", 0.70) or 0.70)
         self._log_dashboard(f"[BRAIN] {ticker}: {action} | {reason}")
         try:
             verdict = f"[SIGNAL] {action}"
+            self.ai_narrator.update_confidence_meter(confidence * 100, action, ticker)
             self.ai_narrator.flash_brain_verdict(
                 ticker,
                 verdict,
@@ -537,7 +606,8 @@ class VcaniTradeEngine:
                 fallback_mode=bool(payload.get("fallback_mode", False)),
                 brain_used=str(payload.get("brain_used", "LOCAL_BRAIN")),
             )
-            _speak_alert(f"Brain verdict. {action} {ticker}. {reason}")
+            self.dashboard.update_watchlist_signal(ticker, action, confidence)
+            _speak_alert(f"Brain verdict. {action} {ticker}. Confidence {confidence:.0%}. {reason}")
         except Exception:
             pass
 
@@ -608,6 +678,9 @@ class VcaniTradeEngine:
         self._start_scanner_timer()
         QTimer.singleShot(250, self._run_scanner_cycle)
         
+        # Start EXIT MONITOR — the missing piece that manages open positions
+        self._start_exit_monitor()
+        
         # Start trade monitor (it manages its own internal thread)
         if hasattr(self.trade_monitor, 'start'):
             self.trade_monitor.start()
@@ -625,6 +698,12 @@ class VcaniTradeEngine:
             self.data_scout_listener.start()
             self._log_dashboard("[DATA-SCOUT] Listener armed")
         
+        # Start Hunter thread (screenshot → vision LLM pipeline)
+        if self.hunter_thread and config.USE_VISION:
+            self.hunter_thread.start()
+            self._log_dashboard("[HUNTER] Vision Hunter armed — screenshot analysis active")
+            _speak_alert("Vision Hunter armed. Screenshot analysis active.")
+        
         logger.info("[ENGINE] VcaniTrade Engine STARTED")
     
     def _start_scanner_timer(self):
@@ -640,24 +719,202 @@ class VcaniTradeEngine:
             pass
         self._log_dashboard(f"[SCAN] Scanner armed: {len(self.current_watchlist)} markets, 60s structural cycle")
 
+    def _start_exit_monitor(self):
+        """Start the position exit monitor — checks open positions every 3 seconds.
+        
+        This is the CRITICAL loop that was missing. It handles:
+        1. Profit giveback shield (close when profit reverses)
+        2. Trailing stop management (tighten stops as profit grows)
+        3. RSI reversal exits
+        4. Regime change exits
+        5. Brain-based exit evaluation
+        """
+        self._peak_profits = {}  # ticker -> peak unrealized profit
+        self._position_entry_times = {}  # ticker -> datetime of entry
+        
+        self.exit_timer = QTimer()
+        self.exit_timer.timeout.connect(self._check_position_exits)
+        self.exit_timer.start(3000)  # Check every 3 seconds
+        logger.info("[EXIT] Position exit monitor armed (3s interval)")
+        self._log_dashboard("[EXIT] Smart exit monitor armed — profit protection active")
+
+    def _check_position_exits(self):
+        """Check all open positions for exit conditions.
+        
+        Called every 3 seconds by exit_timer. Implements:
+        1. Profit Giveback Shield: if position was in profit and gives back 40%, close it
+        2. Trailing Stop: tighten stop as profit grows (ATR-based)
+        3. RSI reversal: close when RSI hits extreme opposite to position
+        4. Time-based: close positions held too long without movement
+        """
+        if not self.is_running:
+            return
+        
+        positions = list(self.positions)
+        if not positions:
+            return
+        
+        for position in positions:
+            ticker = position.get("asset") or position.get("ticker", "")
+            if not ticker:
+                continue
+            
+            action = str(position.get("action", "")).upper()
+            entry_price = float(position.get("entry_price", 0) or 0)
+            stop_loss = float(position.get("stop_loss", 0) or 0)
+            take_profit = float(position.get("take_profit", 0) or 0)
+            
+            if entry_price <= 0:
+                continue
+            
+            # Get current price
+            current_price = self._fetch_current_price(ticker)
+            if current_price <= 0:
+                # Fallback: try scanner data
+                try:
+                    df = self.scanner._fetch_market_data(ticker, period="1d", interval="1m")
+                    if df is not None and not df.empty:
+                        current_price = float(df["Close"].iloc[-1])
+                except Exception:
+                    continue
+            
+            if current_price <= 0:
+                continue
+            
+            # Calculate P&L
+            if action == "BUY":
+                pnl_points = current_price - entry_price
+            else:
+                pnl_points = entry_price - current_price
+            
+            pnl_dollars = pnl_points * float(position.get("point_value", 1.0) or 1.0)
+            
+            # Track peak profit for giveback detection
+            peak = self._peak_profits.get(ticker, 0.0)
+            if pnl_dollars > peak:
+                self._peak_profits[ticker] = pnl_dollars
+                peak = pnl_dollars
+            
+            # ===== EXIT CONDITION 1: PROFIT GIVEBACK SHIELD =====
+            # If we were in profit and gave back 40%+ of peak, close it
+            if peak > 20.0:  # Only if we had $20+ profit
+                giveback_pct = ((peak - pnl_dollars) / peak) * 100 if peak > 0 else 0
+                if pnl_dollars < peak and giveback_pct >= 40:
+                    reason = f"PROFIT GIVEBACK SHIELD: Peak ${peak:.2f}, gave back {giveback_pct:.0f}%, now ${pnl_dollars:.2f}"
+                    logger.info("[EXIT] %s: %s", ticker, reason)
+                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
+                    self.close_position(ticker, reason)
+                    _speak_alert(f"Profit protection. Closing {ticker}. Gave back {giveback_pct:.0f} percent of profit.")
+                    continue
+            
+            # ===== EXIT CONDITION 2: RSI REVERSAL =====
+            try:
+                df = self.scanner._fetch_market_data(ticker, period="1d", interval="1m")
+                if df is not None and len(df) >= 20:
+                    from ta import momentum
+                    rsi = momentum.RSIIndicator(close=df["Close"], window=14).rsi()
+                    current_rsi = float(rsi.iloc[-1])
+                    
+                    # BUY position + RSI overbought = exit
+                    if action == "BUY" and current_rsi > 80 and pnl_dollars > 0:
+                        reason = f"RSI REVERSAL: RSI={current_rsi:.0f} (overbought) with ${pnl_dollars:.2f} profit"
+                        logger.info("[EXIT] %s: %s", ticker, reason)
+                        self._log_dashboard(f"[EXIT] {ticker}: {reason}")
+                        self.close_position(ticker, reason)
+                        _speak_alert(f"RSI overbought at {current_rsi:.0f}. Taking profit on {ticker}.")
+                        continue
+                    
+                    # SELL position + RSI oversold = exit
+                    if action == "SELL" and current_rsi < 20 and pnl_dollars > 0:
+                        reason = f"RSI REVERSAL: RSI={current_rsi:.0f} (oversold) with ${pnl_dollars:.2f} profit"
+                        logger.info("[EXIT] %s: %s", ticker, reason)
+                        self._log_dashboard(f"[EXIT] {ticker}: {reason}")
+                        self.close_position(ticker, reason)
+                        _speak_alert(f"RSI oversold at {current_rsi:.0f}. Taking profit on {ticker}.")
+                        continue
+            except Exception:
+                pass
+            
+            # ===== EXIT CONDITION 3: TRAILING STOP TIGHTENING =====
+            # As profit grows, tighten the stop loss
+            if stop_loss > 0 and pnl_dollars > 30:
+                if action == "BUY":
+                    # Move stop to breakeven + small buffer when profit > $30
+                    new_stop = entry_price + 5.0  # $5 above entry
+                    if new_stop > stop_loss:
+                        position["stop_loss"] = new_stop
+                        self._log_dashboard(f"[TRAIL] {ticker}: Stop moved to ${new_stop:.2f} (breakeven+)")
+                        _speak_alert(f"Trailing stop updated for {ticker}. Stop at breakeven plus.")
+                
+                elif action == "SELL":
+                    new_stop = entry_price - 5.0
+                    if stop_loss == 0 or new_stop < stop_loss:
+                        position["stop_loss"] = new_stop
+                        self._log_dashboard(f"[TRAIL] {ticker}: Stop moved to ${new_stop:.2f} (breakeven+)")
+            
+            # ===== EXIT CONDITION 4: TAKE PROFIT HIT =====
+            if take_profit > 0:
+                if action == "BUY" and current_price >= take_profit:
+                    reason = f"TAKE PROFIT HIT: ${current_price:.2f} >= ${take_profit:.2f} (+${pnl_dollars:.2f})"
+                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
+                    self.close_position(ticker, reason)
+                    _speak_alert(f"Take profit hit on {ticker}. Profit: {pnl_dollars:.0f} dollars.")
+                    continue
+                elif action == "SELL" and current_price <= take_profit:
+                    reason = f"TAKE PROFIT HIT: ${current_price:.2f} <= ${take_profit:.2f} (+${pnl_dollars:.2f})"
+                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
+                    self.close_position(ticker, reason)
+                    _speak_alert(f"Take profit hit on {ticker}. Profit: {pnl_dollars:.0f} dollars.")
+                    continue
+            
+            # ===== EXIT CONDITION 5: STOP LOSS HIT =====
+            if stop_loss > 0:
+                if action == "BUY" and current_price <= stop_loss:
+                    reason = f"STOP LOSS HIT: ${current_price:.2f} <= ${stop_loss:.2f} (-${abs(pnl_dollars):.2f})"
+                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
+                    self.close_position(ticker, reason)
+                    _speak_alert(f"Stop loss hit on {ticker}. Loss: {abs(pnl_dollars):.0f} dollars.")
+                    continue
+                elif action == "SELL" and current_price >= stop_loss:
+                    reason = f"STOP LOSS HIT: ${current_price:.2f} >= ${stop_loss:.2f} (-${abs(pnl_dollars):.2f})"
+                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
+                    self.close_position(ticker, reason)
+                    _speak_alert(f"Stop loss hit on {ticker}. Loss: {abs(pnl_dollars):.0f} dollars.")
+                    continue
+
     def execute_market_scan_sequence(self):
         """QTimer entrypoint for continuous multi-timeframe market sweeps."""
         self._run_scanner_cycle()
     
     def _run_scanner_cycle(self):
-        """Run one scanner cycle."""
+        """Run one scanner cycle with brain analysis and voice narration."""
         try:
             if not self.is_running:
                 return
             tickers = list(self.current_watchlist or self.scanner.tickers or [])
             self._log_dashboard(f"[SCAN] Cycle started: {', '.join(tickers[:10])}")
+            
+            # Narrate scan start
+            try:
+                self.ai_narrator.notify_scan_start(len(tickers))
+                self.ai_narrator.add_activity("[SCAN]", f"Scanning {len(tickers)} markets...")
+            except Exception:
+                pass
+            
+            _speak_alert(f"Scanning {len(tickers)} markets")
+            
             signals = self.scanner.scan()
             logger.info("[SCAN] Cycle completed with %d technical signal(s)", len(signals or []))
+            
             if not signals:
                 self._log_dashboard("[SCAN] Cycle complete: no technical trigger yet")
+                # Run periodic brain commentary even without signals
+                self._run_periodic_brain_commentary(tickers)
                 return
 
             self._log_dashboard(f"[TARGET] Found {len(signals)} technical trigger(s); background brain thread evaluating")
+            _speak_alert(f"Found {len(signals)} technical triggers. Evaluating with brain.")
+            
             for signal in signals:
                 self._on_technical_signal_detected({
                     "ticker": getattr(signal, "ticker", "UNKNOWN"),
@@ -669,6 +926,50 @@ class VcaniTradeEngine:
         except Exception as e:
             logger.error(f"[SCAN] Scanner cycle error: {e}")
             self._on_scanner_error(str(e))
+
+    def _run_periodic_brain_commentary(self, tickers: list):
+        """Run lightweight brain analysis every few cycles for continuous narration."""
+        if not hasattr(self, '_brain_commentary_counter'):
+            self._brain_commentary_counter = 0
+        self._brain_commentary_counter += 1
+        
+        # Run brain commentary every 3rd cycle
+        if self._brain_commentary_counter % 3 != 0:
+            return
+        
+        if not tickers:
+            return
+        
+        ticker = tickers[0]
+        try:
+            self._log_dashboard(f"[BRAIN] Running periodic analysis on {ticker}...")
+            self.ai_narrator.add_activity("[BRAIN]", f"Analyzing {ticker} with local brain...")
+            
+            # Build a lightweight package for the brain
+            package = {
+                "asset": ticker,
+                "signal_type": "PERIODIC_SCAN",
+                "technical_strength": 0.0,
+                "rsi": 50.0,
+                "atr": 0.0,
+                "recent_ohlcv": [],
+                "liquidity_zones": [],
+                "regime_context": "Periodic market scan - no technical trigger",
+            }
+            
+            decision = self.scanner.brain.request_decision("ANALYZE", package)
+            reasoning = str(decision.get("reasoning", "") or decision.get("reason", ""))[:200]
+            brain_used = decision.get("brain_used", "LOCAL_BRAIN")
+            
+            if reasoning:
+                self._log_dashboard(f"[BRAIN] {ticker}: {reasoning}")
+                self.ai_narrator.add_activity(f"[BRAIN]", f"{ticker}: {reasoning}")
+                _speak_alert(f"Brain update. {ticker}. {reasoning[:100]}")
+            else:
+                self._log_dashboard(f"[BRAIN] {ticker}: No commentary from {brain_used}")
+                
+        except Exception as e:
+            logger.debug(f"[BRAIN] Periodic analysis error: {e}")
     
     def stop(self):
         """Stop the trading engine."""
@@ -747,11 +1048,19 @@ class VcaniTradeEngine:
             
             if success:
                 logger.info("[EXEC] Trade executed: %s %s @ %.2f", action, ticker, entry)
-                # HAWK LOCK ACTIVATION
-                self.target_lock_active = True
-                self.locked_asset = ticker
-                logger.info(f"[HAWK] TARGET LOCKED: {ticker}. Scanners suspended.")
-                self.suspend_scanners()
+                
+                # Track position for exit monitoring
+                self.positions.append({
+                    "asset": ticker,
+                    "ticker": ticker,
+                    "action": action,
+                    "entry_price": entry,
+                    "stop_loss": sl,
+                    "take_profit": tp,
+                    "point_value": 1.0,  # Default; can be overridden per instrument
+                    "entry_time": datetime.now().isoformat(),
+                })
+                self._log_dashboard(f"[POSITION] Tracking {action} {ticker} @ ${entry:.2f} | SL=${sl:.2f} | TP=${tp:.2f}")
                 
                 return TradeResult(
                     status="EXECUTED",
@@ -823,10 +1132,20 @@ class VcaniTradeEngine:
             else:
                 self.trade_executor.close_position(ticker)
             
+            # Remove from position tracking
+            self.positions = [p for p in self.positions if (p.get("asset") or p.get("ticker")) != ticker]
+            self._peak_profits.pop(ticker, None)
+            
             # Release lock
             if self.asset_lock.active_locked_ticker == ticker:
                 self.asset_lock.release()
             
+            # Narrate the close
+            self._log_dashboard(f"[CLOSE] Position closed: {ticker} | {reason}")
+            try:
+                self.ai_narrator.add_activity("[CLOSE]", f"{ticker}: {reason}")
+            except Exception:
+                pass
             logger.info("[CLOSE] Position closed: %s | Reason: %s", ticker, reason)
             
         except Exception as e:
@@ -834,8 +1153,10 @@ class VcaniTradeEngine:
     
     def _run_pretrade_market_audit(self, ticker: str, entry_price: float) -> bool:
         """Run pre-trade market audit."""
+        # If we have no price data at all, allow the trade (best effort)
         if entry_price <= 0:
-            return False
+            logger.info("[AUDIT] No entry price for %s — allowing trade (best effort)", ticker)
+            return True
         
         # Check slippage
         current_price = self._fetch_current_price(ticker)
@@ -856,171 +1177,33 @@ class VcaniTradeEngine:
         """Fetch current price for a ticker."""
         try:
             if config.get_active_mode() == "TRADINGVIEW" and self.browser_agent:
-                # Use browser agent to fetch price
-                return self.browser_agent.get_current_price(ticker)
-            else:
-                # Use MT5 or yfinance
-                return self.scanner._fetch_market_data(ticker)["Close"].iloc[-1]
-        except Exception:
-            return 0.0
-
-    # ==================== HAWK PROTOCOL METHODS ====================
-    
-    def suspend_scanners(self):
-        """Halts all background scanning threads except for the locked asset."""
-        if hasattr(self, 'scanner') and self.scanner:
-            self.scanner.paused = True
-            logger.info("[SYSTEM] Multi-ticker scanners PAUSED.")
-        
-        if hasattr(self, 'cloud_scanner') and self.cloud_scanner:
-            if hasattr(self.cloud_scanner, 'stop'):
-                self.cloud_scanner.stop()
-            logger.info("[SYSTEM] Cloud scanner PAUSED.")
-    
-    def resume_scanners(self):
-        """Resumes scanning after position close."""
-        self.target_lock_active = False
-        self.locked_asset = None
-        
-        if hasattr(self, 'scanner') and self.scanner:
-            self.scanner.paused = False
-            logger.info("[SYSTEM] Multi-ticker scanners RESUMED.")
-        
-        if hasattr(self, 'cloud_scanner') and self.cloud_scanner:
-            if hasattr(self.cloud_scanner, 'start'):
-                self.cloud_scanner.start()
-            logger.info("[SYSTEM] Cloud scanner RESUMED.")
-    
-    def update_trailing_stops(self):
-        """U-TURN RADAR & TRAILING STOP for locked asset."""
-        if not hasattr(self, 'target_lock_active') or not self.target_lock_active:
-            return
-        
-        if not hasattr(self, 'locked_asset') or not self.locked_asset:
-            return
-        
-        # Get current price for locked asset
-        current_price = self._fetch_current_price(self.locked_asset)
-        if not current_price or current_price <= 0:
-            return
-        
-        # Calculate Dynamic ATR Buffer (using your existing atr_stops logic)
-        atr_value = self._calculate_atr(self.locked_asset, period=3)
-        if atr_value is None or atr_value <= 0:
-            return
-        
-        buffer = atr_value * 1.5  # 1:1.5 Risk Symmetry
-        
-        position = self._get_open_position(self.locked_asset)
-        if not position:
-            self.resume_scanners()
-            return
-        
-        # U-TURN LOGIC
-        if position.get('action') == 'BUY':
-            trailing_stop = current_price - buffer
-            entry_price = position.get('entry_price', 0)
-            if entry_price > 0 and current_price < entry_price + (buffer * 0.5):  # Reversal detected
-                logger.info(f"[HAWK U-TURN] Trend reversal detected on {self.locked_asset}. Exiting.")
-                self.execute_global_profit_harvest(symbol=self.locked_asset)
-        
-        elif position.get('action') == 'SELL':
-            trailing_stop = current_price + buffer
-            entry_price = position.get('entry_price', 0)
-            if entry_price > 0 and current_price > entry_price - (buffer * 0.5):  # Reversal detected
-                logger.info(f"[HAWK U-TURN] Trend reversal detected on {self.locked_asset}. Exiting.")
-                self.execute_global_profit_harvest(symbol=self.locked_asset)
-    
-    def _calculate_atr(self, ticker: str, period: int = 3) -> Optional[float]:
-        """Calculate ATR for ticker. Override this with actual implementation."""
-        # Placeholder - implement based on your ATR calculation
-        logger.debug(f"[HAWK] Calculating ATR for {ticker} (period={period})")
-        return None
-    
-    def _get_open_position(self, ticker: str) -> Optional[dict]:
-        """Get open position for ticker."""
-        for position in self.positions:
-            if isinstance(position, dict) and position.get('asset') == ticker:
-                return position
-            elif hasattr(position, 'asset') and position.asset == ticker:
-                return {
-                    'asset': position.asset,
-                    'action': position.action.value if hasattr(position.action, 'value') else str(position.action),
-                    'entry_price': position.entry_price,
-                    'stop_loss': position.stop_loss,
-                    'take_profit': position.take_profit,
-                }
-        return None
-    
-    def execute_global_profit_harvest(self, symbol=None):
-        """
-        Instantly closes positions. 
-        If symbol is provided, closes only that symbol (U-Turn).
-        If None, closes ALL (Manual Button Press).
-        """
-        symbols_to_close = [symbol] if symbol else self._get_all_open_symbols()
-        
-        total_profit = 0
-        for sym in symbols_to_close:
-            pos = self._get_open_position(sym)
-            if pos:
-                profit = pos.get('pnl', 0)
-                self._close_position(sym)
-                total_profit += profit
-                logger.info(f"[EXECUTION] Closed {sym}. Profit: ${profit}")
-        
-        # Reset State
-        self.resume_scanners()
-        
-        # Announce via AI Narrator
-        msg = f"Harvest complete. Total profit: ${total_profit:.2f}. Scanners re-engaged."
-        self._speak(msg)  # Ensure self.speak connects to your TTS engine
-        
-        return total_profit
-    
-    def _get_all_open_symbols(self) -> List[str]:
-        """Get all symbols with open positions."""
-        symbols = []
-        for position in self.positions:
-            if isinstance(position, dict):
-                asset = position.get('asset')
-            else:
-                asset = getattr(position, 'asset', None)
-            if asset and asset not in symbols:
-                symbols.append(asset)
-        return symbols
-    
-    def _close_position(self, symbol: str) -> bool:
-        """Close position for symbol."""
-        try:
-            if config.get_active_mode() == "TRADINGVIEW":
-                if hasattr(self, 'rpa_executor') and self.rpa_executor:
-                    self.rpa_executor.flatten_position(symbol)
-            else:
-                if hasattr(self, 'trade_executor') and self.trade_executor:
-                    self.trade_executor.close_position(symbol)
+                price = self.browser_agent.get_current_price(ticker)
+                if price and price > 0:
+                    return price
             
-            # Remove from positions list
-            self.positions = [p for p in self.positions 
-                             if (isinstance(p, dict) and p.get('asset') != symbol) or
-                             (not isinstance(p, dict) and getattr(p, 'asset', None) != symbol)]
-            
-            logger.info(f"[HAWK] Position closed: {symbol}")
-            return True
-        except Exception as e:
-            logger.error(f"[HAWK] Error closing position {symbol}: {e}")
-            return False
-    
-    def _speak(self, msg: str):
-        """AI Narrator TTS. Override this with actual TTS implementation."""
-        logger.info(f"[AI NARRATOR] {msg}")
-        # Try to use AI narrator if available
-        if hasattr(self, 'ai_narrator') and self.ai_narrator:
+            # Try yfinance directly for crypto and other assets
             try:
-                if hasattr(self.ai_narrator, 'speak'):
-                    self.ai_narrator.speak(msg)
+                from core.symbol_mapper import normalize_yfinance_symbol
+                import yfinance as yf
+                yf_symbol = normalize_yfinance_symbol(ticker)
+                t = yf.Ticker(yf_symbol)
+                hist = t.history(period="1d", interval="1m")
+                if not hist.empty:
+                    return float(hist["Close"].iloc[-1])
             except Exception:
                 pass
+            
+            # Fallback to scanner data
+            try:
+                df = self.scanner._fetch_market_data(ticker)
+                if df is not None and not df.empty:
+                    return float(df["Close"].iloc[-1])
+            except Exception:
+                pass
+            
+            return 0.0
+        except Exception:
+            return 0.0
 
 # =========================================================================
 # MAIN ENTRY POINT

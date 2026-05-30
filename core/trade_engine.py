@@ -33,7 +33,22 @@ class TradeEngine:
         self.open_trades: List[TradeRecord] = []
         self.trade_history: List[TradeRecord] = []
         self.cooldown_until: Optional[datetime] = None
-        self.rpa_executor = RPAExecutor()
+        
+        # HAWK PROTOCOL: Single-Asset Lock
+        self.target_lock_active = False
+        self.locked_asset = None
+        self.hawk_mode = True  # Enable single-asset focus
+        self.scanner_thread = None  # Will be set by external scanner if exists
+        
+        # Initialize RPA executor with error handling
+        self.rpa_executor = None
+        try:
+            self.rpa_executor = RPAExecutor()
+            logger.info("[RPA] Executor initialized successfully")
+        except Exception as e:
+            logger.warning("[RPA] Executor initialization failed: %s - Running in teacher mode", e)
+            self.rpa_executor = None
+        
         self.last_indicators: dict = {}  # Populated by swarm before process_signal
 
         # Active trade management: ProfitLock + ATR stops
@@ -41,14 +56,10 @@ class TradeEngine:
         self.walk_away = WalkAwayProtocol()
         self.atr_stops = LooseATRStops()
 
-        # HAWK PROTOCOL: Single-Asset Lock
-        self.target_lock_active = False
-        self.locked_asset = None
-        self.hawk_mode = True  # Enable single-asset focus
-        self.scanner_thread = None  # Will be set by external scanner if exists
-
         # Initialize SQLite ledger
         self._init_ledger()
+        # Price cache for HAWK protocol
+        self._last_prices = {}
 
     def _init_ledger(self):
         """Initialize SQLite trade ledger"""
@@ -201,6 +212,9 @@ class TradeEngine:
 
         Call this on every tick/scan cycle. Returns list of closed trade IDs.
         """
+        # Store current prices for HAWK protocol get_current_price()
+        self._last_prices.update(current_prices)
+        
         closed_ids = []
         now = datetime.utcnow()
 
@@ -465,7 +479,7 @@ class TradeEngine:
             """
             INSERT INTO trades (id, timestamp, asset, action, entry_price, stop_loss, take_profit, 
                                exit_price, pnl, confidence, ai_reason, mode, status, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade.id,
@@ -554,16 +568,45 @@ class TradeEngine:
                 self.execute_global_profit_harvest(symbol=self.locked_asset)
 
     def get_current_price(self, symbol: str) -> Optional[float]:
-        """Get current price for symbol. Override this with actual implementation."""
-        # Placeholder - implement based on your market data feed
-        logger.warning("[HAWK] get_current_price not implemented for %s", symbol)
+        """Get current price for symbol from last known prices or market data."""
+        # Check if we have the price in last_indicators (populated by swarm before process_signal)
+        if hasattr(self, 'last_indicators') and symbol in self.last_indicators:
+            # Try to extract current price from indicators
+            price = (self.last_indicators.get("current_price") or 
+                     self.last_indicators.get("close") or 
+                     self.last_indicators.get("last_close"))
+            if price:
+                return float(price)
+        
+        # Check if we have it in stored prices dict (updated in manage_open_trades)
+        if hasattr(self, '_last_prices') and symbol in self._last_prices:
+            return self._last_prices[symbol]
+        
+        logger.warning("[HAWK] get_current_price not available for %s - no market data feed connected", symbol)
         return None
 
     def calculate_atr(self, symbol: str, period: int = 3) -> Optional[float]:
-        """Calculate ATR for symbol. Override this with actual implementation."""
-        # Placeholder - implement based on your ATR calculation
-        logger.warning("[HAWK] calculate_atr not implemented for %s", symbol)
-        return None
+        """Calculate ATR for symbol using loose ATR stops or simple estimation."""
+        try:
+            # Try to use the imported LooseATRStops class
+            if hasattr(self.atr_stops, 'calculate_atr'):
+                atr_value = self.atr_stops.calculate_atr(symbol, period)
+                if atr_value:
+                    return float(atr_value)
+            
+            # Fallback: Simple ATR calculation if we have price history
+            if hasattr(self, '_last_prices') and symbol in self._last_prices:
+                # Simplified: use 1% of current price as proxy for ATR
+                current_price = self._last_prices[symbol]
+                estimated_atr = current_price * 0.01 * period
+                logger.info("[HAWK] Using estimated ATR for %s: %.2f (based on %.2f price)", symbol, estimated_atr, current_price)
+                return estimated_atr
+            
+            logger.warning("[HAWK] calculate_atr not available for %s - no ATR data source", symbol)
+            return None
+        except Exception as e:
+            logger.error("[HAWK] Error calculating ATR for %s: %s", symbol, e)
+            return None
 
     def get_open_position(self, symbol: str) -> Optional[dict]:
         """Get open position for symbol."""

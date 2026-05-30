@@ -22,6 +22,26 @@ if errorlevel 1 (
     timeout /t 4 /nobreak >nul
 )
 
+REM --- Start MetaTrader 5 if not running ---
+tasklist /FI "IMAGENAME eq terminal64.exe" 2>nul | find /I "terminal64.exe" >nul
+if errorlevel 1 (
+    echo Starting MetaTrader 5...
+    if exist "%ProgramFiles%\MetaTrader 5\terminal64.exe" (
+        start "" "%ProgramFiles%\MetaTrader 5\terminal64.exe"
+    ) else if exist "%ProgramFiles(x86)%\MetaTrader 5\terminal64.exe" (
+        start "" "%ProgramFiles(x86)%\MetaTrader 5\terminal64.exe"
+    ) else if exist "%AppData%\MetaQuotes\Terminal\*\terminal64.exe" (
+        for /f "delims=" %%i in ('dir /b /s "%AppData%\MetaQuotes\Terminal\*\terminal64.exe" 2^>nul') do start "" "%%i"
+    ) else (
+        echo WARNING: MetaTrader 5 not found. MT5 data feed will be unavailable.
+        echo Install MT5 or update the path in launch.bat.
+    )
+    echo Waiting for MT5 to initialize...
+    timeout /t 10 /nobreak >nul
+) else (
+    echo MetaTrader 5 already running.
+)
+
 REM --- Open TradingView in Chrome with debug port (if not already open) ---
 curl -s -o nul --max-time 2 http://127.0.0.1:9222/json/version >nul 2>&1
 if errorlevel 1 (

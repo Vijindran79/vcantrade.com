@@ -640,6 +640,8 @@ def parse_json_response(raw: str) -> dict:
 class OllamaSwarmConsensus:
     """Local Qwen 2.5 trading analyst - runs 100% on your machine."""
     
+    _brain_lock = __import__('threading').Lock()  # Prevent concurrent Ollama calls
+    
     def __init__(self):
         self.base_url = normalize_ollama_base_url(config.OLLAMA_BASE_URL)
         self.model = config.OLLAMA_MODEL
@@ -665,31 +667,133 @@ class OllamaSwarmConsensus:
         return "qwen2.5:1.5b" # Master fallback prediction engine node
     
     def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
-        """Fallback strike gate used when the cloud brain is unavailable."""
-        prompt = self._build_fallback_brain_prompt(proposed_action, package)
-        result = call_local_brain(prompt, model=self.model, timeout=self.timeout)
-        if "error" in result:
+        """Multi-LLM swarm decision — fires 3 models SEQUENTIALLY (VRAM-safe) and builds confidence through consensus."""
+        # Prevent concurrent brain calls (VRAM can only load one model at a time)
+        with self._brain_lock:
+            return self._request_decision_inner(proposed_action, package)
+    
+    def _request_decision_inner(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
+        """Internal swarm decision (called under brain_lock)."""
+        asset = package.get("asset", "UNKNOWN")
+        candles_json = json.dumps(package.get("recent_ohlcv", []), ensure_ascii=False)
+        regime_context = package.get("regime_context", "")
+        rsi = package.get("rsi", 50.0)
+        atr = package.get("atr", 0.0)
+        signal_type = package.get("signal_type", "UNKNOWN")
+        
+        prompt = f"""{PREDATOR_SYSTEM_INSTRUCTION}
+
+Analyze this trading opportunity and return a JSON verdict.
+
+Asset: {asset}
+Signal: {signal_type} | Proposed: {proposed_action}
+RSI: {rsi} | ATR: {atr}
+Regime: {regime_context}
+Recent candles: {candles_json}
+
+RULES:
+- If CHOPPY regime or RSI near 50, return WAIT
+- Only BUY in bullish regime with RSI < 70
+- Only SELL in bearish regime with RSI > 30
+
+Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under 100 chars"}}
+"""
+        
+        # === SEQUENTIAL SWARM (VRAM-safe) ===
+        # Fire models one by one with cooldown to let VRAM free between calls
+        # Use SMALL fast models (1.5B-3B) instead of large ones to avoid VRAM contention
+        models = [
+            ("predator:latest", "PREDATOR"),
+            ("qwen2.5:1.5b-instruct-q4_K_M", "QWEN"),
+            ("gemma:2b", "GEMMA"),
+        ]
+        
+        results = []
+        import time as _time
+        
+        for model_name, label in models:
+            try:
+                result = call_local_brain(prompt, model=model_name, timeout=60)
+                if "error" not in result:
+                    results.append((label, result))
+                    logger.info("[SWARM] %s responded: %s", label, str(result.get("signal", "?"))[:20])
+                else:
+                    logger.warning("[SWARM] %s error: %s", label, str(result.get("error", ""))[:80])
+            except Exception as e:
+                logger.warning("[SWARM] %s exception: %s", label, str(e)[:80])
+            
+            # VRAM cooldown — let model unload before next one loads
+            _time.sleep(3)
+        
+        if not results:
             return {
                 "verdict": "[SIGNAL] WAIT",
-                "reasoning": str(result.get("error") or "Local Predator unavailable.")[:240],
-                "model": self.model,
-                "brain_used": "OLLAMA_PREDATOR",
+                "reasoning": "All swarm models unavailable.",
+                "brain_used": "SWARM_FAILED",
                 "fallback_mode": True,
-                "raw_text": str(result),
+                "confidence": 0,
             }
         
-        verdict = self._normalize_fallback_verdict(
-            result.get("verdict") or result.get("signal") or result.get("action"),
-            proposed_action,
+        # === CONSENSUS ENGINE ===
+        votes = {"BUY": 0, "SELL": 0, "WAIT": 0}
+        confidences = []
+        reasons = []
+        models_used = []
+        
+        for label, result in results:
+            signal = str(result.get("signal", "WAIT") or "WAIT").upper()
+            if "BUY" in signal:
+                signal = "BUY"
+            elif "SELL" in signal:
+                signal = "SELL"
+            else:
+                signal = "WAIT"
+            
+            votes[signal] = votes.get(signal, 0) + 1
+            conf = int(result.get("confidence", 50) or 50)
+            confidences.append(conf)
+            reasons.append(f"{label}: {str(result.get('reason', ''))[:80]}")
+            models_used.append(label)
+        
+        total_votes = len(results)
+        winner = max(votes, key=votes.get)
+        winner_count = votes[winner]
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 50
+        
+        if winner_count == total_votes and total_votes >= 2:
+            multiplier = 1.3
+            consensus_label = "UNANIMOUS"
+        elif winner_count > total_votes / 2:
+            multiplier = 1.0
+            consensus_label = "MAJORITY"
+        else:
+            multiplier = 0.7
+            consensus_label = "SPLIT"
+        
+        final_confidence = min(100, int(avg_confidence * multiplier))
+        
+        if winner == "WAIT":
+            final_confidence = max(20, final_confidence - 20)
+        
+        verdict = f"[SIGNAL] {winner}"
+        brain_label = "+".join(models_used)
+        reasoning = f"[{consensus_label} {total_votes}L] {' | '.join(reasons[:3])}"
+        
+        logger.info(
+            "[SWARM] %s consensus: %s (%d/%d models, confidence=%d%%, models=%s)",
+            consensus_label, winner, winner_count, total_votes, final_confidence, brain_label
         )
-        reasoning = str(result.get("reasoning") or result.get("reason") or "Local Predator strike gate engaged.").strip()[:240]
+        
         return {
             "verdict": verdict,
-            "reasoning": reasoning,
-            "model": self.model,
-            "brain_used": "OLLAMA_PREDATOR",
-            "fallback_mode": True,
-            "raw_text": json.dumps(result, ensure_ascii=False),
+            "reasoning": reasoning[:500],
+            "model": brain_label,
+            "brain_used": f"SWARM_{brain_label}",
+            "fallback_mode": False,
+            "confidence": final_confidence,
+            "consensus": consensus_label,
+            "votes": votes,
+            "models_used": models_used,
         }
     
     def _build_fallback_brain_prompt(self, proposed_action: str, package: dict[str, Any]) -> str:
