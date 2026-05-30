@@ -1597,7 +1597,7 @@ class CommandCenter(QWidget):
 
     # =================== KILL SWITCH ===================
     def _build_kill_switch(self) -> QWidget:
-        """Emergency Stop Button with Reset"""
+        """Emergency Stop Button with Reset and ONE-CLICK PROFIT HARVEST"""
         panel = QFrame()
         panel.setStyleSheet(f"background: {BG_PANEL}; border: 2px solid {RED}; border-radius: 8px; padding: 12px;")
         layout = QHBoxLayout(panel)
@@ -1608,25 +1608,39 @@ class CommandCenter(QWidget):
         warning.setStyleSheet(f"color: {RED}; font-size: 14px; font-weight: bold; font-family: 'Consolas';")
         layout.addWidget(warning)
 
-        kill_btn = QPushButton("🛑 KILL SWITCH - STOP ALL TRADING")
+        # KILL SWITCH button
+        kill_btn = QPushButton("🛑 KILL SWITCH")
         kill_btn.setMinimumHeight(44)
         kill_btn.setStyleSheet(f"""
             QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 8px;
-                         font-size: 14px; font-weight: bold; font-family: 'Consolas'; padding: 10px; }}
+                         font-size: 13px; font-weight: bold; font-family: 'Consolas'; padding: 10px; }}
             QPushButton:hover {{ background: #ff4444; }}
             QPushButton:pressed {{ background: #cc0000; }}
         """)
         kill_btn.clicked.connect(self._on_kill_switch)
         layout.addWidget(kill_btn, stretch=1)
 
+        # ONE-CLICK PROFIT HARVEST button (NEW - HAWK PROTOCOL)
+        self.harvest_btn = QPushButton("💰 ONE-CLICK PROFIT HARVEST")
+        self.harvest_btn.setMinimumHeight(44)
+        self.harvest_btn.setStyleSheet(f"""
+            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 8px;
+                         font-size: 13px; font-weight: bold; font-family: 'Consolas'; padding: 10px; }}
+            QPushButton:hover {{ background: #2ea043; }}
+            QPushButton:pressed {{ background: #1e7b2e; }}
+        """)
+        self.harvest_btn.clicked.connect(self._on_profit_harvest)
+        self.harvest_btn.setToolTip("Immediately close all positions and lock in profits")
+        layout.addWidget(self.harvest_btn, stretch=1)
+
         # Reset button
         self.reset_kill_btn = QPushButton("🔄 RESET")
         self.reset_kill_btn.setMinimumHeight(44)
-        self.reset_kill_btn.setFixedWidth(120)
+        self.reset_kill_btn.setFixedWidth(100)
         self.reset_kill_btn.setStyleSheet(f"""
-            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 8px;
-                         font-size: 14px; font-weight: bold; font-family: 'Consolas'; padding: 10px; }}
-            QPushButton:hover {{ background: #2ea043; }}
+            QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 8px;
+                         font-size: 13px; font-weight: bold; font-family: 'Consolas'; padding: 10px; }}
+            QPushButton:hover {{ background: #00b8e6; }}
             QPushButton:disabled {{ background: {GRAY}; color: {DIM}; }}
         """)
         self.reset_kill_btn.clicked.connect(self._on_reset_kill_switch)
@@ -1944,6 +1958,13 @@ class CommandCenter(QWidget):
         # Don't disable the entire UI - just show reset button
         self.reset_kill_btn.setEnabled(True)
         self.log("⚠️ Use the RESET button to resume trading")
+
+    def _on_profit_harvest(self):
+        """ONE-CLICK PROFIT HARVEST: Immediately close all positions"""
+        self.log("💰 ONE-CLICK PROFIT HARVEST TRIGGERED")
+        # Emit signal to main app to execute profit harvest
+        self.user_command_sent.emit("PROFIT_HARVEST")
+        self.log("🎯 Sending profit harvest command to execution engine...")
 
     def _on_reset_kill_switch(self):
         """Reset kill switch and re-enable trading."""
