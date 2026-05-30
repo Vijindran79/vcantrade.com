@@ -2477,8 +2477,8 @@ class VcaniTradeApp:
             tp_candidates = [s for s in supports if s < entry_price]
             if tp_candidates:
                 nearest_support = max(tp_candidates)
-                # Subtract small buffer (0.1%) to ensure we hit the zone
-                tp_price = nearest_support * 0.999
+                # Add small buffer (0.1%) to ensure we hit the zone
+                tp_price = nearest_support * 1.001
                 self.cmd.log(f'🎯 TP SET: Support @ ${tp_price:.2f} (nearest: ${nearest_support:.2f})')
                 return tp_price
             
