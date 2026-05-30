@@ -136,14 +136,26 @@ class RPAExecutor:
                 time.sleep(0.05)
                 
                 # 2. NAVIGATE TO CORRECT SYMBOL FIRST — critical fix
-                # Use TradingView's symbol search (click ticker box, type new symbol, select)
                 self._navigate_to_symbol(browser_agent, ticker)
                 
-                # 3. Force close any stuck UI dialogue remnants and open fresh panel ticket
+                # 3. Force close any stuck UI dialogue remnants
                 pyautogui.press('escape')
-                time.sleep(0.1)
-                pyautogui.hotkey('shift', 'v')
                 time.sleep(0.2)
+                pyautogui.press('escape')
+                time.sleep(0.2)
+                
+                # 4. Click the Buy or Sell button directly (no keyboard shortcuts that trigger symbol search)
+                clicked = self._click_buy_sell_button(browser_agent, action)
+                if not clicked:
+                    logger.warning("[HY3] Could not find %s button via CDP, retrying with coordinates", action)
+                    # Fallback: click at known TradingView Buy/Sell button locations
+                    screen_w, screen_h = pyautogui.size()
+                    if action == "BUY":
+                        # Buy button is typically at bottom-right of the order panel
+                        pyautogui.click(screen_w - 120, screen_h - 180)
+                    else:
+                        pyautogui.click(screen_w - 120, screen_h - 140)
+                    time.sleep(0.3)
                 
                 # 3. Defensive targeted entry for Stop Loss parameter field
                 if sl > 0:
@@ -187,41 +199,122 @@ class RPAExecutor:
     def _navigate_to_symbol(self, browser_agent, ticker: str) -> bool:
         """Navigate TradingView to the correct symbol BEFORE executing any clicks.
         
-        Uses TradingView's symbol search dialog:
-        1. Click the symbol name at top-left of chart
-        2. Type the new symbol
-        3. Press Enter to select
+        Uses CDP browser connection to navigate (most reliable).
+        Falls back to keyboard shortcuts if CDP unavailable.
         """
         try:
-            # Map clean ticker to TradingView chart symbol
             import config
             tv_symbol = config.TRADINGVIEW_SYMBOL_MAP.get(ticker, ticker)
             
             logger.info("[NAV] Navigating TradingView to %s (from %s)", tv_symbol, ticker)
             
-            # Method 1: Use TradingView keyboard shortcut — the "/" key opens symbol search
-            pyautogui.press('/')
-            time.sleep(0.3)
+            # Method 1: CDP navigation (most reliable)
+            page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
+            if page:
+                try:
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    try:
+                        # Get current TradingView chart URL and swap the symbol
+                        current_url = loop.run_until_complete(page.evaluate("() => window.location.href"))
+                        if "tradingview.com/chart" in str(current_url):
+                            # Use TradingView's symbol search via JavaScript
+                            loop.run_until_complete(page.evaluate(f"""() => {{
+                                // Find the symbol search input
+                                const searchInput = document.querySelector('input[data-name="symbol-search-input"]') 
+                                    || document.querySelector('.input-3lfOzrSj')
+                                    || document.querySelector('#header-toolbar-symbol-search input');
+                                if (searchInput) {{
+                                    searchInput.focus();
+                                    searchInput.value = '';
+                                    searchInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                }}
+                            }}"""))
+                            time.sleep(0.2)
+                            
+                            # Type the symbol
+                            pyautogui.hotkey('ctrl', 'a')
+                            time.sleep(0.05)
+                            pyautogui.write(tv_symbol, interval=0.03)
+                            time.sleep(0.5)
+                            pyautogui.press('enter')
+                            time.sleep(1.0)
+                            
+                            logger.info("[NAV] CDP navigation to %s complete", tv_symbol)
+                            return True
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    logger.debug("[NAV] CDP navigation failed: %s, falling back to keyboard", e)
             
-            # Clear any existing text and type the new symbol
+            # Method 2: Keyboard shortcut fallback
+            # First make sure TradingView window is focused
+            import pygetwindow as gw
+            tv_windows = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
+            if tv_windows:
+                tv_windows[0].activate()
+                time.sleep(0.3)
+            
+            # Press the ticker area (top-left of chart) via click
+            screen_w, screen_h = pyautogui.size()
+            # TradingView symbol is typically at top-left area
+            pyautogui.click(screen_w // 8, 60)
+            time.sleep(0.3)
             pyautogui.hotkey('ctrl', 'a')
             time.sleep(0.05)
-            pyautogui.press('delete')
-            time.sleep(0.05)
-            
-            # Type the symbol character by character (TradingView auto-suggests)
             pyautogui.write(tv_symbol, interval=0.03)
-            time.sleep(0.5)  # Wait for auto-suggest dropdown
-            
-            # Select the first suggestion
+            time.sleep(0.5)
             pyautogui.press('enter')
-            time.sleep(1.0)  # Wait for chart to load
+            time.sleep(1.0)
             
-            logger.info("[NAV] Successfully navigated to %s", tv_symbol)
+            logger.info("[NAV] Keyboard navigation to %s complete", tv_symbol)
             return True
             
         except Exception as e:
             logger.warning("[NAV] Symbol navigation failed for %s: %s — executing on current chart", ticker, e)
+            return False
+
+    def _click_buy_sell_button(self, browser_agent, action: str) -> bool:
+        """Find and click the Buy or Sell button on TradingView using CDP + pyautogui."""
+        try:
+            page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
+            if not page:
+                return False
+            
+            import asyncio
+            loop = asyncio.new_event_loop()
+            try:
+                # Find the button via JavaScript
+                search_terms = ["buy", "sell"] if action == "BUY" else ["sell", "buy"]
+                js_code = f"""() => {{
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    for (const term of {search_terms}) {{
+                        for (const btn of buttons) {{
+                            const text = (btn.textContent || '').toLowerCase().trim();
+                            const dataName = (btn.getAttribute('data-name') || '').toLowerCase();
+                            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                            if ((text === term || dataName.includes(term) || ariaLabel.includes(term)) && btn.offsetParent !== null) {{
+                                const rect = btn.getBoundingClientRect();
+                                return {{x: rect.left + rect.width/2, y: rect.top + rect.height/2, text: btn.textContent.trim()}};
+                            }}
+                        }}
+                    }}
+                    return null;
+                }}"""
+                
+                coords = loop.run_until_complete(page.evaluate(js_code))
+                if coords:
+                    cx, cy = int(coords['x']), int(coords['y'])
+                    logger.info("[HY3] Found '%s' button at (%d, %d): %s", action, cx, cy, coords.get('text', ''))
+                    pyautogui.click(cx, cy)
+                    time.sleep(0.3)
+                    return True
+            finally:
+                loop.close()
+            
+            return False
+        except Exception as e:
+            logger.debug("[HY3] Buy/Sell button click failed: %s", e)
             return False
 
     # execute_hardened_tv_bracket_order is an alias for execute_protected_tradingview_bracket
