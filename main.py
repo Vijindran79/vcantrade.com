@@ -1077,8 +1077,12 @@ class VcaniTradeEngine:
                 return TradeResult(status="REJECTED_AUDIT", ticker=ticker, reason="Pre-trade audit failed")
             
             # 4. Build trade object
+            # 4. Resolve true broker symbol dynamically
+            true_symbol = self._resolve_broker_symbol(ticker)
+            
+            # 4b. Pre-flight: build trade object
             trade = type('Trade', (), {
-                'asset': ticker,
+                'asset': true_symbol,
                 'action': action,
                 'entry_price': entry,
                 'stop_loss': sl,
@@ -1092,19 +1096,19 @@ class VcaniTradeEngine:
             
             # Path A: TradingView RPA (primary for all assets)
             active_mode = config.get_active_mode()
-            logger.info("[EXEC] Attempting %s execution for %s %s @ %.2f", active_mode, action, ticker, entry)
+            logger.info("[EXEC] Attempting %s execution for %s %s (%s) @ %.2f", active_mode, action, ticker, true_symbol, entry)
             
             try:
                 success = self.rpa_executor.execute_trade(trade)
                 if success:
-                    logger.info("[EXEC] TradingView RPA SUCCESS for %s %s", action, ticker)
+                    logger.info("[EXEC] TradingView RPA SUCCESS for %s %s", action, true_symbol)
                 else:
                     reason = getattr(self.rpa_executor, 'last_failure_reason', 'unknown')
                     errors.append(f"TradingView RPA: {reason}")
-                    logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, ticker, reason)
+                    logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, true_symbol, reason)
             except Exception as e:
                 errors.append(f"TradingView RPA exception: {e}")
-                logger.error("[EXEC] TradingView RPA exception for %s %s: %s", action, ticker, e)
+                logger.error("[EXEC] TradingView RPA exception for %s %s: %s", action, true_symbol, e)
             
             # Path B: Ghost Executor fallback (JS injection via CDP)
             if not success:
@@ -1116,7 +1120,7 @@ class VcaniTradeEngine:
                         try:
                             success = loop.run_until_complete(ghost.execute_js(action))
                             if success:
-                                logger.info("[EXEC] Ghost Executor SUCCESS for %s %s", action, ticker)
+                                logger.info("[EXEC] Ghost Executor SUCCESS for %s %s", action, true_symbol)
                             else:
                                 errors.append("Ghost JS injection returned False")
                         finally:
@@ -1124,6 +1128,19 @@ class VcaniTradeEngine:
                 except Exception as e:
                     errors.append(f"Ghost Executor: {e}")
                     logger.error("[EXEC] Ghost Executor exception: %s", e)
+            
+            # Path C: MT5 Direct Order (with full compliance checks)
+            if not success:
+                try:
+                    mt5_result = self._execute_mt5_order(true_symbol, action, entry, sl, tp)
+                    if mt5_result.get("success"):
+                        success = True
+                        logger.info("[EXEC] MT5 Direct SUCCESS for %s %s", action, true_symbol)
+                    else:
+                        errors.append(f"MT5: {mt5_result.get('error', 'unknown')}")
+                except Exception as e:
+                    errors.append(f"MT5 exception: {e}")
+                    logger.error("[EXEC] MT5 exception: %s", e)
             
             # 6. Handle result
             if success:
@@ -1145,6 +1162,106 @@ class VcaniTradeEngine:
             logger.error("[EXEC] Trade execution error: %s", e)
             self.asset_lock.release()
             return TradeResult(status="ERROR", ticker=ticker, reason=str(e))
+    
+    def _execute_mt5_order(self, true_symbol: str, action: str, entry: float, sl: float, tp: float) -> dict:
+        """MT5 Direct Order with full compliance: symbol discovery, volume validation, error translation."""
+        import MetaTrader5 as mt5  # type: ignore[import-untyped]
+        
+        # Real-time contract and volume compliance layer
+        symbol_info = mt5.symbol_info(true_symbol)  # type: ignore[attr-defined]
+        if not symbol_info:
+            # Try dynamic discovery one more time
+            true_symbol = self._resolve_broker_symbol(true_symbol)
+            symbol_info = mt5.symbol_info(true_symbol)  # type: ignore[attr-defined]
+        
+        if not symbol_info:
+            error_msg = f"Symbol unavailable: {true_symbol} not found in MT5 terminal"
+            logger.error("[EXEC-CRITICAL] %s", error_msg)
+            self._log_dashboard(f"[EXEC-CRITICAL] {error_msg}")
+            return {"success": False, "error": error_msg}
+        
+        # Force-select symbol in Market Watch if not visible
+        if not symbol_info.visible:
+            mt5.symbol_select(true_symbol, True)  # type: ignore[attr-defined]
+            symbol_info = mt5.symbol_info(true_symbol)  # type: ignore[attr-defined]
+        
+        # Auto-override volume to broker limits
+        safe_lot = max(symbol_info.volume_min, min(0.01, symbol_info.volume_max))
+        
+        # Build the order request
+        order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL  # type: ignore[attr-defined]
+        
+        tick = mt5.symbol_info_tick(true_symbol)  # type: ignore[attr-defined]
+        if not tick:
+            return {"success": False, "error": f"No tick data for {true_symbol}"}
+        
+        price = tick.ask if action == "BUY" else tick.bid
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,  # type: ignore[attr-defined]
+            "symbol": true_symbol,
+            "volume": safe_lot,
+            "type": order_type,
+            "price": price,
+            "deviation": 20,
+            "magic": 20250530,
+            "comment": f"VcanTrade_{action}",
+            "type_time": mt5.ORDER_TIME_GTC,  # type: ignore[attr-defined]
+            "type_filling": mt5.ORDER_FILLING_IOC,  # type: ignore[attr-defined]
+        }
+        
+        # Add SL/TP if provided
+        if sl > 0:
+            request["sl"] = sl
+        if tp > 0:
+            request["tp"] = tp
+        
+        logger.info("[MT5-ORDER] Sending: %s %s vol=%.4f @ %.5f SL=%s TP=%s",
+                     action, true_symbol, safe_lot, price,
+                     f"{sl:.5f}" if sl > 0 else "None",
+                     f"{tp:.5f}" if tp > 0 else "None")
+        
+        # Submit order
+        result = mt5.order_send(request)  # type: ignore[attr-defined]
+        
+        if not result:
+            error_code = mt5.last_error()  # type: ignore[attr-defined]
+            detailed_reason = f"MT5 order_send returned None | API Error {error_code}"
+            logger.error("[EXEC] FAILED: %s %s — %s", action, true_symbol, detailed_reason)
+            self._log_dashboard(f"[EXEC] FAILED: {action} {true_symbol} — {detailed_reason}")
+            return {"success": False, "error": detailed_reason}
+        
+        if result.retcode != mt5.TRADE_RETCODE_DONE:  # type: ignore[attr-defined]
+            error_code = mt5.last_error()  # type: ignore[attr-defined]
+            detailed_reason = f"MT5 Code {result.retcode} | API Error {error_code}"
+            
+            # Translate common architectural blocks for the dashboard
+            if error_code == 4756:
+                detailed_reason += " (Enable Algo-Trading in MT5 Tools > Options > Expert Advisors)"
+            elif result.retcode == 10014:
+                detailed_reason += f" (Invalid volume: requested {safe_lot}, min={symbol_info.volume_min}, max={symbol_info.volume_max})"
+            elif result.retcode == 10018:
+                detailed_reason += " (Market closed or session frozen by broker)"
+            elif result.retcode == 10019:
+                detailed_reason += " (Not enough money for this volume)"
+            elif result.retcode == 10021:
+                detailed_reason += " (No price available — market data feed offline)"
+            elif result.retcode == 10026:
+                detailed_reason += " (AutoTrading disabled in MT5 terminal)"
+            elif result.retcode == 10013:
+                detailed_reason += " (Invalid request — check symbol permissions)"
+            elif result.retcode == 10016:
+                detailed_reason += " (Invalid stops — SL/TP too close to market price)"
+            
+            logger.error("[EXEC] FAILED: %s %s — %s", action, true_symbol, detailed_reason)
+            self._log_dashboard(f"[EXEC] FAILED: {action} {true_symbol} — {detailed_reason}")
+            return {"success": False, "error": detailed_reason}
+        
+        # Success
+        logger.info("[MT5-ORDER] SUCCESS: %s %s vol=%.4f @ %.5f ticket=%s",
+                     action, true_symbol, safe_lot, price, result.order)
+        self._log_dashboard(f"[MT5] {action} {true_symbol} filled @ {price:.5f} ticket={result.order}")
+        return {"success": True, "ticket": result.order, "price": price}
     
     def check_dynamic_exits(self):
         """Check all open positions for dynamic AI exit conditions."""
