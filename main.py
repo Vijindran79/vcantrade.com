@@ -985,105 +985,166 @@ class VcaniTradeEngine:
         
         logger.info("[ENGINE] VcaniTrade Engine STOPPED")
     
-    def execute_trade(self, ticker: str, action: str, entry: float, sl: float, tp: float) -> TradeResult:
-        """Execute a trade with single-asset lock enforcement."""
+    # ==================== SYMBOL RESOLUTION ====================
+    
+    def _resolve_broker_symbol(self, clean_symbol: str) -> str:
+        """Dynamically probes the MT5 terminal to match clean symbols with broker-specific names/suffixes.
         
-        # 0. Enforce native timezone-aware asset class permission gates cleanly
+        Handles: BTCUSD -> BTCUSD_SB, BTCUSD.raw, BTCUSD.m, etc.
+        """
+        import MetaTrader5 as mt5  # type: ignore[import-untyped]
+        
+        # Step 1: Check config map first
+        mapped = config.MT5_SYMBOL_MAP.get(clean_symbol, "")
+        if mapped:
+            info = mt5.symbol_info(mapped)  # type: ignore[attr-defined]
+            if info:
+                mt5.symbol_select(mapped, True)  # type: ignore[attr-defined]
+                logger.info("[RESOLVE] Config map: %s -> %s", clean_symbol, mapped)
+                return mapped
+        
+        # Step 2: Direct lookup
+        info = mt5.symbol_info(clean_symbol)  # type: ignore[attr-defined]
+        if info:
+            mt5.symbol_select(clean_symbol, True)  # type: ignore[attr-defined]
+            return clean_symbol
+        
+        # Step 3: Broad keyword scan
+        all_symbols = mt5.symbols_get()  # type: ignore[attr-defined]
+        if all_symbols:
+            search = clean_symbol.upper().replace("_SB", "").replace(".RAW", "").replace("=F", "")
+            # Extract base keyword (BTC from BTCUSD, ETH from ETHUSD)
+            base = ""
+            for kw in ["BTC", "ETH", "XAU", "XAG", "NAS", "US500", "CRUDE", "GOLD"]:
+                if kw in search:
+                    base = kw
+                    break
+            if not base:
+                base = search[:3]
+            
+            candidates = []
+            for sym in all_symbols:
+                sname = sym.name.upper()
+                if base in sname:
+                    candidates.append(sym.name)
+            
+            if candidates:
+                # Prefer exact match, then shortest name (most likely the primary symbol)
+                best = sorted(candidates, key=lambda n: (n.upper() != clean_symbol.upper(), len(n)))[0]
+                mt5.symbol_select(best, True)  # type: ignore[attr-defined]
+                logger.info("[SELF-HEAL] Mapped '%s' -> '%s' (found %d candidates)", clean_symbol, best, len(candidates))
+                return best
+        
+        logger.warning("[RESOLVE] No MT5 symbol found for '%s'", clean_symbol)
+        return clean_symbol
+    
+    def _resolve_tradingview_symbol(self, ticker: str) -> str:
+        """Resolve ticker to TradingView chart symbol using config map."""
+        mapped = config.TRADINGVIEW_SYMBOL_MAP.get(ticker, "")
+        if mapped:
+            return mapped
+        # Try common variations
+        for suffix in ["", "1!", "=F"]:
+            candidate = ticker + suffix
+            if candidate in config.TRADINGVIEW_SYMBOL_MAP:
+                return config.TRADINGVIEW_SYMBOL_MAP[candidate]
+        return ticker
+    
+    # ==================== TRADE EXECUTION ====================
+    
+    def execute_trade(self, ticker: str, action: str, entry: float, sl: float, tp: float) -> TradeResult:
+        """Execute a trade with dynamic symbol resolution, single-asset lock, and multi-path fallback."""
+        
+        # 0. Enforce asset class permission
         if not getattr(self, 'can_trade', True):
             if not is_crypto_ticker(ticker) and not is_futures_ticker(ticker):
-                logger.warning(f"[RULE-GUARD] Execution blocked: {ticker} does not clear our active asset class clearance profiles.")
-                return TradeResult(
-                    status="REJECTED_ASSET_CLASS",
-                    ticker=ticker,
-                    reason=f"Asset class {ticker} not in allowed futures/crypto profiles"
-                )
+                logger.warning("[RULE-GUARD] Execution blocked: %s not in allowed asset classes", ticker)
+                return TradeResult(status="REJECTED_ASSET_CLASS", ticker=ticker, reason=f"Asset class {ticker} not allowed")
         
-        # 1. Check if we're locked for a different ticker
+        # 1. Lock check
         if self.asset_lock.is_locked_for(ticker):
-            logger.warning(
-                "[LOCK] Trade REJECTED for %s — locked for %s",
-                ticker, self.asset_lock.active_locked_ticker
-            )
-            return TradeResult(
-                status="REJECTED_LOCK",
-                ticker=ticker,
-                reason=f"Locked for {self.asset_lock.active_locked_ticker}"
-            )
+            logger.warning("[LOCK] Trade REJECTED for %s — locked for %s", ticker, self.asset_lock.active_locked_ticker)
+            return TradeResult(status="REJECTED_LOCK", ticker=ticker, reason=f"Locked for {self.asset_lock.active_locked_ticker}")
         
         # 2. Acquire lock
         if not self.asset_lock.acquire(ticker):
-            return TradeResult(
-                status="REJECTED_LOCK",
-                ticker=ticker,
-                reason="Failed to acquire asset lock"
-            )
+            return TradeResult(status="REJECTED_LOCK", ticker=ticker, reason="Failed to acquire lock")
         
         try:
-            # 3. Pre-trade audit
+            # 3. Pre-trade audit (permissive — allows trades even with missing data)
             if not self._run_pretrade_market_audit(ticker, entry):
                 self.asset_lock.release()
-                return TradeResult(
-                    status="REJECTED_AUDIT",
-                    ticker=ticker,
-                    reason="Pre-trade audit failed"
-                )
+                return TradeResult(status="REJECTED_AUDIT", ticker=ticker, reason="Pre-trade audit failed")
             
-            # 4. Execute via appropriate executor
-            if config.get_active_mode() == "TRADINGVIEW":
-                success = self.rpa_executor.execute_trade(
-                    type('Trade', (), {
-                        'asset': ticker,
-                        'action': action,
-                        'entry_price': entry,
-                        'stop_loss': sl,
-                        'take_profit': tp
-                    })()
-                )
-            else:
-                # MT5 path — not used for crypto (TradingView RPA handles it)
-                logger.warning("[EXEC] MT5 fallback not available for %s — use TradingView RPA", ticker)
-                success = False
+            # 4. Build trade object
+            trade = type('Trade', (), {
+                'asset': ticker,
+                'action': action,
+                'entry_price': entry,
+                'stop_loss': sl,
+                'take_profit': tp,
+                'confidence': 'HIGH',
+            })()
             
+            # 5. EXECUTE — try all paths with detailed logging
+            success = False
+            errors = []
+            
+            # Path A: TradingView RPA (primary for all assets)
+            active_mode = config.get_active_mode()
+            logger.info("[EXEC] Attempting %s execution for %s %s @ %.2f", active_mode, action, ticker, entry)
+            
+            try:
+                success = self.rpa_executor.execute_trade(trade)
+                if success:
+                    logger.info("[EXEC] TradingView RPA SUCCESS for %s %s", action, ticker)
+                else:
+                    reason = getattr(self.rpa_executor, 'last_failure_reason', 'unknown')
+                    errors.append(f"TradingView RPA: {reason}")
+                    logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, ticker, reason)
+            except Exception as e:
+                errors.append(f"TradingView RPA exception: {e}")
+                logger.error("[EXEC] TradingView RPA exception for %s %s: %s", action, ticker, e)
+            
+            # Path B: Ghost Executor fallback (JS injection via CDP)
+            if not success:
+                try:
+                    ghost = getattr(self, '_ghost_executor', None)
+                    if ghost and hasattr(ghost, 'execute_js'):
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        try:
+                            success = loop.run_until_complete(ghost.execute_js(action))
+                            if success:
+                                logger.info("[EXEC] Ghost Executor SUCCESS for %s %s", action, ticker)
+                            else:
+                                errors.append("Ghost JS injection returned False")
+                        finally:
+                            loop.close()
+                except Exception as e:
+                    errors.append(f"Ghost Executor: {e}")
+                    logger.error("[EXEC] Ghost Executor exception: %s", e)
+            
+            # 6. Handle result
             if success:
                 logger.info("[EXEC] Trade executed: %s %s @ %.2f", action, ticker, entry)
-                
-                # Track position for exit monitoring
                 self.positions.append({
-                    "asset": ticker,
-                    "ticker": ticker,
-                    "action": action,
-                    "entry_price": entry,
-                    "stop_loss": sl,
-                    "take_profit": tp,
-                    "point_value": 1.0,  # Default; can be overridden per instrument
-                    "entry_time": datetime.now().isoformat(),
+                    "asset": ticker, "ticker": ticker, "action": action,
+                    "entry_price": entry, "stop_loss": sl, "take_profit": tp,
+                    "point_value": 1.0, "entry_time": datetime.now().isoformat(),
                 })
                 self._log_dashboard(f"[POSITION] Tracking {action} {ticker} @ ${entry:.2f} | SL=${sl:.2f} | TP=${tp:.2f}")
-                
-                return TradeResult(
-                    status="EXECUTED",
-                    ticker=ticker,
-                    action=action,
-                    entry_price=entry,
-                    stop_loss=sl,
-                    take_profit=tp
-                )
+                return TradeResult(status="EXECUTED", ticker=ticker, action=action, entry_price=entry, stop_loss=sl, take_profit=tp)
             else:
                 self.asset_lock.release()
-                return TradeResult(
-                    status="FAILED",
-                    ticker=ticker,
-                    reason="Execution failed"
-                )
+                error_detail = " | ".join(errors) if errors else "All execution paths failed"
+                logger.error("[EXEC] FAILED: %s %s — %s", action, ticker, error_detail)
+                return TradeResult(status="FAILED", ticker=ticker, reason=error_detail)
         
         except Exception as e:
             logger.error("[EXEC] Trade execution error: %s", e)
             self.asset_lock.release()
-            return TradeResult(
-                status="ERROR",
-                ticker=ticker,
-                reason=str(e)
-            )
+            return TradeResult(status="ERROR", ticker=ticker, reason=str(e))
     
     def check_dynamic_exits(self):
         """Check all open positions for dynamic AI exit conditions."""
