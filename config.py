@@ -181,7 +181,10 @@ MT5_SYMBOL_MAP = {
     "NYMEX:MCL1!": "Crude_SB",       
     "GC=F": "Gold_SB",               # Standard Comex Spot Gold
     "MGC1!": "Gold_SB",              # Micro Gold Future Mapping Override
-    "COMEX:MGC1!": "Gold_SB"
+    "COMEX:MGC1!": "Gold_SB",
+    # Crypto — Pepperstone MT5 does not offer crypto; mapped for fallback routing
+    "BTCUSD": "BTCUSD",
+    "ETHUSD": "ETHUSD",
 }
 
 # ----- TradingView Symbol Map (Any alias -> Exact TradingView chart symbol) -----
