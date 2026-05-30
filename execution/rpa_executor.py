@@ -135,7 +135,11 @@ class RPAExecutor:
                 browser_agent.pause_cdp_listener = True
                 time.sleep(0.05)
                 
-                # 2. Force close any stuck UI dialogue remnants and open fresh panel ticket
+                # 2. NAVIGATE TO CORRECT SYMBOL FIRST — critical fix
+                # Use TradingView's symbol search (click ticker box, type new symbol, select)
+                self._navigate_to_symbol(browser_agent, ticker)
+                
+                # 3. Force close any stuck UI dialogue remnants and open fresh panel ticket
                 pyautogui.press('escape')
                 time.sleep(0.1)
                 pyautogui.hotkey('shift', 'v')
@@ -179,6 +183,46 @@ class RPAExecutor:
             # Always release the single-counter target lock
             if hasattr(browser_agent, 'clear_target_lock'):
                 browser_agent.clear_target_lock()
+
+    def _navigate_to_symbol(self, browser_agent, ticker: str) -> bool:
+        """Navigate TradingView to the correct symbol BEFORE executing any clicks.
+        
+        Uses TradingView's symbol search dialog:
+        1. Click the symbol name at top-left of chart
+        2. Type the new symbol
+        3. Press Enter to select
+        """
+        try:
+            # Map clean ticker to TradingView chart symbol
+            import config
+            tv_symbol = config.TRADINGVIEW_SYMBOL_MAP.get(ticker, ticker)
+            
+            logger.info("[NAV] Navigating TradingView to %s (from %s)", tv_symbol, ticker)
+            
+            # Method 1: Use TradingView keyboard shortcut — the "/" key opens symbol search
+            pyautogui.press('/')
+            time.sleep(0.3)
+            
+            # Clear any existing text and type the new symbol
+            pyautogui.hotkey('ctrl', 'a')
+            time.sleep(0.05)
+            pyautogui.press('delete')
+            time.sleep(0.05)
+            
+            # Type the symbol character by character (TradingView auto-suggests)
+            pyautogui.write(tv_symbol, interval=0.03)
+            time.sleep(0.5)  # Wait for auto-suggest dropdown
+            
+            # Select the first suggestion
+            pyautogui.press('enter')
+            time.sleep(1.0)  # Wait for chart to load
+            
+            logger.info("[NAV] Successfully navigated to %s", tv_symbol)
+            return True
+            
+        except Exception as e:
+            logger.warning("[NAV] Symbol navigation failed for %s: %s — executing on current chart", ticker, e)
+            return False
 
     # execute_hardened_tv_bracket_order is an alias for execute_protected_tradingview_bracket
     execute_hardened_tv_bracket_order = execute_protected_tradingview_bracket
