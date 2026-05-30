@@ -698,6 +698,14 @@ class VcaniTradeApp:
         self.ticker_selector = self.current_watchlist[0] if self.current_watchlist else "BTC-USD"
         self.test_status_text = "Ready"  # Test execution status
 
+        # ============================================
+        # HAWK PROTOCOL: SINGLE-ASSET TARGET LOCK
+        # ============================================
+        self.target_lock_active = False
+        self.active_lock_ticker = None
+        self.hawk_protocol_enabled = True  # Master toggle for Hawk Protocol
+        # ============================================
+
         # Balance & P/L tracking
         self.balance = 10000.0  # Starting balance
         self.equity = 10000.0
@@ -2986,6 +2994,8 @@ class VcaniTradeApp:
         """Close a position and update P&L."""
         self._ensure_balance_state()
         pnl = position.get("pnl", 0)
+        ticker_closed = position.get("asset", "UNKNOWN")
+        
         self.balance += pnl
         self.daily_pnl += pnl
         self.total_pnl += pnl
@@ -3007,6 +3017,21 @@ class VcaniTradeApp:
             # Lock ticker for 5 minutes regardless of win/loss to prevent overtrading
             self.cloud_scanner.lock_ticker(ticker_to_lock, reason=f"Position closed - {reason}")
             logger.info(f"🦁 LION MODE: Activated 5-min re-entry lock on {ticker_to_lock}")
+
+        # ============================================
+        # HAWK PROTOCOL: RELEASE TARGET LOCK ON EXIT
+        # ============================================
+        if self.target_lock_active and self.active_lock_ticker == ticker_closed:
+            self.target_lock_active = False
+            self.active_lock_ticker = None
+            logger.info(f"🦅 HAWK PROTOCOL: Target lock released on {ticker_closed}")
+            self.cmd.log(f"🦅 <span style='color:#FFD700;font-weight:bold'>HAWK PROTOCOL</span>: Target lock released - {ticker_closed} closed")
+            self.ai_narrator.speak(f"Target lock released. {ticker_closed} position closed. Resuming multi-asset scan.")
+            
+            # Resume multi-ticker scanners
+            self.cloud_scanner.scanner.priority_scan_list = []
+            self.cmd.log("📡 Multi-asset scanners resumed - scanning full watchlist")
+        # ============================================
 
         # Update UI
         self.cmd.update_balance(self.balance, self.equity, self.daily_pnl, self.total_pnl)
@@ -3738,6 +3763,22 @@ class VcaniTradeApp:
             position_size=quantity,
         )
         self.positions.append(position)
+        
+        # ============================================
+        # HAWK PROTOCOL: SINGLE-ASSET TARGET LOCK ACTIVATED
+        # ============================================
+        if self.hawk_protocol_enabled and not self.target_lock_active:
+            self.target_lock_active = True
+            self.active_lock_ticker = ticker
+            logger.info(f"🦅 HAWK PROTOCOL: Target lock engaged on {ticker}")
+            self.cmd.log(f"🦅 <span style='color:#FFD700;font-weight:bold'>HAWK PROTOCOL</span>: Target lock engaged on {ticker}")
+            self.ai_narrator.speak(f"Hawk Protocol engaged. Locked on {ticker}. Scanners suspended until exit.")
+            
+            # Suspend multi-ticker scanners (keep only the locked asset active)
+            self.cloud_scanner.scanner.priority_scan_list = [ticker]
+            self.cmd.log(f"📡 Multi-asset scanners suspended - focused on {ticker} only")
+        # ============================================
+        
         self.trades_today += 1
 
         self.cmd.update_positions(self.positions)
@@ -3978,12 +4019,120 @@ class VcaniTradeApp:
         )
 
     def _on_kill_switch(self):
+        """EMERGENCY STOP: Halts all trading activity and scanners."""
         self.trade_engine.activate_kill_switch()
         self.cloud_scanner.stop()
         self.signal_listener.stop()
         self.data_scout_listener.stop()
         self.watchtower.stop()
         logger.critical("Kill switch activated - all systems halted")
+
+    def execute_global_profit_harvest(self):
+        """
+        HAWK PROTOCOL: ONE-CLICK PROFIT HARVEST
+        Immediately flattens all positions, bypassing AI confirmations.
+        Resets state to cash standby and unlocks multi-asset scanners.
+        """
+        logger.info("=" * 60)
+        logger.info("💰 ONE-CLICK PROFIT HARVEST TRIGGERED")
+        logger.info("=" * 60)
+        
+        self.cmd.log("🚨 EXECUTING GLOBAL PROFIT HARVEST...")
+        
+        try:
+            # Close all open positions immediately
+            closed_count = 0
+            total_pnl = 0.0
+            
+            if hasattr(self, 'positions') and self.positions:
+                for position in list(self.positions):
+                    ticker = position.get('ticker', 'UNKNOWN')
+                    size = position.get('size', 0)
+                    entry_price = position.get('entry_price', 0)
+                    
+                    # Get current price (approximate)
+                    current_price = self._get_current_price_for_ticker(ticker)
+                    
+                    # Calculate PnL
+                    if position.get('side') == 'LONG':
+                        pnl = (current_price - entry_price) * size
+                    else:
+                        pnl = (entry_price - current_price) * size
+                    
+                    total_pnl += pnl
+                    
+                    # Execute market close
+                    self.trade_engine.close_position(
+                        symbol=ticker,
+                        size=size,
+                        reason="PROFIT_HARVEST_MANUAL"
+                    )
+                    
+                    closed_count += 1
+                    self.cmd.log(f"✅ Closed {ticker}: ${pnl:.2f}")
+                
+                # Clear positions list
+                self.positions.clear()
+            
+            # Reset HAWK Protocol state
+            self.target_lock_active = False
+            self.active_lock_ticker = None
+            
+            # Resume scanners if they were suspended
+            if self.hawk_protocol_enabled:
+                self.cmd.log("📡 Resuming multi-asset scanners...")
+            
+            # Announce result
+            harvest_msg = f"💰 PROFIT HARVEST COMPLETE: {closed_count} positions closed, Total PnL: ${total_pnl:.2f}"
+            self.cmd.log(harvest_msg)
+            
+            # AI Narrator announcement
+            if hasattr(self, 'ai_narrator'):
+                self.ai_narrator.speak(f"Profit harvest executed. {closed_count} positions closed. Total profit: ${total_pnl:.2f}. Ready for next opportunity.")
+            
+            # Log to journal
+            if hasattr(self, 'sql_journal'):
+                self.sql_journal.log_event(
+                    event_type="PROFIT_HARVEST",
+                    details={
+                        "positions_closed": closed_count,
+                        "total_pnl": total_pnl,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+            
+            logger.info(f"Profit harvest completed: {closed_count} positions, ${total_pnl:.2f}")
+            
+        except Exception as e:
+            error_msg = f"Profit harvest failed: {e}"
+            self.cmd.log(f"❌ {error_msg}")
+            logger.error(error_msg)
+            if hasattr(self, 'ai_narrator'):
+                self.ai_narrator.speak("Profit harvest encountered an error. Please check logs.")
+
+    def _get_current_price_for_ticker(self, ticker: str) -> float:
+        """Get approximate current price for a ticker (fallback method)."""
+        try:
+            # Try to get from latest signal data
+            if ticker in self.latest_signals:
+                signal_data = self.latest_signals[ticker]
+                return float(signal_data.get('price', 0))
+            
+            # Fallback: use yfinance for approximation
+            import yfinance as yf
+            yf_ticker = ticker.replace("!", "").replace("CME_MINI:", "")
+            if yf_ticker in ["MNQ", "MES", "MCL", "MGC"]:
+                yf_ticker = f"{yf_ticker}=F"
+            
+            ticker_obj = yf.Ticker(yf_ticker)
+            data = ticker_obj.history(period='1d')
+            if not data.empty:
+                return float(data['Close'].iloc[-1])
+        except Exception:
+            pass
+        
+        # Last resort: return 0
+        return 0.0
 
     def _on_calibrate(self):
         """Open the RPA Coordinate Mapper wizard."""
