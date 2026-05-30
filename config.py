@@ -182,7 +182,7 @@ MT5_SYMBOL_MAP = {
     "GC=F": "Gold_SB",               # Standard Comex Spot Gold
     "MGC1!": "Gold_SB",              # Micro Gold Future Mapping Override
     "COMEX:MGC1!": "Gold_SB",
-    # Crypto — Pepperstone MT5 does not offer crypto; mapped for fallback routing
+    # Crypto — HydraTrade MT5 is Forex-only; crypto routes to TradingView RPA
     "BTCUSD": "BTCUSD",
     "ETHUSD": "ETHUSD",
 }
