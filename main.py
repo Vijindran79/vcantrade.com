@@ -2455,8 +2455,8 @@ class VcaniTradeApp:
             if tp_candidates:
                 nearest_resistance = min(tp_candidates)
                 # Add small buffer (0.1%) to ensure we hit the zone
-                tp_price = nearest_resistance * 1.001
-                self.cmd.log(f'🎯 TP SET: Resistance @ ${tp_price:.2f} (nearest: ${nearest_resistance:.2f})')
+                # Subtract small buffer (0.1%) to ensure we hit the zone
+                tp_price = nearest_resistance * 0.999
                 return tp_price
             
             # Priority 2: Liquidity zone high above entry
