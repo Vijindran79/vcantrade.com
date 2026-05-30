@@ -257,7 +257,8 @@ class VcaniTradeEngine:
             level=getattr(logging, config.LOG_LEVEL),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             filename=config.LOG_FILE,
-            filemode='a'
+            filemode='a',
+            encoding='utf-8',
         )
         
         # Core components
