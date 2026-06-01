@@ -405,7 +405,7 @@ def analyze_chart_with_vision(
             # This is the critical step that turns the moondream description into a real SIGNAL
             brain_out = call_local_brain(
                 brain_prompt,
-                model="predator:latest",
+                model="qwen:latest",
                 timeout=int(getattr(config, "OLLAMA_PREDATOR_VERDICT_TIMEOUT", 25)),
                 num_predict=int(getattr(config, "OLLAMA_BRAIN_NUM_PREDICT", 96)),
             )
@@ -656,15 +656,13 @@ class OllamaSwarmConsensus:
             )
     
     def resolve_active_model_string(self, targeted_model: str) -> str:
-        """Safely converts descriptive quantized strings to basic continuous system aliases."""
+        """Safely converts descriptive quantized strings to actual Ollama registry names."""
         clean_string = targeted_model.lower()
-        if "qwen2.5-coder" in clean_string:
-            return "qwen2.5-coder:1.5b"
-        if "qwen2.5" in clean_string:
-            return "qwen2.5:1.5b" # Strip out custom extensions to avoid 404 registry faults
         if "gemma" in clean_string:
-            return "gemma:2b"
-        return "qwen2.5:1.5b" # Master fallback prediction engine node
+            return "gemma:latest"
+        if "qwen" in clean_string:
+            return "qwen:latest"
+        return "qwen:latest"
     
     def request_decision(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
         """Multi-LLM swarm decision — fires 3 models SEQUENTIALLY (VRAM-safe) and builds confidence through consensus."""
@@ -680,6 +678,11 @@ class OllamaSwarmConsensus:
         rsi = package.get("rsi", 50.0)
         atr = package.get("atr", 0.0)
         signal_type = package.get("signal_type", "UNKNOWN")
+        signal_strength = float(
+            package.get("signal_strength", 0)
+            or package.get("technical_strength", 0)
+            or 0.5
+        )
         
         prompt = f"""{PREDATOR_SYSTEM_INSTRUCTION}
 
@@ -700,12 +703,11 @@ Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under
 """
         
         # === SEQUENTIAL SWARM (VRAM-safe) ===
-        # Fire models one by one with cooldown to let VRAM free between calls
-        # Use SMALL fast models (1.5B-3B) instead of large ones to avoid VRAM contention
+        # Single model call with strict timeout. If LLM is too slow on this hardware,
+        # we fall back to rule-based verdict using the proposed_action (which already
+        # passed the scanner's technical filters).
         models = [
-            ("predator:latest", "PREDATOR"),
-            ("qwen2.5:1.5b-instruct-q4_K_M", "QWEN"),
-            ("gemma:2b", "GEMMA"),
+            ("qwen2.5:0.5b", "QWEN-FAST"),
         ]
         
         results = []
@@ -713,7 +715,7 @@ Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under
         
         for model_name, label in models:
             try:
-                result = call_local_brain(prompt, model=model_name, timeout=60)
+                result = call_local_brain(prompt, model=model_name, timeout=15)
                 if "error" not in result:
                     results.append((label, result))
                     logger.info("[SWARM] %s responded: %s", label, str(result.get("signal", "?"))[:20])
@@ -722,8 +724,41 @@ Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under
             except Exception as e:
                 logger.warning("[SWARM] %s exception: %s", label, str(e)[:80])
             
-            # VRAM cooldown — let model unload before next one loads
-            _time.sleep(3)
+            # VRAM cooldown
+            _time.sleep(1)
+        
+        # === RULE-BASED FALLBACK ===
+        # If LLM is unavailable/slow, commit to the proposed action since the
+        # scanner already filtered for valid technical signals (RSI extremes,
+        # volume spikes, SMA crosses). The signal_strength becomes confidence.
+        if not results:
+            action = str(proposed_action or "WAIT").strip().upper()
+            if action in {"BUY", "SELL"}:
+                # Commit to the signal with confidence based on technical strength
+                confidence = max(40, min(90, int(signal_strength * 100)))
+                reason = f"Rule-based: {signal_type} confirmed (strength={signal_strength:.2f})"
+                logger.info(
+                    "[SWARM] No LLM available — committing rule-based %s for %s (conf=%d%%)",
+                    action, asset, confidence,
+                )
+                return {
+                    "verdict": f"[SIGNAL] {action}",
+                    "reasoning": reason,
+                    "brain_used": "RULE_BASED_FALLBACK",
+                    "fallback_mode": True,
+                    "confidence": confidence,
+                    "consensus": "RULE",
+                    "votes": {action: 1, "WAIT": 0, "SELL" if action == "BUY" else "BUY": 0},
+                    "models_used": ["RULE_BASED"],
+                }
+            # No LLM and no valid proposed action — only then return WAIT
+            return {
+                "verdict": "[SIGNAL] WAIT",
+                "reasoning": "No LLM available and no valid signal proposed.",
+                "brain_used": "RULE_BASED_FALLBACK",
+                "fallback_mode": True,
+                "confidence": 0,
+            }
         
         if not results:
             return {
@@ -846,7 +881,7 @@ Return JSON only:
     
     async def compute_sequential_swarm_consensus(self, ticker: str, technical_strength: float) -> float:
         """Runs swarm analysis models sequentially with 8-second thread-gate protection to prevent VRAM jams."""
-        models = ["qwen2.5:1.5b", "gemma:2b", "qwen2.5-coder:1.5b"]
+        models = ["qwen:latest", "qwen:latest", "qwen:latest"]
         verdicts = []
         base_url = "http://127.0.0.1:11434/api/generate"
         
