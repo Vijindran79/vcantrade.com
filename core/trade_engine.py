@@ -21,6 +21,7 @@ from core.models import (
 from execution.rpa_executor import RPAExecutor
 from core.profit_lock import ProfitLock, WalkAwayProtocol
 from core.atr_stops import LooseATRStops
+from core.institutional_suite import suite
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,23 @@ class TradeEngine:
                 )
                 return None
 
+        # INSTITUTIONAL SUITE: Regime filter + drawdown/daily-loss gates
+        prices_for_regime = []
+        if hasattr(self, 'last_indicators') and isinstance(self.last_indicators, dict):
+            cp = self.last_indicators.get("current_price")
+            if cp:
+                prices_for_regime = [cp]
+        sig_dict = {
+            "action": signal.action.value,
+            "confidence": float(getattr(signal.confidence, "value", 0.5) or 0.5)
+                if not isinstance(getattr(signal.confidence, "value", 0.5), (int, float))
+                else getattr(signal.confidence, "value", 0.5),
+        }
+        inst_check = suite.on_signal(sig_dict, prices_for_regime)
+        if not inst_check.get("allow"):
+            logger.warning("[INST-FILTER] BLOCKED %s — %s", signal.asset, inst_check.get("reason"))
+            return None
+
         # Auto mode: execute trade
         try:
             if signal.action == SignalAction.BUY:
@@ -214,7 +232,14 @@ class TradeEngine:
         """
         # Store current prices for HAWK protocol get_current_price()
         self._last_prices.update(current_prices)
-        
+
+        # INSTITUTIONAL SUITE: Update equity curve + check drawdown/target alerts
+        try:
+            current_eq = float(config.CURRENT_BALANCE) + float(self.safety_state.daily_pnl)
+            suite.on_tick(current_eq)
+        except Exception as _e:
+            logger.debug("[INST] on_tick skipped: %s", _e)
+
         closed_ids = []
         now = datetime.utcnow()
 
@@ -325,6 +350,27 @@ class TradeEngine:
             trade.action.value, trade.asset, trade.entry_price,
             trade.exit_price, trade.pnl or 0, reason
         )
+
+        # INSTITUTIONAL SUITE: Record closed trade for Sharpe/Sortino/Drawdown
+        try:
+            hold_sec = 0.0
+            if trade.timestamp and trade.closed_at:
+                try:
+                    t_open = datetime.fromisoformat(str(trade.timestamp))
+                    t_close = datetime.fromisoformat(str(trade.closed_at))
+                    hold_sec = (t_close - t_open).total_seconds()
+                except Exception:
+                    pass
+            size = int(getattr(trade, "quantity", 1) or 1)
+            suite.on_trade_close(
+                symbol=trade.asset, side=trade.action.value,
+                entry=float(trade.entry_price or 0),
+                exit=float(trade.exit_price or 0),
+                size=size, pnl=float(trade.pnl or 0),
+                hold_sec=hold_sec,
+            )
+        except Exception as _e:
+            logger.debug("[INST] on_trade_close skipped: %s", _e)
         
         # HAWK: Resume scanners after position close
         if self.target_lock_active and trade.asset == self.locked_asset:
@@ -360,6 +406,17 @@ class TradeEngine:
             success = self.rpa_executor.execute_trade(trade)
             if not success:
                 logger.error("RPA execution failed for BUY %s", trade.asset)
+            # INSTITUTIONAL SUITE: Record execution for TCA
+            try:
+                fill_price = float(signal.entry_price or trade.entry_price or 0)
+                suite.on_execution(
+                    symbol=trade.asset, side="BUY",
+                    intended_price=fill_price, fill_price=fill_price,
+                    intended_size=1, filled_size=1 if success else 0,
+                    latency_ms=0.0,
+                )
+            except Exception as _e:
+                logger.debug("[INST] on_execution skipped: %s", _e)
 
         # HAWK LOCK ACTIVATION
         self.target_lock_active = True
@@ -402,6 +459,17 @@ class TradeEngine:
             success = self.rpa_executor.execute_trade(trade)
             if not success:
                 logger.error("RPA execution failed for SELL %s", trade.asset)
+            # INSTITUTIONAL SUITE: Record execution for TCA
+            try:
+                fill_price = float(signal.entry_price or trade.entry_price or 0)
+                suite.on_execution(
+                    symbol=trade.asset, side="SELL",
+                    intended_price=fill_price, fill_price=fill_price,
+                    intended_size=1, filled_size=1 if success else 0,
+                    latency_ms=0.0,
+                )
+            except Exception as _e:
+                logger.debug("[INST] on_execution skipped: %s", _e)
 
         # HAWK LOCK ACTIVATION
         self.target_lock_active = True
