@@ -421,6 +421,16 @@ class TradeEngine:
         # HAWK LOCK ACTIVATION
         self.target_lock_active = True
         self.locked_asset = signal.asset
+        conf_val = getattr(signal.confidence, "value", signal.confidence)
+        score = 0.0
+        try:
+            score = float(getattr(signal, "confidence_score", 0.0) or 0.0)
+        except Exception:
+            pass
+        logger.info(
+            "[HAWK] QUALIFIED WINNER: %s | side=%s | confidence=%s | score=%.2f — LOCKING",
+            signal.asset, signal.action.value, conf_val, score,
+        )
         logger.info("[HAWK] TARGET LOCKED: %s. Scanners suspended.", signal.asset)
         self.suspend_scanners()
 
@@ -474,6 +484,16 @@ class TradeEngine:
         # HAWK LOCK ACTIVATION
         self.target_lock_active = True
         self.locked_asset = signal.asset
+        conf_val = getattr(signal.confidence, "value", signal.confidence)
+        score = 0.0
+        try:
+            score = float(getattr(signal, "confidence_score", 0.0) or 0.0)
+        except Exception:
+            pass
+        logger.info(
+            "[HAWK] QUALIFIED WINNER: %s | side=%s | confidence=%s | score=%.2f — LOCKING",
+            signal.asset, signal.action.value, conf_val, score,
+        )
         logger.info("[HAWK] TARGET LOCKED: %s. Scanners suspended.", signal.asset)
         self.suspend_scanners()
 
