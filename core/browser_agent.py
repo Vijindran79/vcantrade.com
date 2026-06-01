@@ -409,8 +409,8 @@ class BrowserAgent:
             logger.warning("Browser agent already running")
             return
 
-        MAX_CDP_RETRIES = 5
-        CDP_RETRY_DELAY = 5
+        MAX_CDP_RETRIES = 3
+        CDP_RETRY_DELAY = 2
 
         for attempt in range(1, MAX_CDP_RETRIES + 1):
             try:
