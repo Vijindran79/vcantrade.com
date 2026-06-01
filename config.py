@@ -19,8 +19,8 @@ MOUSE_HUMAN_DELAY_MIN = 0.8    # Min reaction time
 MOUSE_HUMAN_DELAY_MAX = 1.6    # Max reaction time
 
 # ===== STRUCTURAL AI FEATURE FLAGS =====
-USE_VISION = True
-FAST_VISION_ENABLED = os.getenv("FAST_VISION_ENABLED", "true").lower() == "true"
+USE_VISION = False  # qwen:latest is text-only — no image input
+FAST_VISION_ENABLED = False
 VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
 MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream")
 MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.65"))
@@ -29,7 +29,7 @@ SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() ==
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
 # If only one symbol, the scanner locks onto it and executes directly.
-ACTIVE_SYMBOLS = ["BTCUSD"]
+ACTIVE_SYMBOLS = ["MNQ1!", "ESM6", "MCL1!", "MGC1!"]
 
 # Confidence-Based Take Profit Targets
 TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  ($50)
@@ -56,7 +56,7 @@ HARDCODED_EQUITY_FALLBACK = float(os.getenv("HARDCODED_EQUITY_FALLBACK", "50000.
 
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
 # PRODUCTION RULE: DRY_RUN defaults to True. You MUST explicitly set DRY_RUN=False in .env to trade live.
-DRY_RUN = os.getenv("DRY_RUN", "True").lower() == "true"
+DRY_RUN = os.getenv("DRY_RUN", "False").lower() == "true"
 # UNIFIED DAILY LOSS LIMIT — single source of truth.
 # Apex Trader Funding has no daily loss limit (only trailing drawdown), so the
 # default is 0 = disabled. Override per firm in .env if needed.
@@ -284,12 +284,14 @@ SYMBOL_FUZZY_TERMS = {
 
 # ===== ACTIVE WATCHLIST =====
 ACTIVE_WATCHLIST = [
-    "BTCUSD",
-    "ETHUSD",
+    "MNQ1!",
+    "ESM6",
+    "MCL1!",
+    "MGC1!",
 ]
 
 # ===== MULTI-ASSET HUNTER =====
-MULTI_ASSET_TICKERS = ["BTCUSD", "ETHUSD", "MNQ1!", "MES1!", "CL=F", "GC=F"]
+MULTI_ASSET_TICKERS = ["MNQ1!", "ESM6", "MCL1!", "MGC1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # ===== EXECUTION MODE SWITCH =====
@@ -331,8 +333,8 @@ FALLBACK_COORDS = TRADINGVIEW_FALLBACK_COORDS
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
-MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen2.5:1.5b-instruct-q4_K_M")
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen:latest")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_TIMEOUT = 180
 JSON_OUTPUT = True
