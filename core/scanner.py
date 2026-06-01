@@ -53,6 +53,7 @@ from core.market_sessions import MarketSessionDetector, is_crypto_ticker, is_wee
 from core.liquidity_engine import LiquidityEngine
 from core.multi_timeframe_structure import MultiTimeframeStructureAnalyzer
 from core.symbol_mapper import normalize_yfinance_symbol, translate_chart_symbol
+from core.data_feed import data_feed
 from services.signal_dispatcher import AsyncSignalDispatcher
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,8 @@ class Scanner:
                     signals.append(signal)
             except Exception as e:
                 logger.warning("[SCANNER] Error scanning %s: %s", ticker, e)
+                if self.status_callback:
+                    self.status_callback(str(ticker), f"error: {str(e)[:60]}")
         
         return signals
 
@@ -295,14 +298,17 @@ class Scanner:
             # Detect signals
             signal_type = None
             strength = 0.0
+            price = float(close.iloc[-1])
+            vol_ratio = current_volume / max(1, avg_volume_current)
+            trend_dir = "Bull" if sma_fast.iloc[-1] > sma_slow.iloc[-1] else "Bear"
             
             # RSI Overbought/Oversold
-            if current_rsi > 85:
+            if current_rsi > 80:
                 signal_type = "RSI_OVERBOUGHT"
-                strength = (current_rsi - 85) / 15.0  # Normalize
-            elif current_rsi < 15:
+                strength = (current_rsi - 70) / 30.0
+            elif current_rsi < 20:
                 signal_type = "RSI_OVERSOLD"
-                strength = (15 - current_rsi) / 15.0
+                strength = (70 - current_rsi) / 30.0
             
             # SMA Cross
             elif sma_fast.iloc[-1] > sma_slow.iloc[-1] and sma_fast.iloc[-2] <= sma_slow.iloc[-2]:
@@ -313,9 +319,17 @@ class Scanner:
                 strength = 0.8
             
             # Volume Spike
-            elif current_volume > avg_volume_current * 3:
+            elif current_volume > avg_volume_current * 2.5:
                 signal_type = "VOLUME_SPIKE"
-                strength = min(1.0, (current_volume / avg_volume_current) / 3.0)
+                strength = min(1.0, vol_ratio / 3.0)
+            
+            # Trend strength with RSI confirmation
+            elif current_rsi > 60 and trend_dir == "Bull" and vol_ratio > 1.2:
+                signal_type = "TREND_BULL"
+                strength = 0.65
+            elif current_rsi < 40 and trend_dir == "Bear" and vol_ratio > 1.2:
+                signal_type = "TREND_BEAR"
+                strength = 0.65
             
             if signal_type:
                 return TechnicalSignal(
@@ -326,8 +340,15 @@ class Scanner:
                         "rsi": current_rsi,
                         "sma_fast": sma_fast.iloc[-1],
                         "sma_slow": sma_slow.iloc[-1],
-                        "volume_ratio": current_volume / max(1, avg_volume_current),
+                        "volume_ratio": vol_ratio,
                     }
+                )
+            
+            # Emit live indicator status even when no signal fires
+            if self.status_callback:
+                self.status_callback(
+                    str(ticker),
+                    f"RSI {current_rsi:.0f} | {trend_dir} | ${price:,.2f} | Vol {vol_ratio:.1f}x"
                 )
             
             return None
@@ -342,7 +363,7 @@ class Scanner:
         period: str = "1d",
         interval: str = "1m",
     ) -> Optional[pd.DataFrame]:
-        """Fetch OHLCV market data from MetaTrader 5 using copy_rates_from_pos."""
+        """Fetch OHLCV market data via smart hybrid feed (MT5 → Yahoo → cache)."""
         import concurrent.futures
         
         ticker_str = str(ticker).strip() if ticker is not None else ""
@@ -367,9 +388,6 @@ class Scanner:
         market_ticker = self._canonical_market_ticker(ticker_str)
         cache_key = (market_ticker, period, interval)
         
-        max_retries = 3
-        retry_delay = 2  # seconds
-        
         # Map period string to count of bars to fetch
         bars_map = {
             "1d": 1440,   # 1 day of 1m bars
@@ -393,7 +411,41 @@ class Scanner:
                 interval_minutes = 60
         count = max(80, count // max(1, interval_minutes))
         
-        mt5_tf = self._mt5_timeframe(interval)
+        # ---- SMART HYBRID: use unified data feed (MT5 → Yahoo → cache) ----
+        # Crypto: Yahoo Finance is the only path
+        if is_crypto_ticker(ticker):
+            yf_bars = data_feed.get_bars(ticker, count=count, use_cache=True)
+            if yf_bars:
+                df = pd.DataFrame(yf_bars)
+                df["time"] = pd.to_datetime(df["timestamp"])
+                df = df.rename(columns={
+                    "open": "Open", "high": "High", "low": "Low",
+                    "close": "Close", "volume": "Volume",
+                })
+                df = df.set_index("time")[["Open", "High", "Low", "Close", "Volume"]]
+                self.market_data_cache[cache_key] = df.copy()
+                self.last_close_cache[market_ticker] = float(df["Close"].dropna().iloc[-1])
+                return df
+            logger.warning("[WARN] Crypto data unavailable for %s - Skipping Cycle", ticker)
+            return None
+        
+        # All other instruments: smart hybrid (MT5 first, Yahoo fallback)
+        hybrid_bars = data_feed.get_bars(ticker, count=count, use_cache=True)
+        if hybrid_bars:
+            df = pd.DataFrame(hybrid_bars)
+            df["time"] = pd.to_datetime(df["timestamp"])
+            df = df.rename(columns={
+                "open": "Open", "high": "High", "low": "Low",
+                "close": "Close", "volume": "Volume",
+            })
+            df = df.set_index("time")[["Open", "High", "Low", "Close", "Volume"]]
+            self.market_data_cache[cache_key] = df.copy()
+            self.last_close_cache[market_ticker] = float(df["Close"].dropna().iloc[-1])
+            return df
+        
+        # Last resort: existing fallback path
+        logger.debug("[SCANNER] Hybrid feed empty, trying legacy fallback for %s", ticker)
+        return self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
         
         # Crypto fast path: MT5 does not carry crypto — use Yahoo Finance directly
         if is_crypto_ticker(ticker):
@@ -538,10 +590,41 @@ class Scanner:
         return mt5_symbol
     
     def _fallback_market_data(self, ticker, market_ticker, period, interval, cache_key):
-        """Return cached bars if available."""
+        """Return cached bars if available, otherwise try yfinance as last resort."""
         cached = self.market_data_cache.get(cache_key)
         if cached is not None and not cached.empty:
             return cached.copy()
+        
+        try:
+            import yfinance as yf
+            yf_map = {
+                "MNQ1!": "NQ=F", "MNQ": "NQ=F", "NQM6": "NQ=F",
+                "MES1!": "ES=F", "MES": "ES=F", "ESM6": "ES=F",
+                "MCL1!": "CL=F", "MCL": "CL=F",
+                "MGC1!": "GC=F", "MGC": "GC=F",
+            }
+            yf_sym = yf_map.get(ticker, yf_map.get(market_ticker, ticker))
+            
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as ex:
+                future = ex.submit(
+                    yf.download, yf_sym, period="1d", interval="1m",
+                    progress=False, threads=False
+                )
+                raw = future.result(timeout=25)
+            
+            if raw is not None and not raw.empty:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+                raw = raw.rename(columns={
+                    "Open": "Open", "High": "High",
+                    "Low": "Low", "Close": "Close", "Volume": "Volume",
+                })
+                self.market_data_cache[cache_key] = raw.copy()
+                return raw.copy()
+        except Exception as e:
+            logger.warning("[SCANNER] YFinance fallback failed for %s: %s", ticker, e)
+        
         return None
     
     def _fetch_crypto_yfinance(self, ticker, market_ticker, period, interval, cache_key):
