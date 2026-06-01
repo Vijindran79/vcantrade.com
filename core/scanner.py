@@ -302,15 +302,47 @@ class Scanner:
             vol_ratio = current_volume / max(1, avg_volume_current)
             trend_dir = "Bull" if sma_fast.iloc[-1] > sma_slow.iloc[-1] else "Bear"
             
-            # RSI Overbought/Oversold
-            if current_rsi > 80:
-                signal_type = "RSI_OVERBOUGHT"
-                strength = (current_rsi - 70) / 30.0
-            elif current_rsi < 20:
-                signal_type = "RSI_OVERSOLD"
-                strength = (70 - current_rsi) / 30.0
+            # Bollinger Bands (mean reversion signals for ranging markets)
+            bb = volatility.BollingerBands(close=close, window=20, window_dev=2)
+            bb_high = bb.bollinger_hband()
+            bb_low = bb.bollinger_lband()
+            bb_pct = (price - bb_low.iloc[-1]) / max(0.01, bb_high.iloc[-1] - bb_low.iloc[-1])
             
-            # SMA Cross
+            # MACD (momentum)
+            macd = trend.MACD(close=close)
+            macd_line = macd.macd()
+            macd_signal = macd.macd_signal()
+            macd_hist = macd.macd_diff()
+            macd_cross_bull = (macd_line.iloc[-1] > macd_signal.iloc[-1] and
+                               macd_line.iloc[-2] <= macd_signal.iloc[-2])
+            macd_cross_bear = (macd_line.iloc[-1] < macd_signal.iloc[-1] and
+                               macd_line.iloc[-2] >= macd_signal.iloc[-2])
+            
+            # === RSI Overbought/Oversold (standard 70/30 thresholds) ===
+            if current_rsi > 70:
+                signal_type = "RSI_OVERBOUGHT"
+                strength = min(1.0, (current_rsi - 70) / 20.0)
+            elif current_rsi < 30:
+                signal_type = "RSI_OVERSOLD"
+                strength = min(1.0, (70 - current_rsi) / 20.0)
+            
+            # === Bollinger Band Bounce (mean reversion in range) ===
+            elif bb_pct < 0.05:  # Touching lower band
+                signal_type = "BB_OVERSOLD"
+                strength = min(1.0, (0.10 - bb_pct) / 0.10 + 0.4)
+            elif bb_pct > 0.95:  # Touching upper band
+                signal_type = "BB_OVERBOUGHT"
+                strength = min(1.0, (bb_pct - 0.90) / 0.10 + 0.4)
+            
+            # === MACD Crossover (momentum shift) ===
+            elif macd_cross_bull and trend_dir == "Bull":
+                signal_type = "MACD_CROSS_BULL"
+                strength = 0.75
+            elif macd_cross_bear and trend_dir == "Bear":
+                signal_type = "MACD_CROSS_BEAR"
+                strength = 0.75
+            
+            # === SMA Cross (trend reversal) ===
             elif sma_fast.iloc[-1] > sma_slow.iloc[-1] and sma_fast.iloc[-2] <= sma_slow.iloc[-2]:
                 signal_type = "SMA_CROSS_BULL"
                 strength = 0.8
@@ -318,18 +350,18 @@ class Scanner:
                 signal_type = "SMA_CROSS_BEAR"
                 strength = 0.8
             
-            # Volume Spike
-            elif current_volume > avg_volume_current * 2.5:
+            # === Volume Spike (breakout) ===
+            elif vol_ratio > 1.8:  # Lowered from 2.5
                 signal_type = "VOLUME_SPIKE"
                 strength = min(1.0, vol_ratio / 3.0)
             
-            # Trend strength with RSI confirmation
-            elif current_rsi > 60 and trend_dir == "Bull" and vol_ratio > 1.2:
+            # === Trend following (relaxed volume requirement for range markets) ===
+            elif current_rsi > 55 and trend_dir == "Bull" and current_rsi > sma_fast.iloc[-1] / price * 50:
                 signal_type = "TREND_BULL"
-                strength = 0.65
-            elif current_rsi < 40 and trend_dir == "Bear" and vol_ratio > 1.2:
+                strength = 0.6
+            elif current_rsi < 45 and trend_dir == "Bear":
                 signal_type = "TREND_BEAR"
-                strength = 0.65
+                strength = 0.6
             
             if signal_type:
                 return TechnicalSignal(
