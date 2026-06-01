@@ -1,309 +1,201 @@
 """
 VcanTrade AI - Market Regime Detector
-
-Does the MATH before the LLM gets asked. No guessing.
-
-This agent answers three questions with hard numbers:
-1. Is the market TRENDING or CHOPPY? (ADX + directional movement)
-2. What percentage of recent candles are GREEN vs RED? (momentum bias)
-3. Is volatility EXPANDING or CONTRACTING? (ATR slope)
-
-The output is a structured verdict that gets injected into every swarm
-prompt so the LLM makes decisions based on facts, not vibes.
-
-Logic:
-- ADX > 25 = trending. ADX < 20 = choppy. Between = transitioning.
-- Green candle % > 65% of last 20 bars = bullish bias.
-- Red candle % > 65% of last 20 bars = bearish bias.
-- ATR expanding (current > 20-bar avg) = volatility rising = wider stops needed.
-- EMA20 > EMA50 > EMA200 = confirmed uptrend. Reverse = confirmed downtrend.
-
-The regime verdict is: STRONG_BULL, LEAN_BULL, CHOPPY, LEAN_BEAR, STRONG_BEAR
-Plus a numeric score from -100 (max bearish) to +100 (max bullish).
+======================================
+Detects bull, bear, sideways, high-volatility, and crisis regimes.
+Adjusts strategy parameters based on current market conditions.
 """
-
-from __future__ import annotations
-
 import logging
-from dataclasses import dataclass
-from typing import Optional
-
-import numpy as np
-import pandas as pd
+from typing import Dict, List, Optional
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class RegimeVerdict:
-    """Hard-number market regime assessment. No LLM involved."""
-
-    regime: str  # STRONG_BULL, LEAN_BULL, CHOPPY, LEAN_BEAR, STRONG_BEAR
-    score: float  # -100 to +100
-    adx: float  # 0-100 (trend strength)
-    green_pct: float  # 0-100 (% of green candles in lookback)
-    red_pct: float  # 0-100
-    ema_alignment: str  # BULL_STACK, BEAR_STACK, MIXED
-    volatility_state: str  # EXPANDING, CONTRACTING, NORMAL
-    atr_current: float
-    atr_average: float
-    trend_direction: str  # UP, DOWN, FLAT
-    recommendation: str  # Human-readable one-liner
-
-    def as_prompt_context(self) -> str:
-        """Format for injection into LLM swarm prompts."""
-        return (
-            f"MARKET REGIME (calculated, not guessed):\n"
-            f"  Regime: {self.regime} (score: {self.score:+.0f}/100)\n"
-            f"  Trend Strength (ADX): {self.adx:.1f} ({'TRENDING' if self.adx > 25 else 'CHOPPY' if self.adx < 20 else 'TRANSITIONING'})\n"
-            f"  Last 20 candles: {self.green_pct:.0f}% GREEN, {self.red_pct:.0f}% RED\n"
-            f"  EMA Stack: {self.ema_alignment}\n"
-            f"  Volatility: {self.volatility_state} (ATR {self.atr_current:.4f} vs avg {self.atr_average:.4f})\n"
-            f"  Direction: {self.trend_direction}\n"
-            f"  VERDICT: {self.recommendation}\n"
-        )
-
-    def as_dict(self) -> dict:
-        return {
-            "regime": self.regime,
-            "score": self.score,
-            "adx": self.adx,
-            "green_pct": self.green_pct,
-            "red_pct": self.red_pct,
-            "ema_alignment": self.ema_alignment,
-            "volatility_state": self.volatility_state,
-            "atr_current": self.atr_current,
-            "atr_average": self.atr_average,
-            "trend_direction": self.trend_direction,
-            "recommendation": self.recommendation,
-        }
+class MarketRegime(Enum):
+    STRONG_BULL = "STRONG_BULL"
+    BULL = "BULL"
+    SIDEWAYS = "SIDEWAYS"
+    BEAR = "BEAR"
+    STRONG_BEAR = "STRONG_BEAR"
+    HIGH_VOLATILITY = "HIGH_VOLATILITY"
+    CRISIS = "CRISIS"
+    UNKNOWN = "UNKNOWN"
 
 
 class RegimeDetector:
     """
-    Pure-math market regime classifier. No LLM, no guessing.
-
-    Feed it OHLCV data and it returns a hard verdict with numbers.
+    Multi-factor regime classification.
+    Uses trend (SMA), volatility (ATR), and momentum (RSI) to detect
+    the current market regime. Adjusts strategy parameters accordingly.
     """
 
-    def __init__(self, adx_period: int = 14, ema_periods: tuple = (20, 50, 200), lookback: int = 20):
-        self.adx_period = adx_period
-        self.ema_periods = ema_periods
-        self.lookback = lookback
+    def __init__(self):
+        self.current_regime = MarketRegime.UNKNOWN
+        self.regime_history: List[Dict] = []
+        self.regime_params = {
+            MarketRegime.STRONG_BULL: {
+                "position_size_mult": 1.2, "stop_loss_mult": 1.5,
+                "take_profit_mult": 2.0, "max_trades_per_day": 25,
+                "preferred_action": "BUY", "confidence_boost": 1.1,
+            },
+            MarketRegime.BULL: {
+                "position_size_mult": 1.0, "stop_loss_mult": 1.3,
+                "take_profit_mult": 1.8, "max_trades_per_day": 20,
+                "preferred_action": "BUY", "confidence_boost": 1.05,
+            },
+            MarketRegime.SIDEWAYS: {
+                "position_size_mult": 0.6, "stop_loss_mult": 0.8,
+                "take_profit_mult": 1.0, "max_trades_per_day": 10,
+                "preferred_action": "BOTH", "confidence_boost": 1.0,
+            },
+            MarketRegime.BEAR: {
+                "position_size_mult": 1.0, "stop_loss_mult": 1.3,
+                "take_profit_mult": 1.8, "max_trades_per_day": 20,
+                "preferred_action": "SELL", "confidence_boost": 1.05,
+            },
+            MarketRegime.STRONG_BEAR: {
+                "position_size_mult": 1.2, "stop_loss_mult": 1.5,
+                "take_profit_mult": 2.0, "max_trades_per_day": 25,
+                "preferred_action": "SELL", "confidence_boost": 1.1,
+            },
+            MarketRegime.HIGH_VOLATILITY: {
+                "position_size_mult": 0.5, "stop_loss_mult": 2.0,
+                "take_profit_mult": 2.5, "max_trades_per_day": 8,
+                "preferred_action": "BOTH", "confidence_boost": 0.9,
+            },
+            MarketRegime.CRISIS: {
+                "position_size_mult": 0.0, "stop_loss_mult": 1.0,
+                "take_profit_mult": 1.0, "max_trades_per_day": 0,
+                "preferred_action": "NONE", "confidence_boost": 0.0,
+            },
+        }
 
-    def analyze(self, df: pd.DataFrame) -> Optional[RegimeVerdict]:
-        """Analyze OHLCV DataFrame and return regime verdict.
-
-        Expects columns: Open, High, Low, Close, Volume (optional).
-        Needs at least 200 rows for EMA200.
+    def detect(self, prices: List[float], volumes: Optional[List[float]] = None) -> MarketRegime:
         """
-        if df is None or len(df) < max(self.ema_periods):
-            return None
+        Detect current market regime from price series.
+        Returns regime + recommended parameters.
+        """
+        if len(prices) < 50:
+            return MarketRegime.UNKNOWN
 
         try:
-            close = df["Close"].values.astype(float)
-            high = df["High"].values.astype(float)
-            low = df["Low"].values.astype(float)
-            open_ = df["Open"].values.astype(float)
+            import numpy as np
+            arr = np.array(prices[-100:])
 
-            # --- 1. ADX (trend strength) ---
-            adx = self._calculate_adx(high, low, close)
+            # Trend: SMA20 vs SMA50 slope
+            sma_20 = float(np.mean(arr[-20:]))
+            sma_50 = float(np.mean(arr[-50:]))
+            trend_pct = ((sma_20 - sma_50) / sma_50) * 100
 
-            # --- 2. Green/Red candle percentage ---
-            recent = min(self.lookback, len(df))
-            recent_close = close[-recent:]
-            recent_open = open_[-recent:]
-            green_candles = np.sum(recent_close > recent_open)
-            red_candles = np.sum(recent_close < recent_open)
-            total_candles = max(1, recent)
-            green_pct = (green_candles / total_candles) * 100.0
-            red_pct = (red_candles / total_candles) * 100.0
+            # Volatility: std dev of last 20 returns
+            returns = np.diff(arr[-21:]) / arr[-21:-1]
+            vol = float(np.std(returns)) * 100
 
-            # --- 3. EMA alignment ---
-            ema20 = self._ema(close, self.ema_periods[0])
-            ema50 = self._ema(close, self.ema_periods[1])
-            ema200 = self._ema(close, self.ema_periods[2])
-            current_price = close[-1]
+            # Momentum: RSI(14)
+            rsi = self._rsi(arr, 14)
 
-            if current_price > ema20 > ema50 > ema200:
-                ema_alignment = "BULL_STACK"
-            elif current_price < ema20 < ema50 < ema200:
-                ema_alignment = "BEAR_STACK"
-            elif current_price > ema50:
-                ema_alignment = "LEAN_BULL"
-            elif current_price < ema50:
-                ema_alignment = "LEAN_BEAR"
+            # Volume trend (if available)
+            vol_trend = 0.0
+            if volumes and len(volumes) >= 20:
+                vol_arr = np.array(volumes[-20:])
+                vol_trend = float((vol_arr[-1] - np.mean(vol_arr)) / (np.mean(vol_arr) + 1e-9))
+
+            # Crisis detection: vol > 3% and big drop
+            if vol > 3.0 and trend_pct < -2.0:
+                regime = MarketRegime.CRISIS
+            elif vol > 2.0:
+                regime = MarketRegime.HIGH_VOLATILITY
+            elif trend_pct > 3.0 and rsi > 65:
+                regime = MarketRegime.STRONG_BULL
+            elif trend_pct > 0.5 and rsi > 50:
+                regime = MarketRegime.BULL
+            elif trend_pct < -3.0 and rsi < 35:
+                regime = MarketRegime.STRONG_BEAR
+            elif trend_pct < -0.5 and rsi < 50:
+                regime = MarketRegime.BEAR
             else:
-                ema_alignment = "MIXED"
+                regime = MarketRegime.SIDEWAYS
 
-            # --- 4. ATR and volatility state ---
-            atr_values = self._calculate_atr(high, low, close, period=14)
-            atr_current = atr_values[-1] if len(atr_values) > 0 else 0.0
-            atr_average = np.mean(atr_values[-20:]) if len(atr_values) >= 20 else atr_current
-            if atr_current > atr_average * 1.3:
-                volatility_state = "EXPANDING"
-            elif atr_current < atr_average * 0.7:
-                volatility_state = "CONTRACTING"
-            else:
-                volatility_state = "NORMAL"
+            if regime != self.current_regime:
+                logger.info("[REGIME] Shift: %s -> %s (trend=%.2f%%, vol=%.2f%%, rsi=%.0f)",
+                            self.current_regime.value, regime.value, trend_pct, vol, rsi)
+                self.current_regime = regime
+                self.regime_history.append({
+                    "regime": regime.value,
+                    "trend_pct": trend_pct,
+                    "vol_pct": vol,
+                    "rsi": rsi,
+                    "vol_trend": vol_trend,
+                })
+                if len(self.regime_history) > 200:
+                    self.regime_history = self.regime_history[-200:]
 
-            # --- 5. Trend direction (simple: price vs EMA20 slope) ---
-            if len(close) >= 5:
-                ema20_slope = ema20 - self._ema(close[:-3], self.ema_periods[0]) if len(close) > self.ema_periods[0] + 3 else 0
-                price_vs_ema = current_price - ema20
-                if price_vs_ema > 0 and ema20_slope > 0:
-                    trend_direction = "UP"
-                elif price_vs_ema < 0 and ema20_slope < 0:
-                    trend_direction = "DOWN"
-                else:
-                    trend_direction = "FLAT"
-            else:
-                trend_direction = "FLAT"
-
-            # --- 6. Composite score (-100 to +100) ---
-            score = 0.0
-            # ADX contribution (trending = stronger signal)
-            if adx > 25:
-                score += 15 if trend_direction == "UP" else -15 if trend_direction == "DOWN" else 0
-            # Green/Red bias
-            score += (green_pct - 50) * 0.8  # +40 max if 100% green, -40 if 100% red
-            # EMA alignment
-            ema_scores = {"BULL_STACK": 30, "LEAN_BULL": 15, "MIXED": 0, "LEAN_BEAR": -15, "BEAR_STACK": -30}
-            score += ema_scores.get(ema_alignment, 0)
-            # Clamp
-            score = max(-100.0, min(100.0, score))
-
-            # --- 7. Regime classification ---
-            if score >= 50:
-                regime = "STRONG_BULL"
-            elif score >= 20:
-                regime = "LEAN_BULL"
-            elif score <= -50:
-                regime = "STRONG_BEAR"
-            elif score <= -20:
-                regime = "LEAN_BEAR"
-            else:
-                regime = "CHOPPY"
-
-            # --- 8. Recommendation ---
-            if regime == "STRONG_BULL":
-                recommendation = "STRONG BUY bias. All indicators aligned bullish. Look for pullback entries to go LONG."
-            elif regime == "LEAN_BULL":
-                recommendation = "Lean LONG. Trend is up but not fully confirmed. Smaller size, tighter stops."
-            elif regime == "STRONG_BEAR":
-                recommendation = "STRONG SELL bias. All indicators aligned bearish. Look for rally entries to go SHORT."
-            elif regime == "LEAN_BEAR":
-                recommendation = "Lean SHORT. Trend is down but not fully confirmed. Smaller size, tighter stops."
-            else:
-                if adx < 20:
-                    recommendation = "CHOPPY — NO TRADE. ADX below 20, no clear trend. Wait for breakout."
-                else:
-                    recommendation = "MIXED signals. Reduce size or stand aside until regime clarifies."
-
-            verdict = RegimeVerdict(
-                regime=regime,
-                score=score,
-                adx=adx,
-                green_pct=green_pct,
-                red_pct=red_pct,
-                ema_alignment=ema_alignment,
-                volatility_state=volatility_state,
-                atr_current=float(atr_current),
-                atr_average=float(atr_average),
-                trend_direction=trend_direction,
-                recommendation=recommendation,
-            )
-
-            logger.info(
-                "[REGIME] %s | Score: %+.0f | ADX: %.1f | Green: %.0f%% | EMAs: %s | Vol: %s | %s",
-                regime, score, adx, green_pct, ema_alignment, volatility_state, recommendation[:60],
-            )
-
-            return verdict
-
+            return regime
         except Exception as e:
-            logger.error("[REGIME] Analysis failed: %s", e)
-            return None
+            logger.error("[REGIME] Detection error: %s", e)
+            return MarketRegime.UNKNOWN
 
-    def _ema(self, data: np.ndarray, period: int) -> float:
-        """Calculate EMA and return the last value."""
-        if len(data) < period:
-            return float(data[-1]) if len(data) > 0 else 0.0
-        multiplier = 2.0 / (period + 1)
-        ema = float(data[0])
-        for price in data[1:]:
-            ema = (float(price) - ema) * multiplier + ema
-        return ema
+    def get_params(self, regime: Optional[MarketRegime] = None) -> Dict:
+        """Get recommended parameters for current regime."""
+        r = regime or self.current_regime
+        return self.regime_params.get(r, self.regime_params[MarketRegime.SIDEWAYS])
 
-    def _calculate_atr(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-        """Calculate ATR series."""
-        if len(high) < 2:
-            return np.array([0.0])
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.maximum(
-                np.abs(high[1:] - close[:-1]),
-                np.abs(low[1:] - close[:-1])
-            )
-        )
-        if len(tr) < period:
-            return tr
-        atr = np.zeros(len(tr))
-        atr[period - 1] = np.mean(tr[:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-        return atr[period - 1:]
+    def should_trade(self) -> bool:
+        """Whether current regime allows trading."""
+        params = self.get_params()
+        return params["max_trades_per_day"] > 0 and params["position_size_mult"] > 0
 
-    def _calculate_adx(self, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> float:
-        """Calculate ADX (Average Directional Index)."""
-        period = self.adx_period
-        if len(high) < period * 2:
-            return 0.0
+    def filter_signal(self, action: str, confidence: float) -> Dict:
+        """
+        Filter and adjust signal based on regime.
+        Returns: {allow, adjusted_confidence, size_mult, sl_mult, tp_mult}
+        """
+        params = self.get_params()
+        action = action.upper()
 
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
+        # Check preferred action
+        preferred = params["preferred_action"]
+        if preferred != "BOTH" and preferred != "NONE" and action != preferred:
+            return {
+                "allow": False,
+                "reason": f"Regime {self.current_regime.value} prefers {preferred} signals",
+                "adjusted_confidence": 0.0,
+            }
 
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        if preferred == "NONE":
+            return {
+                "allow": False,
+                "reason": f"Regime {self.current_regime.value} — NO TRADING",
+                "adjusted_confidence": 0.0,
+            }
 
-        # True Range
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-        )
+        adj_conf = min(1.0, confidence * params["confidence_boost"])
+        return {
+            "allow": True,
+            "adjusted_confidence": adj_conf,
+            "size_mult": params["position_size_mult"],
+            "sl_mult": params["stop_loss_mult"],
+            "tp_mult": params["take_profit_mult"],
+        }
 
-        # Smoothed averages
-        def smooth(data, period):
-            result = np.zeros(len(data))
-            result[period - 1] = np.sum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i - 1] - (result[i - 1] / period) + data[i]
-            return result
+    @staticmethod
+    def _rsi(prices, period: int = 14) -> float:
+        try:
+            import numpy as np
+            if len(prices) < period + 1:
+                return 50.0
+            deltas = np.diff(prices[-(period + 1):])
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
+            avg_gain = np.mean(gains)
+            avg_loss = np.mean(losses)
+            if avg_loss == 0:
+                return 100.0
+            rs = avg_gain / avg_loss
+            return float(100 - (100 / (1 + rs)))
+        except Exception:
+            return 50.0
 
-        smoothed_tr = smooth(tr, period)
-        smoothed_plus = smooth(plus_dm, period)
-        smoothed_minus = smooth(minus_dm, period)
 
-        # Avoid division by zero
-        smoothed_tr = np.where(smoothed_tr == 0, 1e-10, smoothed_tr)
-
-        plus_di = 100.0 * smoothed_plus / smoothed_tr
-        minus_di = 100.0 * smoothed_minus / smoothed_tr
-
-        # DX
-        di_sum = plus_di + minus_di
-        di_sum = np.where(di_sum == 0, 1e-10, di_sum)
-        dx = 100.0 * np.abs(plus_di - minus_di) / di_sum
-
-        # ADX (smoothed DX)
-        valid_dx = dx[period - 1:]
-        if len(valid_dx) < period:
-            return float(np.mean(valid_dx)) if len(valid_dx) > 0 else 0.0
-
-        adx = np.zeros(len(valid_dx))
-        adx[period - 1] = np.mean(valid_dx[:period])
-        for i in range(period, len(valid_dx)):
-            adx[i] = (adx[i - 1] * (period - 1) + valid_dx[i]) / period
-
-        return float(adx[-1])
+# Singleton
+regime_detector = RegimeDetector()
