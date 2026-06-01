@@ -613,6 +613,16 @@ class VcaniTradeEngine:
         except Exception:
             pass
 
+        # Route actionable BUY/SELL signals into the real execution path
+        if action in {"BUY", "SELL"} and ticker not in {"", "UNKNOWN"}:
+            try:
+                self._log_dashboard(
+                    f"[ROUTE] Brain signal -> execution: {action} {ticker} (conf={confidence:.0%})"
+                )
+                self.execution_signal.emit(dict(payload))
+            except Exception as exc:
+                logger.error("[ROUTE] Failed to forward brain signal: %s", exc)
+
     def process_validated_execution_path(self, payload: dict):
         """Route validated bridge/swarm signals into teacher or autonomous execution."""
         ticker = str(payload.get("ticker") or payload.get("asset") or "UNKNOWN").strip().upper()
