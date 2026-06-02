@@ -55,7 +55,8 @@ CURRENT_BALANCE = float(os.getenv("CURRENT_BALANCE", "50000.0"))
 HARDCODED_EQUITY_FALLBACK = float(os.getenv("HARDCODED_EQUITY_FALLBACK", "50000.0"))
 
 # ===== SAFETY CONTROLS (ALWAYS ON BY DEFAULT) =====
-# PRODUCTION RULE: DRY_RUN defaults to True. You MUST explicitly set DRY_RUN=False in .env to trade live.
+# DRY_RUN default is False — bot trades live unless explicitly set to True in .env
+# Other safety controls (daily loss limit, max drawdown, single-asset lock) are always enforced
 DRY_RUN = os.getenv("DRY_RUN", "False").lower() == "true"
 # UNIFIED DAILY LOSS LIMIT — single source of truth.
 # Apex Trader Funding has no daily loss limit (only trailing drawdown), so the
