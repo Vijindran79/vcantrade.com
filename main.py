@@ -1124,16 +1124,27 @@ class VcaniTradeEngine:
                 _rpa_result = {"success": False, "reason": "timeout"}
                 def _rpa_worker():
                     try:
+                        # Try HUMAN-LIKE execution first (Bézier mouse, variable typing, anti-detection)
+                        if self.browser_agent and getattr(self.browser_agent, 'page', None):
+                            human_ok = self.rpa_executor.execute_trade_human(
+                                self.browser_agent, true_symbol, action,
+                                entry_price=entry, sl=sl, tp=tp,
+                            )
+                            if human_ok:
+                                _rpa_result["success"] = True
+                                _rpa_result["reason"] = "human-like RPA"
+                                return
+                        # Fall back to standard execution
                         _rpa_result["success"] = self.rpa_executor.execute_trade(trade)
                         _rpa_result["reason"] = getattr(self.rpa_executor, 'last_failure_reason', '') or "no-reason"
                     except Exception as e:
                         _rpa_result["reason"] = str(e)
                 _rpa_thread = _threading.Thread(target=_rpa_worker, daemon=True)
                 _rpa_thread.start()
-                _rpa_thread.join(timeout=30)
+                _rpa_thread.join(timeout=45)
                 if _rpa_thread.is_alive():
-                    logger.warning("[EXEC] TradingView RPA timed out after 30s for %s %s — falling through", action, true_symbol)
-                    errors.append("TradingView RPA: 30s timeout (CDP may not be connected)")
+                    logger.warning("[EXEC] TradingView RPA timed out after 45s for %s %s — falling through", action, true_symbol)
+                    errors.append("TradingView RPA: 45s timeout (CDP may not be connected)")
                 else:
                     success = _rpa_result["success"]
                     if success:

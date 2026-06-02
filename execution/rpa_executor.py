@@ -3,12 +3,14 @@ import random
 import re
 import inspect
 import threading
+import asyncio
 import pyautogui
 import pygetwindow as gw
 import numpy as np
 import logging
 import pyperclip
 import config
+from core.human_behavior import human
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +197,88 @@ class RPAExecutor:
             # Always release the single-counter target lock
             if hasattr(browser_agent, 'clear_target_lock'):
                 browser_agent.clear_target_lock()
+
+    def execute_trade_human(self, browser_agent, ticker: str, action: str,
+                            entry_price: float = 0.0, sl: float = 0.0, tp: float = 0.0) -> bool:
+        """
+        Human-like TradingView execution: Bézier-curve mouse movements,
+        variable typing speed, random thinking pauses, hover-before-click.
+        Sync wrapper that runs the async human sequence on the browser page.
+        """
+        try:
+            logger.info(f"[HUMAN-RPA] Starting human-like {action} for {ticker}")
+            page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
+            if not page:
+                logger.error("[HUMAN-RPA] No browser page available")
+                return False
+
+            # If page is sync Playwright, wrap it for async operations
+            is_async = asyncio.iscoroutinefunction(getattr(page, 'mouse', None).move) if hasattr(page, 'mouse') else False
+
+            async def _human_sequence():
+                # 1. Glance at chart (scroll a bit)
+                await human.scroll_glance(page, "down", random.randint(150, 350))
+                # 2. Think before action
+                await human.think_before_action(f"{action} {ticker}")
+                # 3. Find and click BUY/SELL button with human-like path
+                clicked = await human.execute_buy_sell_human(page, action, ticker)
+                if not clicked:
+                    return False
+                # 4. If SL/TP provided, type them with variable speed
+                if sl > 0 or tp > 0:
+                    await asyncio.sleep(random.uniform(0.3, 0.6))
+                    if sl > 0:
+                        try:
+                            sl_input = page.locator("input[placeholder*='Stop' i], input[name*='sl' i]").first
+                            if await sl_input.count() > 0:
+                                await sl_input.click()
+                                await asyncio.sleep(random.uniform(0.1, 0.2))
+                                await human.type_human(page, str(round(sl, 2)))
+                        except Exception as e:
+                            logger.debug("[HUMAN-RPA] SL entry skipped: %s", e)
+                    if tp > 0:
+                        try:
+                            tp_input = page.locator("input[placeholder*='Profit' i], input[placeholder*='Take' i], input[name*='tp' i]").first
+                            if await tp_input.count() > 0:
+                                await tp_input.click()
+                                await asyncio.sleep(random.uniform(0.1, 0.2))
+                                await human.type_human(page, str(round(tp, 2)))
+                        except Exception as e:
+                            logger.debug("[HUMAN-RPA] TP entry skipped: %s", e)
+                    # Tab to confirm field, then submit
+                    await asyncio.sleep(random.uniform(0.2, 0.4))
+                    try:
+                        await page.keyboard.press("Tab")
+                        await asyncio.sleep(random.uniform(0.1, 0.2))
+                        await page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                # 5. Move mouse away (humans don't leave cursor on clicked area)
+                await asyncio.sleep(random.uniform(0.3, 0.7))
+                if human._last_mouse_pos:
+                    away_x = human._last_mouse_pos[0] + random.uniform(-200, 200)
+                    away_y = human._last_mouse_pos[1] + random.uniform(-100, 100)
+                    await human.move_mouse_human(page, away_x, away_y)
+                return True
+
+            # Run the async sequence — try multiple event loop strategies
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Loop already running (e.g. inside QThread) — schedule as task
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(asyncio.run, _human_sequence())
+                        return future.result(timeout=45)
+                else:
+                    return loop.run_until_complete(_human_sequence())
+            except RuntimeError:
+                # No event loop in current thread — use asyncio.run directly
+                return asyncio.run(_human_sequence())
+
+        except Exception as e:
+            logger.error(f"[HUMAN-RPA] Failed: {str(e)[:200]}")
+            return False
 
     def _navigate_to_symbol(self, browser_agent, ticker: str) -> bool:
         """Navigate TradingView to the correct symbol BEFORE executing any clicks.
