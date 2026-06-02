@@ -28,10 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 # Tunable parameters (conservative defaults)
-PERSISTENCE_MINUTES = 2            # Signal must hold this long
+PERSISTENCE_MINUTES = 1.5          # Signal must hold this long (was 2 — too strict for 60s scan cycle)
 CONFLUENCE_TFS = ["5m", "15m"]     # Higher TFs that must agree
 MIN_CONFLUENCE_AGREEMENT = 1       # At least N higher TFs must agree
-VOLUME_MULTIPLIER = 1.5            # Current vol must be > 1.5x average
+VOLUME_MULTIPLIER = 1.2            # Current vol must be > 1.2x average (was 1.5x)
+VOLUME_REQUIRE_DATA = False        # If True, REJECT when volume data is missing
+                                   # If False, SKIP the volume check when data is missing
+                                   # (futures on yfinance often have no volume data)
 RSI_OVERSOLD = 30                  # Buy zone
 RSI_OVERBOUGHT = 70                # Sell zone
 TREND_EMA_PERIOD = 50              # EMA for trend filter
@@ -57,8 +60,8 @@ class ConfluenceEngine:
         #   "last_fired": timestamp,
         # }}
         self._state: Dict[str, Dict] = {}
-        # Re-fire cooldown (don't fire same direction twice in N minutes)
-        self.cooldown_seconds = 300  # 5 minutes
+        # Re-fire cooldown (don't fire same direction twice in N seconds)
+        self.cooldown_seconds = 60  # 1 cycle (was 5 minutes — too strict)
 
     def evaluate(
         self,
@@ -145,29 +148,40 @@ class ConfluenceEngine:
                 )
 
             # ---- VOLUME CONFIRMATION ----
+            # If no volume data (futures on yfinance often have 0 volume), skip the check
+            # unless VOLUME_REQUIRE_DATA is True. This prevents blocking ALL trades
+            # when the data feed doesn't provide volume.
+            vol_ratio = 0.0  # default — used in the final log message
             if volume_avg > 0:
                 vol_ratio = volume_current / volume_avg
-            else:
-                vol_ratio = 0.0
-            if vol_ratio < VOLUME_MULTIPLIER:
+                if vol_ratio < VOLUME_MULTIPLIER:
+                    return (
+                        False,
+                        f"volume too low: {vol_ratio:.2f}x avg (need {VOLUME_MULTIPLIER}x)",
+                        confidence,
+                    )
+            elif VOLUME_REQUIRE_DATA:
                 return (
                     False,
-                    f"volume too low: {vol_ratio:.2f}x avg (need {VOLUME_MULTIPLIER}x)",
+                    f"no volume data available (required by VOLUME_REQUIRE_DATA=True)",
                     confidence,
                 )
+            # else: skip volume check — no data available, don't block
 
             # ---- TREND FILTER (EMA 50) ----
-            if action == "BUY" and close < ema_50:
-                return False, f"trend filter: price {close:.2f} below EMA50 {ema_50:.2f} (no BUY)", confidence
-            if action == "SELL" and close > ema_50:
-                return False, f"trend filter: price {close:.2f} above EMA50 {ema_50:.2f} (no SELL)", confidence
+            # Skip if EMA50 is unavailable (e.g., not enough bars)
+            if ema_50 > 0:
+                if action == "BUY" and close < (ema_50 * 0.998):
+                    return False, f"trend filter: price {close:.2f} below EMA50 {ema_50:.2f} (no BUY)", confidence
+                if action == "SELL" and close > (ema_50 * 1.002):
+                    return False, f"trend filter: price {close:.2f} above EMA50 {ema_50:.2f} (no SELL)", confidence
 
             # ---- RSI EXTREME CAUTION ----
-            # Don't buy at RSI >70 (overbought, knife-catching)
-            if action == "BUY" and rsi_1m > 70:
-                return False, f"RSI {rsi_1m:.1f} too high for BUY (overbought)", confidence
-            if action == "SELL" and rsi_1m < 30:
-                return False, f"RSI {rsi_1m:.1f} too low for SELL (oversold)", confidence
+            # Only block at extreme levels (RSI < 20 or > 80) — gives more room to trade
+            if action == "BUY" and rsi_1m > 80:
+                return False, f"RSI {rsi_1m:.1f} extreme overbought (no BUY)", confidence
+            if action == "SELL" and rsi_1m < 20:
+                return False, f"RSI {rsi_1m:.1f} extreme oversold (no SELL)", confidence
 
             # ---- ALL CONDITIONS MET ----
             # Boost confidence for confluence

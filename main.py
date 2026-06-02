@@ -808,18 +808,13 @@ class VcaniTradeEngine:
         except Exception:
             pass
 
-        if self.current_mode != "AUTONOMOUS":
+        # Mode check — but confluence-validated signals bypass this gate
+        # (they've already passed 5 safety checks, no need for manual approval)
+        if self.current_mode != "AUTONOMOUS" and not payload.get("confluence_validated"):
             self._log_dashboard(f"[TEACHER] Approval required for {action} {ticker}")
             return
-
-        # Force AUTONOMOUS when called via the direct (confluence-validated) path.
-        # This bypasses the dashboard mode toggle — confluence-validated signals
-        # are pre-approved.
-        if payload.get("confluence_validated"):
-            self._log_dashboard(f"[CONFLUENCE-VALIDATED] Bypassing mode check for {action} {ticker}")
-        elif self.current_mode != "AUTONOMOUS":
-            self._log_dashboard(f"[TEACHER] Approval required for {action} {ticker}")
-            return
+        if payload.get("confluence_validated") and self.current_mode != "AUTONOMOUS":
+            self._log_dashboard(f"[CONFLUENCE-VALIDATED] Bypassing TEACHER mode for {action} {ticker}")
 
         result = self.execute_trade(ticker, action, entry, stop_loss, take_profit)
         self._log_dashboard(f"[EXEC] {result.status}: {action} {ticker} {result.reason or ''}")
@@ -892,11 +887,11 @@ class VcaniTradeEngine:
         # CONFLUENCE STRATEGY explanation — the "safest, most reliable" gate
         self._log_dashboard("")
         self._log_dashboard("  CONFLUENCE STRATEGY ACTIVE (safest):")
-        self._log_dashboard("    • Signal must hold 2+ minutes before firing")
+        self._log_dashboard("    • Signal must hold 90s+ before firing (was 2min)")
         self._log_dashboard("    • 5m + 15m timeframes must agree (multi-TF)")
-        self._log_dashboard("    • Volume must be > 1.5x average")
-        self._log_dashboard("    • Price must be on the right side of EMA50")
-        self._log_dashboard("    • RSI must not be at extremes (no knife-catching)")
+        self._log_dashboard("    • Volume > 1.2x avg (skipped if no volume data)")
+        self._log_dashboard("    • Price on right side of EMA50 (with 0.2% buffer)")
+        self._log_dashboard("    • RSI not extreme (only blocks RSI <20 or >80)")
         self._log_dashboard("  = FEWER trades, HIGHER accuracy")
         self._log_dashboard("============================================")
         self._log_dashboard("")
