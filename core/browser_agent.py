@@ -424,32 +424,53 @@ class BrowserAgent:
                 if not contexts:
                     raise RuntimeError(f"No contexts in Chrome CDP connection: {cdp_url}")
 
-                # Pick the most recent page (user's current TradingView chart)
+                # PREFER a TradingView tab — search all contexts/pages for one with tradingview.com
+                chart_url = getattr(config, "TRADINGVIEW_URL", "https://www.tradingview.com/chart/")
                 selected_page = None
                 selected_context = None
-                for ctx in reversed(contexts):
-                    pages = ctx.pages
-                    if pages:
-                        selected_context = ctx
-                        selected_page = pages[-1]
+                for ctx in contexts:
+                    for page in ctx.pages:
+                        url = (page.url or "").lower()
+                        if "tradingview.com" in url:
+                            selected_context = ctx
+                            selected_page = page
+                            logger.info("[TAB] Found TradingView tab: %s", page.url[:80])
+                            break
+                    if selected_page:
                         break
+
+                # Fallback: most recent page (only if no TradingView tab exists)
+                if not selected_page:
+                    for ctx in reversed(contexts):
+                        pages = ctx.pages
+                        if pages:
+                            selected_context = ctx
+                            selected_page = pages[-1]
+                            logger.warning("[TAB] No TradingView tab found — using most recent: %s", selected_page.url[:80])
+                            break
 
                 if selected_page:
                     self.context = selected_context
                     self.page = selected_page
                     self._install_safe_dialog_handler()
                     self.is_running = True
-                    logger.info("[OK] Connected to existing Chrome tab: %s", self.page.url[:80])
+                    # If the page isn't TradingView, navigate to it
+                    if "tradingview.com" not in (self.page.url or "").lower():
+                        logger.info("[TAB] Navigating to TradingView chart...")
+                        try:
+                            await self.page.goto(chart_url, wait_until="domcontentloaded", timeout=20000)
+                        except Exception as nav_err:
+                            logger.warning("[TAB] Navigation to TradingView failed: %s", nav_err)
+                    logger.info("[OK] Connected to Chrome tab: %s", self.page.url[:80])
                     return
 
                 # No pages at all — create one in the existing context
                 self.context = contexts[0]
-                chart_url = getattr(config, "TRADINGVIEW_URL", "https://www.tradingview.com/chart/")
                 self.page = await self.context.new_page()
                 self._install_safe_dialog_handler()
                 await self.page.goto(chart_url, wait_until="domcontentloaded")
                 self.is_running = True
-                logger.info("[OK] Created new tab in existing Chrome: %s", chart_url)
+                logger.info("[OK] Created new TradingView tab in existing Chrome: %s", chart_url)
                 return
 
             except Exception as e:
