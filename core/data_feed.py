@@ -181,6 +181,151 @@ class MarketDataFeed:
     # ------------------------------------------------------------------
     # Smart fetch with automatic fallback
     # ------------------------------------------------------------------
+    def get_bars_multi(self, ticker: str, interval: str = "1m",
+                       count: int = 100) -> Optional[List[Dict]]:
+        """
+        Get OHLCV bars for a ticker at a SPECIFIC timeframe interval.
+        Supported intervals: 1m, 5m, 15m, 1h, 1d
+        Used for multi-timeframe analysis (confluence engine).
+        """
+        cache_key = f"{ticker}_{interval}_{count}"
+        now = time.time()
+
+        # Check cache (shorter TTL for higher TFs is fine)
+        with self._lock:
+            cached = self._cache.get(cache_key)
+            if cached and (now - cached["timestamp"]) < self.cache_ttl:
+                self._stats["cache_hits"] += 1
+                return cached["bars"]
+
+        bars = None
+        source_used = None
+
+        # Try Yahoo Finance (best for multi-TF — MT5 only has M1, M5, M15, M30, H1)
+        if self.is_yfinance_available():
+            bars = self._fetch_yfinance_multi(ticker, interval, count)
+            if bars:
+                source_used = "YFINANCE"
+                self._stats["yf_hits"] += 1
+
+        # Try MT5 as fallback for supported timeframes
+        if not bars and self.is_mt5_available():
+            bars = self._fetch_mt5_multi(ticker, interval, count)
+            if bars:
+                source_used = "MT5"
+                self._stats["mt5_hits"] += 1
+
+        # Last resort: serve stale cache
+        if not bars:
+            with self._lock:
+                cached = self._cache.get(cache_key)
+                if cached:
+                    logger.warning("[FEED] Serving stale %s cache for %s", interval, ticker)
+                    return cached["bars"]
+
+        # Update cache on success
+        if bars:
+            with self._lock:
+                self._cache[cache_key] = {
+                    "timestamp": now,
+                    "bars": bars,
+                    "source": source_used,
+                }
+
+        return bars
+
+    def _fetch_yfinance_multi(self, ticker: str, interval: str, count: int) -> Optional[List[Dict]]:
+        """Fetch OHLCV bars from Yahoo Finance at a specific interval."""
+        # Rate limit protection
+        elapsed = time.time() - self._last_yf_call
+        if elapsed < self._yf_min_interval:
+            time.sleep(self._yf_min_interval - elapsed)
+        self._last_yf_call = time.time()
+
+        # yfinance interval → period mapping (yfinance limits vary by interval)
+        interval_config = {
+            "1m":  ("5d",  "1m"),
+            "5m":  ("1mo", "5m"),
+            "15m": ("1mo", "15m"),
+            "30m": ("1mo", "30m"),
+            "1h":  ("3mo", "1h"),
+            "1d":  ("2y",  "1d"),
+        }
+        cfg = interval_config.get(interval)
+        if not cfg:
+            return None
+        period, yf_interval = cfg
+
+        try:
+            import yfinance as yf
+            yf_sym = self._to_yfinance_symbol(ticker)
+            df = yf.download(
+                yf_sym, period=period, interval=yf_interval,
+                progress=False, threads=False, auto_adjust=True,
+            )
+            if df is None or df.empty:
+                return None
+            # Flatten multi-index columns if present
+            if hasattr(df.columns, 'get_level_values'):
+                df.columns = df.columns.get_level_values(0)
+            df = df.tail(count)
+            bars = []
+            for idx, row in df.iterrows():
+                bars.append({
+                    "timestamp": idx.isoformat() if hasattr(idx, "isoformat") else str(idx),
+                    "open": float(row.get("Open", 0.0) or 0.0),
+                    "high": float(row.get("High", 0.0) or 0.0),
+                    "low": float(row.get("Low", 0.0) or 0.0),
+                    "close": float(row.get("Close", 0.0) or 0.0),
+                    "volume": int(row.get("Volume", 0.0) or 0.0),
+                    "source": "YFINANCE",
+                })
+            return bars
+        except Exception as e:
+            logger.debug("[FEED] YF multi fetch failed for %s @ %s: %s", ticker, interval, e)
+            self._stats["errors"] += 1
+            return None
+
+    def _fetch_mt5_multi(self, ticker: str, interval: str, count: int) -> Optional[List[Dict]]:
+        """Fetch OHLCV bars from MT5 at a specific timeframe."""
+        try:
+            import MetaTrader5 as mt5
+            if not mt5.initialize():
+                return None
+            symbol = self._to_mt5_symbol(ticker)
+            tf_map = {
+                "1m":  mt5.TIMEFRAME_M1,
+                "5m":  mt5.TIMEFRAME_M5,
+                "15m": mt5.TIMEFRAME_M15,
+                "30m": mt5.TIMEFRAME_M30,
+                "1h":  mt5.TIMEFRAME_H1,
+                "1d":  mt5.TIMEFRAME_D1,
+            }
+            tf = tf_map.get(interval)
+            if not tf:
+                mt5.shutdown()
+                return None
+            rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+            mt5.shutdown()
+            if rates is None or len(rates) == 0:
+                return None
+            bars = []
+            for r in rates:
+                bars.append({
+                    "timestamp": datetime.fromtimestamp(r["time"]).isoformat(),
+                    "open": float(r["open"]),
+                    "high": float(r["high"]),
+                    "low": float(r["low"]),
+                    "close": float(r["close"]),
+                    "volume": int(r["tick_volume"]),
+                    "source": "MT5",
+                })
+            return bars
+        except Exception as e:
+            logger.debug("[FEED] MT5 multi fetch failed for %s @ %s: %s", ticker, interval, e)
+            self._stats["errors"] += 1
+            return None
+
     def get_bars(self, ticker: str, count: int = 200,
                  use_cache: bool = True) -> Optional[List[Dict]]:
         """

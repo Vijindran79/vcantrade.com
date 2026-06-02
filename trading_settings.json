@@ -1,8 +1,10 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "USDBTC",
-    "ETHUSD"
+    "NQ=F",
+    "ES=F",
+    "CL=F",
+    "GC=F"
   ],
   "investment_amount": 1000.0,
   "lot_size": 1.0,

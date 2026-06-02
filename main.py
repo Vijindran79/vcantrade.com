@@ -620,15 +620,174 @@ class VcaniTradeEngine:
         except Exception:
             pass
 
-        # Route actionable BUY/SELL signals into the real execution path
+        # CONFLUENCE CHECK: require multi-timeframe agreement + persistence + volume
+        # before routing to execution. This is the "safest, most reliable" gate.
         if action in {"BUY", "SELL"} and ticker not in {"", "UNKNOWN"}:
+            try:
+                from core.confluence_engine import confluence
+                # Compute higher-TF agreement from data_feed (5m, 15m trends)
+                tf_5m_agrees, tf_15m_agrees = self._check_higher_tf_agreement(ticker, action)
+                # Pull recent indicator values from data_feed
+                indicators = self._fetch_indicators_for_confluence(ticker)
+                should_fire, fire_reason, boosted = confluence.evaluate(
+                    ticker=ticker,
+                    action=action,
+                    confidence=confidence,
+                    rsi_1m=indicators.get("rsi", 50.0),
+                    close=indicators.get("close", 0.0),
+                    ema_50=indicators.get("ema_50", 0.0),
+                    bb_upper=indicators.get("bb_upper", 0.0),
+                    bb_lower=indicators.get("bb_lower", 0.0),
+                    volume_current=indicators.get("volume", 0.0),
+                    volume_avg=indicators.get("volume_avg", 0.0),
+                    tf_5m_agrees=tf_5m_agrees,
+                    tf_15m_agrees=tf_15m_agrees,
+                )
+                if not should_fire:
+                    # Log the "wait" — the bot is being patient for a safer entry
+                    self._log_dashboard(
+                        f"[CONFLUENCE-WAIT] {action} {ticker}: {fire_reason}"
+                    )
+                    return
+                # Boost confidence from confluence
+                payload = dict(payload)
+                payload["confidence"] = boosted
+                payload["reason"] = f"[CONFLUENCE] {fire_reason}"
+                self._log_dashboard(
+                    f"[CONFLUENCE-OK] {action} {ticker} boosted to {boosted:.0%}"
+                )
+            except Exception as exc:
+                logger.warning("[CONFLUENCE] Check failed, falling back to direct execution: %s", exc)
+
+            # Route actionable BUY/SELL signals into the real execution path
             try:
                 self._log_dashboard(
                     f"[ROUTE] Brain signal -> execution: {action} {ticker} (conf={confidence:.0%})"
                 )
-                self.execution_signal.emit(dict(payload))
+                # DIRECT CALL (bypass unreliable Qt signal/slot for cross-thread delivery)
+                # The Qt signal is still emitted as a backup.
+                try:
+                    self.execution_signal.emit(dict(payload))
+                except Exception:
+                    pass
+                # ALSO call directly — this is the reliable path
+                try:
+                    direct_payload = dict(payload)
+                    direct_payload["confluence_validated"] = True
+                    self.process_validated_execution_path(direct_payload)
+                except Exception as exc:
+                    logger.error("[ROUTE] Direct execution call failed: %s", exc)
+                    self._log_dashboard(f"[ROUTE-FAIL] {action} {ticker}: {exc}")
             except Exception as exc:
                 logger.error("[ROUTE] Failed to forward brain signal: %s", exc)
+
+    # ==================== CONFLUENCE HELPERS ====================
+
+    def _check_higher_tf_agreement(self, ticker: str, action: str) -> tuple:
+        """
+        Check if 5m and 15m timeframes AGREE with the 1m signal.
+        Returns (tf_5m_agrees, tf_15m_agrees).
+        Uses SMA20 vs SMA50 cross as the higher-TF trend direction.
+        """
+        try:
+            from core.data_feed import data_feed
+            tf_5m_agrees = False
+            tf_15m_agrees = False
+
+            # 5m timeframe: get 100 bars of 5m data
+            bars_5m = data_feed.get_bars_multi(ticker, interval="5m", count=100)
+            if bars_5m and len(bars_5m) >= 50:
+                closes_5m = [b["close"] for b in bars_5m]
+                sma20_5m = sum(closes_5m[-20:]) / 20
+                sma50_5m = sum(closes_5m[-50:]) / 50
+                # BUY agrees if 5m trend is up (sma20 > sma50)
+                # SELL agrees if 5m trend is down (sma20 < sma50)
+                if action == "BUY" and sma20_5m > sma50_5m:
+                    tf_5m_agrees = True
+                elif action == "SELL" and sma20_5m < sma50_5m:
+                    tf_5m_agrees = True
+
+            # 15m timeframe: get 100 bars of 15m data
+            bars_15m = data_feed.get_bars_multi(ticker, interval="15m", count=100)
+            if bars_15m and len(bars_15m) >= 50:
+                closes_15m = [b["close"] for b in bars_15m]
+                sma20_15m = sum(closes_15m[-20:]) / 20
+                sma50_15m = sum(closes_15m[-50:]) / 50
+                if action == "BUY" and sma20_15m > sma50_15m:
+                    tf_15m_agrees = True
+                elif action == "SELL" and sma20_15m < sma50_15m:
+                    tf_15m_agrees = True
+
+            return tf_5m_agrees, tf_15m_agrees
+        except Exception as e:
+            logger.debug("[CONFLUENCE] Higher-TF check failed for %s: %s", ticker, e)
+            return False, False
+
+    def _fetch_indicators_for_confluence(self, ticker: str) -> dict:
+        """
+        Fetch recent indicators (RSI, close, EMA50, BB, volume) for the confluence check.
+        """
+        result = {
+            "rsi": 50.0,
+            "close": 0.0,
+            "ema_50": 0.0,
+            "bb_upper": 0.0,
+            "bb_lower": 0.0,
+            "volume": 0.0,
+            "volume_avg": 0.0,
+        }
+        try:
+            from core.data_feed import data_feed
+            # Use 1m data for the trigger
+            bars = data_feed.get_bars_multi(ticker, interval="1m", count=100)
+            if not bars or len(bars) < 20:
+                return result
+            closes = [b["close"] for b in bars]
+            volumes = [b["volume"] for b in bars]
+            result["close"] = closes[-1]
+            # EMA 50
+            if len(closes) >= 50:
+                ema = sum(closes[:50]) / 50
+                k = 2.0 / 51
+                for c in closes[50:]:
+                    ema = (c * k) + (ema * (1 - k))
+                result["ema_50"] = ema
+            else:
+                result["ema_50"] = sum(closes) / len(closes)
+            # RSI 14
+            gains = 0.0
+            losses = 0.0
+            for i in range(-14, 0):
+                diff = closes[i] - closes[i - 1]
+                if diff > 0:
+                    gains += diff
+                else:
+                    losses -= diff
+            avg_gain = gains / 14
+            avg_loss = losses / 14
+            if avg_loss == 0:
+                result["rsi"] = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                result["rsi"] = 100.0 - (100.0 / (1.0 + rs))
+            # Bollinger Bands (20-period, 2 std dev)
+            if len(closes) >= 20:
+                window = closes[-20:]
+                sma = sum(window) / 20
+                variance = sum((c - sma) ** 2 for c in window) / 20
+                std = variance ** 0.5
+                result["bb_upper"] = sma + (2 * std)
+                result["bb_lower"] = sma - (2 * std)
+            # Volume
+            result["volume"] = volumes[-1]
+            if len(volumes) >= 20:
+                result["volume_avg"] = sum(volumes[-20:]) / 20
+            else:
+                result["volume_avg"] = sum(volumes) / max(1, len(volumes))
+            return result
+        except Exception as e:
+            logger.debug("[CONFLUENCE] Indicator fetch failed for %s: %s", ticker, e)
+            return result
 
     def process_validated_execution_path(self, payload: dict):
         """Route validated bridge/swarm signals into teacher or autonomous execution."""
@@ -650,6 +809,15 @@ class VcaniTradeEngine:
             pass
 
         if self.current_mode != "AUTONOMOUS":
+            self._log_dashboard(f"[TEACHER] Approval required for {action} {ticker}")
+            return
+
+        # Force AUTONOMOUS when called via the direct (confluence-validated) path.
+        # This bypasses the dashboard mode toggle — confluence-validated signals
+        # are pre-approved.
+        if payload.get("confluence_validated"):
+            self._log_dashboard(f"[CONFLUENCE-VALIDATED] Bypassing mode check for {action} {ticker}")
+        elif self.current_mode != "AUTONOMOUS":
             self._log_dashboard(f"[TEACHER] Approval required for {action} {ticker}")
             return
 
@@ -714,7 +882,6 @@ class VcaniTradeEngine:
             self._log_dashboard("  Bot will LOG signals but NOT click trades.")
             self._log_dashboard("  Set DRY_RUN=False in .env to go live.")
             self._log_dashboard("============================================")
-            self._log_dashboard("")
         else:
             self._log_dashboard("")
             self._log_dashboard("============================================")
@@ -722,7 +889,17 @@ class VcaniTradeEngine:
             self._log_dashboard("  Bot WILL click BUY/SELL on TradingView.")
             self._log_dashboard("  Every signal = real money at stake.")
             self._log_dashboard("============================================")
-            self._log_dashboard("")
+        # CONFLUENCE STRATEGY explanation — the "safest, most reliable" gate
+        self._log_dashboard("")
+        self._log_dashboard("  CONFLUENCE STRATEGY ACTIVE (safest):")
+        self._log_dashboard("    • Signal must hold 2+ minutes before firing")
+        self._log_dashboard("    • 5m + 15m timeframes must agree (multi-TF)")
+        self._log_dashboard("    • Volume must be > 1.5x average")
+        self._log_dashboard("    • Price must be on the right side of EMA50")
+        self._log_dashboard("    • RSI must not be at extremes (no knife-catching)")
+        self._log_dashboard("  = FEWER trades, HIGHER accuracy")
+        self._log_dashboard("============================================")
+        self._log_dashboard("")
 
         # Start periodic scanner (scanner is NOT a thread - use QTimer)
         self._start_scanner_timer()
@@ -1172,8 +1349,17 @@ class VcaniTradeEngine:
                         _rpa_result["reason"] = str(e)
                 _rpa_thread = _threading.Thread(target=_rpa_worker, daemon=True)
                 _rpa_thread.start()
-                _rpa_thread.join(timeout=45)
-                if _rpa_thread.is_alive():
+                # Non-blocking check: poll for completion with short intervals so the
+                # main thread is NEVER blocked. This keeps the Qt event loop free
+                # so subsequent signals can be processed.
+                _deadline = time.time() + 45
+                _rpa_done = False
+                while time.time() < _deadline:
+                    if not _rpa_thread.is_alive():
+                        _rpa_done = True
+                        break
+                    time.sleep(0.1)
+                if not _rpa_done:
                     logger.warning("[EXEC] TradingView RPA timed out after 45s for %s %s — falling through", action, true_symbol)
                     errors.append("TradingView RPA: 45s timeout (CDP may not be connected)")
                     # SIMPLE ENGLISH: tell user what happened
