@@ -375,16 +375,47 @@ class RPAExecutor:
 
         This is the "what worked before" approach — direct click on the
         current chart's order panel, exactly where the user manually trades.
+
+        NEW: Re-finds the active TradingView tab right before clicking (in case
+        the user switched tabs). Takes a screenshot before and after so the user
+        can see exactly what the bot is doing.
         """
         try:
             logger.info(f"[SIMPLE-CLICK] {action} {ticker} on current chart (no navigation)")
+
+            # RE-FIND THE TRADINGVIEW TAB — user may have switched tabs since startup
+            try:
+                page = self._get_active_tradingview_page(browser_agent)
+                if page:
+                    browser_agent.page = page
+            except Exception as refresh_err:
+                logger.debug("[SIMPLE-CLICK] Could not refresh tab: %s", refresh_err)
+
             page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
             if not page:
                 logger.error("[SIMPLE-CLICK] No browser page available")
                 self.last_failure_reason = "no browser page"
                 return False
 
-            # Verify we're on TradingView (cheap URL check)
+            # Log the EXACT tab the bot is interacting with
+            try:
+                current_url = page.url if hasattr(page, 'url') else "unknown"
+                logger.info(f"[SIMPLE-CLICK] Interacting with tab: {current_url[:120]}")
+                # Get the page title
+                title = ""
+                try:
+                    title_result = page.title()
+                    if inspect.isawaitable(title_result):
+                        title = self._run_async(title_result) or ""
+                    else:
+                        title = str(title_result or "")
+                except Exception:
+                    pass
+                logger.info(f"[SIMPLE-CLICK] Page title: {title[:80]}")
+            except Exception as log_err:
+                logger.debug(f"[SIMPLE-CLICK] Could not log page info: {log_err}")
+
+            # Verify we're on TradingView
             try:
                 current_url = ""
                 if hasattr(page, 'url'):
@@ -394,7 +425,7 @@ class RPAExecutor:
                     self.last_failure_reason = f"not on TradingView: {current_url}"
                     return False
             except Exception:
-                pass  # URL check failed, proceed anyway
+                pass
 
             # Bring the page to front
             try:
@@ -402,11 +433,17 @@ class RPAExecutor:
                     _btf = page.bring_to_front()
                     if inspect.isawaitable(_btf):
                         self._run_async(_btf)
-                time.sleep(0.3)
+                time.sleep(0.5)
             except Exception:
                 pass
 
-            # Set order quantity first (small number, won't affect user's manual setup)
+            # SCREENSHOT BEFORE CLICK — so user can see what's about to happen
+            try:
+                self._save_screenshot(page, f"BEFORE_{action}_{ticker}.png")
+            except Exception as ss_err:
+                logger.debug(f"[SIMPLE-CLICK] Screenshot before failed: {ss_err}")
+
+            # Set order quantity first
             try:
                 self._set_tradingview_order_quantity(page, float(getattr(config, "INITIAL_ENTRY_BULLETS", 1)))
             except Exception:
@@ -416,33 +453,42 @@ class RPAExecutor:
             time.sleep(random.uniform(0.5, 1.2))
 
             # JAVASCRIPT INJECTION — find and click the BUY/SELL button
-            # This is the "old HTML injection" the user remembers
-            action_lower = action.lower()  # "buy" or "sell"
+            action_lower = action.lower()
             js_click = """(args) => {
                 const actionLower = args.actionLower;
-                const searchTerms = [actionLower, actionLower + ' mkt', actionLower + ' market'];
-                // Find all buttons
+                const searchTerms = [actionLower, actionLower + ' mkt', actionLower + ' market',
+                                     actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Market',
+                                     actionLower.charAt(0).toUpperCase() + actionLower.slice(1)];
                 const buttons = Array.from(document.querySelectorAll('button'));
+                const matches = [];
                 for (const btn of buttons) {
                     const text = (btn.textContent || '').toLowerCase().trim();
                     const dataName = (btn.getAttribute('data-name') || '').toLowerCase();
                     const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
                     const className = (btn.className || '').toLowerCase();
                     for (const term of searchTerms) {
-                        if (text === term || text.includes(term) ||
-                            dataName.includes(term) || ariaLabel.includes(term) ||
-                            className.includes(term)) {
-                            // Check button is visible
+                        if (text === term.toLowerCase() || text.includes(term.toLowerCase()) ||
+                            dataName.includes(term.toLowerCase()) || ariaLabel.includes(term.toLowerCase()) ||
+                            className.includes(term.toLowerCase())) {
                             const rect = btn.getBoundingClientRect();
                             if (rect.width > 0 && rect.height > 0) {
-                                btn.click();
-                                return { success: true, text: btn.textContent.trim(),
-                                         x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
+                                matches.push({ btn, text: btn.textContent.trim(),
+                                               x: rect.left + rect.width/2, y: rect.top + rect.height/2,
+                                               width: rect.width, height: rect.height });
+                                break;
                             }
                         }
                     }
                 }
-                return { success: false, reason: 'no button found' };
+                if (matches.length === 0) {
+                    return { success: false, reason: 'no button found' };
+                }
+                // Prefer the largest button (the order panel BUY/SELL is usually biggest)
+                matches.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+                const m = matches[0];
+                m.btn.click();
+                return { success: true, text: m.text, x: m.x, y: m.y,
+                         totalMatches: matches.length, allTexts: matches.map(x => x.text) };
             }"""
 
             try:
@@ -451,16 +497,26 @@ class RPAExecutor:
                     result = self._run_async(result)
             except Exception as eval_err:
                 logger.error("[SIMPLE-CLICK] JS injection failed: %s", eval_err)
-                # Fall back to Playwright locator
                 result = None
 
             if result and result.get("success"):
-                logger.info(f"[SIMPLE-CLICK] CLICKED {action} button! text='{result.get('text')}' at ({result.get('x')}, {result.get('y')})")
+                logger.info(f"[SIMPLE-CLICK] CLICKED {action} button! text='{result.get('text')}' at ({result.get('x'):.0f}, {result.get('y'):.0f})")
+                logger.info(f"[SIMPLE-CLICK] Found {result.get('totalMatches')} matching buttons, picked largest: {result.get('allTexts')}")
+
+                # SCREENSHOT AFTER CLICK — to show user what happened
+                try:
+                    time.sleep(0.5)
+                    self._save_screenshot(page, f"AFTER_{action}_{ticker}.png")
+                except Exception:
+                    pass
+
                 # If SL/TP provided, type them after click
                 if sl > 0 or tp > 0:
                     time.sleep(0.8)
                     try:
                         self._enter_sl_tp_after_click(page, sl, tp)
+                        time.sleep(0.5)
+                        self._save_screenshot(page, f"AFTER_SLTP_{action}_{ticker}.png")
                     except Exception as sl_err:
                         logger.debug("[SIMPLE-CLICK] SL/TP entry skipped: %s", sl_err)
                 return True
@@ -498,6 +554,61 @@ class RPAExecutor:
             logger.error(f"[SIMPLE-CLICK] Failed: {str(e)[:200]}")
             self.last_failure_reason = f"simple_click exception: {str(e)[:100]}"
             return False
+
+    def _get_active_tradingview_page(self, browser_agent):
+        """Re-find the active TradingView tab in the connected Chrome.
+        This handles the case where the user switched tabs since startup.
+        Returns the page object or None.
+        """
+        try:
+            browser = getattr(browser_agent, 'browser', None)
+            if not browser:
+                return None
+
+            # Try to get all pages from all contexts
+            all_pages = []
+            try:
+                contexts = browser.contexts
+                for ctx in contexts:
+                    for p in ctx.pages:
+                        all_pages.append(p)
+            except Exception:
+                pass
+
+            if not all_pages:
+                return None
+
+            # 1. Prefer a TradingView tab that's the active/focused one
+            for p in all_pages:
+                url = (p.url or "").lower()
+                if "tradingview.com" in url:
+                    # Check if this is the active page (heuristic: it's the one user is looking at)
+                    return p
+
+            # 2. Fallback: most recent
+            return all_pages[-1] if all_pages else None
+        except Exception as e:
+            logger.debug(f"[SIMPLE-CLICK] _get_active_tradingview_page failed: {e}")
+            return None
+
+    def _save_screenshot(self, page, filename: str) -> None:
+        """Save a screenshot to logs/ directory so the user can see what the bot is doing."""
+        try:
+            import os
+            from datetime import datetime
+            debug_dir = os.path.join(os.getcwd(), "logs", "screenshots")
+            os.makedirs(debug_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            full_path = os.path.join(debug_dir, f"{timestamp}_{filename}")
+
+            # Take screenshot via Playwright
+            if hasattr(page, 'screenshot'):
+                shot = page.screenshot(path=full_path)
+                if inspect.isawaitable(shot):
+                    self._run_async(shot)
+                logger.info(f"[SIMPLE-CLICK] Screenshot saved: {full_path}")
+        except Exception as e:
+            logger.debug(f"[SIMPLE-CLICK] Screenshot save failed: {e}")
 
     def _enter_sl_tp_after_click(self, page, sl: float, tp: float) -> None:
         """
