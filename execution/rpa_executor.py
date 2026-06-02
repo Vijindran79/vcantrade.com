@@ -124,29 +124,36 @@ class RPAExecutor:
         return action
 
     def execute_protected_tradingview_bracket(self, browser_agent, ticker: str, action: str, entry_price: float, sl: float, tp: float) -> bool:
-        """Executes an unbreakable bracket order on TradingView by forcefully clearing fields prior to value string injection."""
+        """Executes an unbreakable bracket order on TradingView.
+
+        SIMPLIFIED: NO navigation, NO typing the ticker into the search box.
+        The user has the watchlist set up — we just click the BUY/SELL button
+        on whatever chart is currently active. Trust the user to have the
+        right chart open.
+        """
         try:
             logger.info(f"[HY3-HARDEN] Initializing isolated RPA strike path for asset: {ticker} | Action: {action}")
-            
+
             # Engage single-counter target lock to freeze background threads
             if hasattr(browser_agent, 'set_target_lock'):
                 browser_agent.set_target_lock(ticker)
-            
+
             with browser_agent.lock:
                 # 1. Engage the CDP Isolation shield to freeze data-scraping loops
                 browser_agent.pause_cdp_listener = True
                 time.sleep(0.05)
-                
-                # 2. NAVIGATE TO CORRECT SYMBOL FIRST — critical fix
-                self._navigate_to_symbol(browser_agent, ticker)
-                
+
+                # 2. SKIP NAVIGATION — user has watchlist set up
+                # (Previously typed ticker into search box — user found this annoying)
+                logger.info("[HY3-SIMPLE] Skipping symbol navigation (user has watchlist set up)")
+
                 # 3. Force close any stuck UI dialogue remnants
                 pyautogui.press('escape')
                 time.sleep(0.2)
                 pyautogui.press('escape')
                 time.sleep(0.2)
-                
-                # 4. Click the Buy or Sell button directly (no keyboard shortcuts that trigger symbol search)
+
+                # 4. Click the Buy or Sell button directly on the current chart
                 clicked = self._click_buy_sell_button(browser_agent, action)
                 if not clicked:
                     logger.warning("[HY3] Could not find %s button via CDP, retrying with coordinates", action)
@@ -158,19 +165,19 @@ class RPAExecutor:
                     else:
                         pyautogui.click(screen_w - 120, screen_h - 140)
                     time.sleep(0.3)
-                
-                # 3. Defensive targeted entry for Stop Loss parameter field
+
+                # 5. Defensive targeted entry for Stop Loss parameter field
                 if sl > 0:
                     logger.info(f"[HY3-HARDEN] Navigating to Stop Loss input box. Target Value: {sl}")
                     pyautogui.press('tab', presses=4, interval=0.03)
-                    
+
                     # Execute total input string erasure via standard keyboard macro overrides
                     pyautogui.hotkey('ctrl', 'a')
                     pyautogui.press('backspace')
                     pyautogui.write(str(round(sl, 2)), interval=0.01)
                     time.sleep(0.05)
-                    
-                # 4. Defensive targeted entry for Take Profit parameter field
+
+                # 6. Defensive targeted entry for Take Profit parameter field
                 if tp > 0:
                     logger.info(f"[HY3-HARDEN] Navigating to Take Profit input box. Target Value: {tp}")
                     pyautogui.press('tab', interval=0.03)
@@ -178,14 +185,14 @@ class RPAExecutor:
                     pyautogui.press('backspace')
                     pyautogui.write(str(round(tp, 2)), interval=0.01)
                     time.sleep(0.05)
-                    
-                # 5. Securely dispatch bracket sequence down to exchange infrastructure
+
+                # 7. Securely dispatch bracket sequence down to exchange infrastructure
                 pyautogui.press('enter')
                 time.sleep(0.1)
-                
-                # 6. Unfreeze the CDP monitoring thread
+
+                # 8. Unfreeze the CDP monitoring thread
                 browser_agent.pause_cdp_listener = False
-                
+
             logger.info(f"[HY3-SUCCESS] Bracket order fields validated and committed for ticker: {ticker}")
             return True
         except Exception as e:
@@ -350,13 +357,204 @@ class RPAExecutor:
             time.sleep(0.5)
             pyautogui.press('enter')
             time.sleep(1.0)
-            
+
             logger.info("[NAV] Keyboard navigation to %s complete", tv_symbol)
             return True
-            
+
         except Exception as e:
             logger.warning("[NAV] Symbol navigation failed for %s: %s — executing on current chart", ticker, e)
             return False
+
+    def execute_trade_simple_click(self, browser_agent, ticker: str, action: str,
+                                    sl: float = 0.0, tp: float = 0.0) -> bool:
+        """
+        SIMPLEST execution: just click the BUY/SELL button on the CURRENT chart.
+        No navigation. No typing the ticker. No search box interference.
+        Assumes the user has the right chart open in their watchlist.
+        Uses JavaScript injection for maximum reliability.
+
+        This is the "what worked before" approach — direct click on the
+        current chart's order panel, exactly where the user manually trades.
+        """
+        try:
+            logger.info(f"[SIMPLE-CLICK] {action} {ticker} on current chart (no navigation)")
+            page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
+            if not page:
+                logger.error("[SIMPLE-CLICK] No browser page available")
+                self.last_failure_reason = "no browser page"
+                return False
+
+            # Verify we're on TradingView (cheap URL check)
+            try:
+                current_url = ""
+                if hasattr(page, 'url'):
+                    current_url = page.url or ""
+                if "tradingview" not in str(current_url).lower():
+                    logger.error("[SIMPLE-CLICK] Not on TradingView: %s", current_url)
+                    self.last_failure_reason = f"not on TradingView: {current_url}"
+                    return False
+            except Exception:
+                pass  # URL check failed, proceed anyway
+
+            # Bring the page to front
+            try:
+                if hasattr(page, 'bring_to_front'):
+                    _btf = page.bring_to_front()
+                    if inspect.isawaitable(_btf):
+                        self._run_async(_btf)
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+            # Set order quantity first (small number, won't affect user's manual setup)
+            try:
+                self._set_tradingview_order_quantity(page, float(getattr(config, "INITIAL_ENTRY_BULLETS", 1)))
+            except Exception:
+                pass
+
+            # Small human-like delay before clicking
+            time.sleep(random.uniform(0.5, 1.2))
+
+            # JAVASCRIPT INJECTION — find and click the BUY/SELL button
+            # This is the "old HTML injection" the user remembers
+            action_lower = action.lower()  # "buy" or "sell"
+            js_click = """(args) => {
+                const actionLower = args.actionLower;
+                const searchTerms = [actionLower, actionLower + ' mkt', actionLower + ' market'];
+                // Find all buttons
+                const buttons = Array.from(document.querySelectorAll('button'));
+                for (const btn of buttons) {
+                    const text = (btn.textContent || '').toLowerCase().trim();
+                    const dataName = (btn.getAttribute('data-name') || '').toLowerCase();
+                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const className = (btn.className || '').toLowerCase();
+                    for (const term of searchTerms) {
+                        if (text === term || text.includes(term) ||
+                            dataName.includes(term) || ariaLabel.includes(term) ||
+                            className.includes(term)) {
+                            // Check button is visible
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                btn.click();
+                                return { success: true, text: btn.textContent.trim(),
+                                         x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
+                            }
+                        }
+                    }
+                }
+                return { success: false, reason: 'no button found' };
+            }"""
+
+            try:
+                result = page.evaluate(js_click, {"actionLower": action_lower})
+                if inspect.isawaitable(result):
+                    result = self._run_async(result)
+            except Exception as eval_err:
+                logger.error("[SIMPLE-CLICK] JS injection failed: %s", eval_err)
+                # Fall back to Playwright locator
+                result = None
+
+            if result and result.get("success"):
+                logger.info(f"[SIMPLE-CLICK] CLICKED {action} button! text='{result.get('text')}' at ({result.get('x')}, {result.get('y')})")
+                # If SL/TP provided, type them after click
+                if sl > 0 or tp > 0:
+                    time.sleep(0.8)
+                    try:
+                        self._enter_sl_tp_after_click(page, sl, tp)
+                    except Exception as sl_err:
+                        logger.debug("[SIMPLE-CLICK] SL/TP entry skipped: %s", sl_err)
+                return True
+            else:
+                reason = result.get("reason", "no result") if isinstance(result, dict) else "JS evaluate failed"
+                logger.warning(f"[SIMPLE-CLICK] JS click did not find button: {reason}")
+
+                # FALLBACK 1: Playwright locator
+                try:
+                    btn = page.get_by_text(f"{action} Mkt", exact=False).first
+                    if btn and btn.is_visible():
+                        btn.click()
+                        logger.info(f"[SIMPLE-CLICK-FALLBACK1] Playwright clicked {action} Mkt button")
+                        return True
+                except Exception:
+                    pass
+
+                # FALLBACK 2: pyautogui coordinate
+                try:
+                    screen_w, screen_h = pyautogui.size()
+                    if action == "BUY":
+                        pyautogui.click(screen_w - 120, screen_h - 180)
+                    else:
+                        pyautogui.click(screen_w - 120, screen_h - 140)
+                    time.sleep(0.3)
+                    logger.info(f"[SIMPLE-CLICK-FALLBACK2] pyautogui clicked at coordinate")
+                    return True
+                except Exception as pg_err:
+                    logger.error(f"[SIMPLE-CLICK] All fallbacks failed: {pg_err}")
+
+                self.last_failure_reason = f"could not find {action} button"
+                return False
+
+        except Exception as e:
+            logger.error(f"[SIMPLE-CLICK] Failed: {str(e)[:200]}")
+            self.last_failure_reason = f"simple_click exception: {str(e)[:100]}"
+            return False
+
+    def _enter_sl_tp_after_click(self, page, sl: float, tp: float) -> None:
+        """
+        After clicking BUY/SELL, type the SL and TP values into the order panel.
+        Uses JavaScript injection to find and fill inputs reliably.
+        """
+        try:
+            js_fill = """(args) => {
+                const sl = args.sl;
+                const tp = args.tp;
+                let slFilled = false;
+                let tpFilled = false;
+                // Find SL input
+                const allInputs = Array.from(document.querySelectorAll('input'));
+                for (const inp of allInputs) {
+                    const placeholder = (inp.placeholder || '').toLowerCase();
+                    const name = (inp.name || '').toLowerCase();
+                    const id = (inp.id || '').toLowerCase();
+                    if (!slFilled && sl > 0 && (placeholder.includes('stop') || name.includes('sl') || id.includes('sl'))) {
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(inp, String(sl));
+                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        slFilled = true;
+                    }
+                    if (!tpFilled && tp > 0 && (placeholder.includes('profit') || placeholder.includes('take') || name.includes('tp') || id.includes('tp'))) {
+                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(inp, String(tp));
+                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        tpFilled = true;
+                    }
+                }
+                return { slFilled, tpFilled };
+            }"""
+            result = page.evaluate(js_fill, {"sl": sl, "tp": tp})
+            if inspect.isawaitable(result):
+                result = self._run_async(result)
+            if isinstance(result, dict):
+                logger.info(f"[SIMPLE-CLICK] SL/TP fill: SL={result.get('slFilled')}, TP={result.get('tpFilled')}")
+        except Exception as e:
+            logger.debug(f"[SIMPLE-CLICK] SL/TP fill error: {e}")
+            # Fallback to pyautogui typing
+            try:
+                pyautogui.press('tab', presses=4, interval=0.03)
+                if sl > 0:
+                    pyautogui.hotkey('ctrl', 'a')
+                    pyautogui.press('backspace')
+                    pyautogui.write(str(round(sl, 2)), interval=0.01)
+                pyautogui.press('tab')
+                if tp > 0:
+                    pyautogui.hotkey('ctrl', 'a')
+                    pyautogui.press('backspace')
+                    pyautogui.write(str(round(tp, 2)), interval=0.01)
+                pyautogui.press('enter')
+            except Exception:
+                pass
 
     def _click_buy_sell_button(self, browser_agent, action: str) -> bool:
         """Find and click the Buy or Sell button on TradingView using CDP + pyautogui."""

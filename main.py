@@ -1398,7 +1398,19 @@ class VcaniTradeEngine:
                 _rpa_result = {"success": False, "reason": "timeout"}
                 def _rpa_worker():
                     try:
-                        # Try HUMAN-LIKE execution first (Bézier mouse, variable typing, anti-detection)
+                        # Try SIMPLE-CLICK first (no navigation, no typing the ticker)
+                        # This is what the user wants: just click the BUY/SELL button
+                        # on the current chart. User has the watchlist set up.
+                        if self.browser_agent and getattr(self.browser_agent, 'page', None):
+                            simple_ok = self.rpa_executor.execute_trade_simple_click(
+                                self.browser_agent, true_symbol, action,
+                                sl=sl, tp=tp,
+                            )
+                            if simple_ok:
+                                _rpa_result["success"] = True
+                                _rpa_result["reason"] = "simple-click (no nav, no typing)"
+                                return
+                        # Try HUMAN-LIKE execution second (Bézier mouse, variable typing)
                         if self.browser_agent and getattr(self.browser_agent, 'page', None):
                             human_ok = self.rpa_executor.execute_trade_human(
                                 self.browser_agent, true_symbol, action,
@@ -1408,7 +1420,7 @@ class VcaniTradeEngine:
                                 _rpa_result["success"] = True
                                 _rpa_result["reason"] = "human-like RPA"
                                 return
-                        # Fall back to standard execution
+                        # Fall back to standard execution (may navigate, but better than nothing)
                         _rpa_result["success"] = self.rpa_executor.execute_trade(trade)
                         _rpa_result["reason"] = getattr(self.rpa_executor, 'last_failure_reason', '') or "no-reason"
                     except Exception as e:
