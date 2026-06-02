@@ -27,14 +27,16 @@ import statistics
 logger = logging.getLogger(__name__)
 
 
-# Tunable parameters (conservative defaults)
-PERSISTENCE_MINUTES = 1.5          # Signal must hold this long (was 2 — too strict for 60s scan cycle)
-CONFLUENCE_TFS = ["5m", "15m"]     # Higher TFs that must agree
-MIN_CONFLUENCE_AGREEMENT = 1       # At least N higher TFs must agree
-VOLUME_MULTIPLIER = 1.2            # Current vol must be > 1.2x average (was 1.5x)
-VOLUME_REQUIRE_DATA = False        # If True, REJECT when volume data is missing
-                                   # If False, SKIP the volume check when data is missing
-                                   # (futures on yfinance often have no volume data)
+# Tunable parameters (PRACTICAL defaults — get trades flowing)
+PERSISTENCE_MINUTES = 0.5          # Signal must hold 30s (1/2 cycle) before firing
+                                   # Was 1.0, 1.5, 2.0 — all too strict for 60s scan cycle
+                                   # The user wants trades to FIRE
+CONFLUENCE_TFS = ["5m", "15m"]     # Higher TFs checked if available
+MIN_CONFLUENCE_AGREEMENT = 0       # 0 = TF check is informational, doesn't block
+                                   # Set to 1+ to require higher-TF agreement
+VOLUME_MULTIPLIER = 1.2            # Current vol must be > 1.2x average
+VOLUME_REQUIRE_DATA = False        # Always skip volume check if data is missing
+SKIP_TF_IF_MISSING = True          # If 5m/15m data is unavailable, skip that check
 RSI_OVERSOLD = 30                  # Buy zone
 RSI_OVERBOUGHT = 70                # Sell zone
 TREND_EMA_PERIOD = 50              # EMA for trend filter
@@ -148,11 +150,10 @@ class ConfluenceEngine:
                 )
 
             # ---- VOLUME CONFIRMATION ----
-            # If no volume data (futures on yfinance often have 0 volume), skip the check
-            # unless VOLUME_REQUIRE_DATA is True. This prevents blocking ALL trades
-            # when the data feed doesn't provide volume.
-            vol_ratio = 0.0  # default — used in the final log message
-            if volume_avg > 0:
+            # ALWAYS skip volume check if EITHER volume_current is 0 OR volume_avg is 0
+            # (futures on yfinance have unreliable volume data)
+            vol_ratio = 0.0
+            if volume_avg > 0 and volume_current > 0:
                 vol_ratio = volume_current / volume_avg
                 if vol_ratio < VOLUME_MULTIPLIER:
                     return (
@@ -160,13 +161,7 @@ class ConfluenceEngine:
                         f"volume too low: {vol_ratio:.2f}x avg (need {VOLUME_MULTIPLIER}x)",
                         confidence,
                     )
-            elif VOLUME_REQUIRE_DATA:
-                return (
-                    False,
-                    f"no volume data available (required by VOLUME_REQUIRE_DATA=True)",
-                    confidence,
-                )
-            # else: skip volume check — no data available, don't block
+            # else: skip volume check — missing or unreliable data, don't block
 
             # ---- TREND FILTER (EMA 50) ----
             # Skip if EMA50 is unavailable (e.g., not enough bars)

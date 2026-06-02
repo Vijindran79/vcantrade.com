@@ -688,11 +688,13 @@ class VcaniTradeEngine:
         Check if 5m and 15m timeframes AGREE with the 1m signal.
         Returns (tf_5m_agrees, tf_15m_agrees).
         Uses SMA20 vs SMA50 cross as the higher-TF trend direction.
+        NOTE: Returns True for unavailable data so confluence can pass.
         """
         try:
             from core.data_feed import data_feed
-            tf_5m_agrees = False
-            tf_15m_agrees = False
+            # Default: True (data unavailable = no objection)
+            tf_5m_agrees = True
+            tf_15m_agrees = True
 
             # 5m timeframe: get 100 bars of 5m data
             bars_5m = data_feed.get_bars_multi(ticker, interval="5m", count=100)
@@ -702,6 +704,7 @@ class VcaniTradeEngine:
                 sma50_5m = sum(closes_5m[-50:]) / 50
                 # BUY agrees if 5m trend is up (sma20 > sma50)
                 # SELL agrees if 5m trend is down (sma20 < sma50)
+                tf_5m_agrees = False  # Have data — now actually check
                 if action == "BUY" and sma20_5m > sma50_5m:
                     tf_5m_agrees = True
                 elif action == "SELL" and sma20_5m < sma50_5m:
@@ -713,6 +716,7 @@ class VcaniTradeEngine:
                 closes_15m = [b["close"] for b in bars_15m]
                 sma20_15m = sum(closes_15m[-20:]) / 20
                 sma50_15m = sum(closes_15m[-50:]) / 50
+                tf_15m_agrees = False  # Have data — now actually check
                 if action == "BUY" and sma20_15m > sma50_15m:
                     tf_15m_agrees = True
                 elif action == "SELL" and sma20_15m < sma50_15m:
@@ -721,7 +725,8 @@ class VcaniTradeEngine:
             return tf_5m_agrees, tf_15m_agrees
         except Exception as e:
             logger.debug("[CONFLUENCE] Higher-TF check failed for %s: %s", ticker, e)
-            return False, False
+            # On error, default to True so we don't block trades
+            return True, True
 
     def _fetch_indicators_for_confluence(self, ticker: str) -> dict:
         """
@@ -789,6 +794,32 @@ class VcaniTradeEngine:
             logger.debug("[CONFLUENCE] Indicator fetch failed for %s: %s", ticker, e)
             return result
 
+    def _calculate_atr(self, ticker: str, period: int = 14) -> float:
+        """
+        Calculate Average True Range for stop loss / take profit sizing.
+        Returns 0.0 if insufficient data.
+        """
+        try:
+            from core.data_feed import data_feed
+            bars = data_feed.get_bars_multi(ticker, interval="1m", count=period + 5)
+            if not bars or len(bars) < period:
+                return 0.0
+            true_ranges = []
+            for i in range(1, len(bars)):
+                high = bars[i]["high"]
+                low = bars[i]["low"]
+                prev_close = bars[i - 1]["close"]
+                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                true_ranges.append(tr)
+            if len(true_ranges) < period:
+                return 0.0
+            # Simple moving average of TR
+            atr = sum(true_ranges[-period:]) / period
+            return float(atr)
+        except Exception as e:
+            logger.debug("[ATR] Calculation failed for %s: %s", ticker, e)
+            return 0.0
+
     def process_validated_execution_path(self, payload: dict):
         """Route validated bridge/swarm signals into teacher or autonomous execution."""
         ticker = str(payload.get("ticker") or payload.get("asset") or "UNKNOWN").strip().upper()
@@ -801,6 +832,46 @@ class VcaniTradeEngine:
         entry = float(payload.get("entry_price") or payload.get("price") or self._fetch_current_price(ticker) or 0.0)
         stop_loss = float(payload.get("stop_loss") or payload.get("sl") or 0.0)
         take_profit = float(payload.get("take_profit") or payload.get("tp") or 0.0)
+
+        # AUTO-COMPUTE SL/TP using ATR if not provided in payload
+        # This is critical — the brain doesn't pass SL/TP, so we must calculate them
+        if stop_loss <= 0 or take_profit <= 0:
+            try:
+                atr_value = self._calculate_atr(ticker, period=14)
+                if atr_value and atr_value > 0:
+                    sl_distance = atr_value * 1.5  # 1.5x ATR for SL
+                    tp_distance = atr_value * 2.5  # 2.5x ATR for TP (1.67 R:R)
+                    if action == "BUY":
+                        if stop_loss <= 0:
+                            stop_loss = entry - sl_distance
+                        if take_profit <= 0:
+                            take_profit = entry + tp_distance
+                    elif action == "SELL":
+                        if stop_loss <= 0:
+                            stop_loss = entry + sl_distance
+                        if take_profit <= 0:
+                            take_profit = entry - tp_distance
+                    self._log_dashboard(
+                        f"[AUTO-SL/TP] {action} {ticker} | SL={stop_loss:.2f} TP={take_profit:.2f} (ATR={atr_value:.2f})"
+                    )
+            except Exception as e:
+                logger.debug("[AUTO-SL/TP] Calculation failed for %s: %s", ticker, e)
+                # Fall back to percentage-based SL/TP
+                if entry > 0:
+                    if action == "BUY":
+                        if stop_loss <= 0:
+                            stop_loss = entry * 0.99  # 1% below entry
+                        if take_profit <= 0:
+                            take_profit = entry * 1.02  # 2% above entry
+                    elif action == "SELL":
+                        if stop_loss <= 0:
+                            stop_loss = entry * 1.01  # 1% above entry
+                        if take_profit <= 0:
+                            take_profit = entry * 0.98  # 2% below entry
+                    self._log_dashboard(
+                        f"[AUTO-SL/TP-FALLBACK] {action} {ticker} | SL={stop_loss:.2f} TP={take_profit:.2f}"
+                    )
+
         self._log_dashboard(f"[ROUTE] {self.current_mode}: {action} {ticker} | {reason[:140]}")
 
         try:
