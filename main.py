@@ -669,11 +669,22 @@ class VcaniTradeEngine:
         return normalized or ["BTCUSD"]
     
     def _init_browser_agent(self):
-        """Initialize browser agent for TradingView RPA."""
+        """Initialize browser agent for TradingView RPA and connect via CDP."""
         try:
             self.browser_agent = BrowserAgent(headless=False)
             self.rpa_executor.set_browser_agent(self.browser_agent)
             logger.info("[BROWSER] Browser agent initialized")
+            # Connect to Chrome via CDP in a background thread (start() is async)
+            import threading
+            def _connect_chrome():
+                try:
+                    import asyncio as _asyncio
+                    _asyncio.run(self.browser_agent.start())
+                    logger.info("[BROWSER] CDP connected - ready for TradingView RPA")
+                except Exception as e:
+                    logger.error("[BROWSER] CDP connect failed: %s - RPA will use fallback paths", e)
+            t = threading.Thread(target=_connect_chrome, daemon=True)
+            t.start()
         except Exception as e:
             logger.warning("[BROWSER] Browser agent init failed: %s", e)
             self.browser_agent = None
@@ -1104,18 +1115,32 @@ class VcaniTradeEngine:
             success = False
             errors = []
             
-            # Path A: TradingView RPA (primary for all assets)
+            # Path A: TradingView RPA (primary for all assets) with 30s hard timeout
             active_mode = config.get_active_mode()
             logger.info("[EXEC] Attempting %s execution for %s %s (%s) @ %.2f", active_mode, action, ticker, true_symbol, entry)
             
             try:
-                success = self.rpa_executor.execute_trade(trade)
-                if success:
-                    logger.info("[EXEC] TradingView RPA SUCCESS for %s %s", action, true_symbol)
+                import threading as _threading
+                _rpa_result = {"success": False, "reason": "timeout"}
+                def _rpa_worker():
+                    try:
+                        _rpa_result["success"] = self.rpa_executor.execute_trade(trade)
+                        _rpa_result["reason"] = getattr(self.rpa_executor, 'last_failure_reason', '') or "no-reason"
+                    except Exception as e:
+                        _rpa_result["reason"] = str(e)
+                _rpa_thread = _threading.Thread(target=_rpa_worker, daemon=True)
+                _rpa_thread.start()
+                _rpa_thread.join(timeout=30)
+                if _rpa_thread.is_alive():
+                    logger.warning("[EXEC] TradingView RPA timed out after 30s for %s %s — falling through", action, true_symbol)
+                    errors.append("TradingView RPA: 30s timeout (CDP may not be connected)")
                 else:
-                    reason = getattr(self.rpa_executor, 'last_failure_reason', 'unknown')
-                    errors.append(f"TradingView RPA: {reason}")
-                    logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, true_symbol, reason)
+                    success = _rpa_result["success"]
+                    if success:
+                        logger.info("[EXEC] TradingView RPA SUCCESS for %s %s", action, true_symbol)
+                    else:
+                        errors.append(f"TradingView RPA: {_rpa_result['reason']}")
+                        logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, true_symbol, _rpa_result['reason'])
             except Exception as e:
                 errors.append(f"TradingView RPA exception: {e}")
                 logger.error("[EXEC] TradingView RPA exception for %s %s: %s", action, true_symbol, e)

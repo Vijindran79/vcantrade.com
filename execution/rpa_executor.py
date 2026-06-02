@@ -99,7 +99,7 @@ class RPAExecutor:
         self._playwright = None
         self._browser = None
         self._page = None
-        self._playwright_available = False  # Disabled: moving to MT5/Tradovate APIs, no browser scraping needed
+        self._playwright_available = self._check_playwright()
         logger.info("[LION] RPA Hand: Clean Lion-Mode initialized (Playwright=%s)", self._playwright_available)
 
     def _check_playwright(self):
