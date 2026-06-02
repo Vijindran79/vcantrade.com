@@ -613,6 +613,13 @@ class VcaniTradeEngine:
         except Exception:
             pass
 
+        # SOUND: track confidence per ticker — play "level up" or "ready to buy" sounds
+        try:
+            from core.audio_alerts import on_confidence_update
+            on_confidence_update(ticker, confidence)
+        except Exception:
+            pass
+
         # Route actionable BUY/SELL signals into the real execution path
         if action in {"BUY", "SELL"} and ticker not in {"", "UNKNOWN"}:
             try:
@@ -1186,6 +1193,15 @@ class VcaniTradeEngine:
                             self._log_dashboard(
                                 f">>> CLICKED! {action} {ticker} (paper mode — no real money)"
                             )
+                        # SOUND: play buy or sell sound on successful execution
+                        try:
+                            from core.audio_alerts import play_buy_sound, play_sell_sound
+                            if action == "BUY":
+                                play_buy_sound()
+                            elif action == "SELL":
+                                play_sell_sound()
+                        except Exception:
+                            pass
                     else:
                         errors.append(f"TradingView RPA: {_rpa_result['reason']}")
                         logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, true_symbol, _rpa_result['reason'])
@@ -1193,6 +1209,12 @@ class VcaniTradeEngine:
                         self._log_dashboard(
                             f"!!! DID NOT CLICK {action} {ticker} — reason: {_rpa_result['reason'][:120]}"
                         )
+                        # SOUND: play warning on failure
+                        try:
+                            from core.audio_alerts import play_warning_sound
+                            play_warning_sound()
+                        except Exception:
+                            pass
             except Exception as e:
                 errors.append(f"TradingView RPA exception: {e}")
                 logger.error("[EXEC] TradingView RPA exception for %s %s: %s", action, true_symbol, e)

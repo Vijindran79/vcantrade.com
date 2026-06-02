@@ -1037,7 +1037,7 @@ class CommandCenter(QWidget):
         test_row.addWidget(self.force_test_btn)
 
         # Dry Run toggle
-        self.dry_run_btn = QPushButton("DRY RUN: ON")
+        self.dry_run_btn = QPushButton("HAND OFF (Paper)")
         self.dry_run_btn.setMinimumHeight(32)
         self.dry_run_btn.setCheckable(True)
         self.dry_run_btn.setChecked(True)
@@ -1075,22 +1075,32 @@ class CommandCenter(QWidget):
         self.log("[BOLT] FORCE HAND TEST: visible TradingView hand-move requested")
 
     def _toggle_dry_run(self):
-        """Toggle dry run mode."""
+        """Toggle dry run mode — shown to user as plain English HAND ON / HAND OFF."""
         is_dry_run = self.dry_run_btn.isChecked()
         if is_dry_run:
-            self.dry_run_btn.setText("DRY RUN: ON")
+            self.dry_run_btn.setText("HAND OFF (Paper)")
             self.dry_run_btn.setStyleSheet(f"""
                 QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
             """)
-            self.log("[OK] DRY RUN: ON - Paper trading mode")
+            self.log("[OK] HAND IS OFF — Paper mode (no real money). Bot will NOT click real trades.")
+            try:
+                from core.audio_alerts import play_hand_off_sound
+                play_hand_off_sound()
+            except Exception:
+                pass
         else:
-            self.dry_run_btn.setText("DRY RUN: OFF")
+            self.dry_run_btn.setText("HAND ON (Real Money)")
             self.dry_run_btn.setStyleSheet(f"""
                 QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 6px;
                              font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
             """)
-            self.log("[WARN] DRY RUN: OFF - Live trading mode (CAUTION!)")
+            self.log("[WARN] HAND IS ON — Live trading (REAL MONEY). Bot WILL click real trades.")
+            try:
+                from core.audio_alerts import play_hand_on_sound
+                play_hand_on_sound()
+            except Exception:
+                pass
 
     def _apply_auto_risk_state(self, initial: bool = False):
         """Toggle manual TP/SL inputs against structural Profit Lock risk logic."""
