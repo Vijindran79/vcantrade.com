@@ -694,20 +694,40 @@ class VcaniTradeEngine:
         if self.is_running:
             logger.warning("Engine already running")
             return
-        
+
         self.is_running = True
-        
+
+        # ===== SIMPLE ENGLISH STATUS BANNER =====
+        # "HAND ON" = bot will click real trades with real money
+        # "HAND OFF" = bot is in paper mode, will NOT place real orders
+        if config.DRY_RUN:
+            self._log_dashboard("")
+            self._log_dashboard("============================================")
+            self._log_dashboard("  HAND IS OFF - PAPER MODE (NO REAL MONEY)")
+            self._log_dashboard("  Bot will LOG signals but NOT click trades.")
+            self._log_dashboard("  Set DRY_RUN=False in .env to go live.")
+            self._log_dashboard("============================================")
+            self._log_dashboard("")
+        else:
+            self._log_dashboard("")
+            self._log_dashboard("============================================")
+            self._log_dashboard("  HAND IS ON - LIVE TRADING (REAL MONEY)")
+            self._log_dashboard("  Bot WILL click BUY/SELL on TradingView.")
+            self._log_dashboard("  Every signal = real money at stake.")
+            self._log_dashboard("============================================")
+            self._log_dashboard("")
+
         # Start periodic scanner (scanner is NOT a thread - use QTimer)
         self._start_scanner_timer()
         QTimer.singleShot(250, self._run_scanner_cycle)
-        
+
         # Start EXIT MONITOR — the missing piece that manages open positions
         self._start_exit_monitor()
-        
+
         # Start trade monitor (it manages its own internal thread)
         if hasattr(self.trade_monitor, 'start'):
             self.trade_monitor.start()
-        
+
         # Start background threads
         if self.cloud_scanner:
             self.cloud_scanner.start()
@@ -720,13 +740,13 @@ class VcaniTradeEngine:
         if self.data_scout_listener:
             self.data_scout_listener.start()
             self._log_dashboard("[DATA-SCOUT] Listener armed")
-        
+
         # Start Hunter thread (screenshot → vision LLM pipeline)
         if self.hunter_thread and config.USE_VISION:
             self.hunter_thread.start()
             self._log_dashboard("[HUNTER] Vision Hunter armed — screenshot analysis active")
             _speak_alert("Vision Hunter armed. Screenshot analysis active.")
-        
+
         logger.info("[ENGINE] VcaniTrade Engine STARTED")
     
     def _start_scanner_timer(self):
@@ -1118,6 +1138,10 @@ class VcaniTradeEngine:
             # Path A: TradingView RPA (primary for all assets) with 30s hard timeout
             active_mode = config.get_active_mode()
             logger.info("[EXEC] Attempting %s execution for %s %s (%s) @ %.2f", active_mode, action, ticker, true_symbol, entry)
+            # SIMPLE ENGLISH: tell the user the bot is about to click
+            self._log_dashboard(
+                f">>> ATTEMPTING TO CLICK {action} {ticker} on TradingView... (waiting up to 45s)"
+            )
             
             try:
                 import threading as _threading
@@ -1145,13 +1169,30 @@ class VcaniTradeEngine:
                 if _rpa_thread.is_alive():
                     logger.warning("[EXEC] TradingView RPA timed out after 45s for %s %s — falling through", action, true_symbol)
                     errors.append("TradingView RPA: 45s timeout (CDP may not be connected)")
+                    # SIMPLE ENGLISH: tell user what happened
+                    self._log_dashboard(
+                        f"!!! DID NOT CLICK {action} {ticker} — took too long (>45s). Check Chrome is open with TradingView."
+                    )
                 else:
                     success = _rpa_result["success"]
                     if success:
                         logger.info("[EXEC] TradingView RPA SUCCESS for %s %s", action, true_symbol)
+                        # SIMPLE ENGLISH: confirm the click happened
+                        if not config.DRY_RUN:
+                            self._log_dashboard(
+                                f">>> CLICKED! {action} {ticker} placed on TradingView (real money)"
+                            )
+                        else:
+                            self._log_dashboard(
+                                f">>> CLICKED! {action} {ticker} (paper mode — no real money)"
+                            )
                     else:
                         errors.append(f"TradingView RPA: {_rpa_result['reason']}")
                         logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, true_symbol, _rpa_result['reason'])
+                        # SIMPLE ENGLISH: tell user it failed
+                        self._log_dashboard(
+                            f"!!! DID NOT CLICK {action} {ticker} — reason: {_rpa_result['reason'][:120]}"
+                        )
             except Exception as e:
                 errors.append(f"TradingView RPA exception: {e}")
                 logger.error("[EXEC] TradingView RPA exception for %s %s: %s", action, true_symbol, e)
@@ -1381,12 +1422,22 @@ class VcaniTradeEngine:
         if entry_price <= 0:
             logger.info("[AUDIT] No entry price for %s — allowing trade (best effort)", ticker)
             return True
-        
-        # Check slippage
-        current_price = self._fetch_current_price(ticker)
+
+        # Check slippage — with a 5s hard timeout to never block execution
+        import concurrent.futures
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self._fetch_current_price, ticker)
+                current_price = future.result(timeout=5)
+        except concurrent.futures.TimeoutError:
+            logger.warning("[AUDIT] Price fetch timed out for %s — allowing trade", ticker)
+            return True
+        except Exception:
+            return True
+
         if current_price <= 0:
             return True  # Proceed if can't fetch price
-        
+
         slippage_pct = abs(current_price - entry_price) / entry_price * 100
         if slippage_pct > config.MAX_SLIPPAGE_PERCENT:
             logger.warning(
@@ -1394,19 +1445,13 @@ class VcaniTradeEngine:
                 slippage_pct, config.MAX_SLIPPAGE_PERCENT, ticker
             )
             return False
-        
+
         return True
-    
+
     def _fetch_current_price(self, ticker: str) -> float:
         """Fetch current price for a ticker."""
         try:
-            if config.get_active_mode() == "TRADINGVIEW" and self.browser_agent:
-                if hasattr(self.browser_agent, 'get_current_price'):
-                    price = self.browser_agent.get_current_price(ticker)  # type: ignore[union-attr]
-                    if price and price > 0:
-                        return price
-            
-            # Try yfinance directly for crypto and other assets
+            # Try yfinance directly first (fast, no browser blocking)
             try:
                 from core.symbol_mapper import normalize_yfinance_symbol
                 import yfinance as yf  # type: ignore[import-untyped]
@@ -1417,7 +1462,7 @@ class VcaniTradeEngine:
                     return float(hist["Close"].iloc[-1])
             except Exception:
                 pass
-            
+
             # Fallback to scanner data
             try:
                 df = self.scanner._fetch_market_data(ticker)
@@ -1425,7 +1470,7 @@ class VcaniTradeEngine:
                     return float(df["Close"].iloc[-1])
             except Exception:
                 pass
-            
+
             return 0.0
         except Exception:
             return 0.0
