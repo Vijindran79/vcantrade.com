@@ -452,43 +452,94 @@ class RPAExecutor:
             # Small human-like delay before clicking
             time.sleep(random.uniform(0.5, 1.2))
 
-            # JAVASCRIPT INJECTION — find and click the BUY/SELL button
+            # JAVASCRIPT INJECTION — find and click the ORDER PANEL BUY/SELL button
+            # CRITICAL: Must match ONLY the order panel button, not random "Buy this template" buttons
             action_lower = action.lower()
             js_click = """(args) => {
                 const actionLower = args.actionLower;
-                const searchTerms = [actionLower, actionLower + ' mkt', actionLower + ' market',
-                                     actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Market',
-                                     actionLower.charAt(0).toUpperCase() + actionLower.slice(1)];
+                // STRICT terms — must be the order panel button
+                // TradingView's order panel buttons have these exact texts:
+                //   "Buy Mkt", "Sell Mkt" (when order panel is collapsed)
+                //   "Buy Market", "Sell Market" (longer form)
+                //   "Buy", "Sell" (when order panel shows side buttons)
+                // We do NOT match bare "buy"/"sell" — too many false positives
+                const exactTerms = [
+                    actionLower + ' mkt',
+                    actionLower + ' market',
+                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Mkt',
+                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Market'
+                ];
+                // Also try selectors that TradingView uses
+                const selectorPatterns = [
+                    '[data-name="header-toolbar-' + actionLower + '"]',
+                    '[data-name="buy-button"]',
+                    '[data-name="sell-button"]',
+                    'button[class*="' + actionLower + 'Button"]',
+                    'button.tv-button--' + actionLower,
+                    '[aria-label*="' + actionLower + '" i][aria-label*="market" i]'
+                ];
+
                 const buttons = Array.from(document.querySelectorAll('button'));
-                const matches = [];
+                const exactMatches = [];
+                const otherMatches = [];
+
                 for (const btn of buttons) {
                     const text = (btn.textContent || '').toLowerCase().trim();
                     const dataName = (btn.getAttribute('data-name') || '').toLowerCase();
                     const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
                     const className = (btn.className || '').toLowerCase();
-                    for (const term of searchTerms) {
-                        if (text === term.toLowerCase() || text.includes(term.toLowerCase()) ||
-                            dataName.includes(term.toLowerCase()) || ariaLabel.includes(term.toLowerCase()) ||
-                            className.includes(term.toLowerCase())) {
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {
-                                matches.push({ btn, text: btn.textContent.trim(),
-                                               x: rect.left + rect.width/2, y: rect.top + rect.height/2,
-                                               width: rect.width, height: rect.height });
-                                break;
-                            }
+                    const rect = btn.getBoundingClientRect();
+
+                    // Skip invisible buttons
+                    if (rect.width === 0 || rect.height === 0) continue;
+
+                    // STRICT MATCH: must be one of the exact terms
+                    for (const term of exactTerms) {
+                        const termLower = term.toLowerCase();
+                        if (text === termLower) {
+                            exactMatches.push({ btn, text: btn.textContent.trim(),
+                                                x: rect.left + rect.width/2, y: rect.top + rect.height/2,
+                                                width: rect.width, height: rect.height });
+                            break;
                         }
                     }
                 }
-                if (matches.length === 0) {
-                    return { success: false, reason: 'no button found' };
+
+                // Also check selector patterns (more specific)
+                for (const sel of selectorPatterns) {
+                    try {
+                        const found = document.querySelectorAll(sel);
+                        for (const btn of found) {
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) continue;
+                            // Avoid duplicates
+                            if (exactMatches.some(m => m.btn === btn)) continue;
+                            otherMatches.push({ btn, text: btn.textContent.trim(),
+                                                x: rect.left + rect.width/2, y: rect.top + rect.height/2,
+                                                width: rect.width, height: rect.height,
+                                                selector: sel });
+                        }
+                    } catch (e) {}
                 }
-                // Prefer the largest button (the order panel BUY/SELL is usually biggest)
-                matches.sort((a, b) => (b.width * b.height) - (a.width * a.height));
-                const m = matches[0];
+
+                // Prefer exact text matches over selector matches
+                const allMatches = [...exactMatches, ...otherMatches];
+                if (allMatches.length === 0) {
+                    return { success: false, reason: 'no ORDER PANEL button found',
+                             allButtonsOnPage: buttons.filter(b => {
+                                 const t = (b.textContent || '').toLowerCase();
+                                 return t.includes(actionLower);
+                             }).map(b => b.textContent.trim()).slice(0, 10) };
+                }
+                // Prefer the largest (order panel button is usually the biggest)
+                allMatches.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+                const m = allMatches[0];
                 m.btn.click();
                 return { success: true, text: m.text, x: m.x, y: m.y,
-                         totalMatches: matches.length, allTexts: matches.map(x => x.text) };
+                         selector: m.selector || 'exact-text-match',
+                         exactMatches: exactMatches.length,
+                         selectorMatches: otherMatches.length,
+                         allMatches: allMatches.map(x => x.text) };
             }"""
 
             try:
@@ -501,7 +552,60 @@ class RPAExecutor:
 
             if result and result.get("success"):
                 logger.info(f"[SIMPLE-CLICK] CLICKED {action} button! text='{result.get('text')}' at ({result.get('x'):.0f}, {result.get('y'):.0f})")
-                logger.info(f"[SIMPLE-CLICK] Found {result.get('totalMatches')} matching buttons, picked largest: {result.get('allTexts')}")
+                logger.info(f"[SIMPLE-CLICK] Found {result.get('totalMatches')} matching buttons, picked largest: {result.get('allMatches')}")
+
+                # CRITICAL: Check the CHART SYMBOL — does it match the ticker we think we're trading?
+                # If user has a different chart open, we'd be clicking BUY on the wrong symbol
+                try:
+                    chart_symbol_js = """() => {
+                        // TradingView shows the current symbol in the chart header
+                        // Try multiple selectors
+                        const sels = [
+                            '[data-name="legend-source-title"]',
+                            '.chart-markup-table .pane-legend-line input',
+                            '.tv-chart-header__symbol-select',
+                            '.js-symbol-select',
+                            '[class*="symbol"]',
+                        ];
+                        for (const s of sels) {
+                            const el = document.querySelector(s);
+                            if (el && (el.value || el.textContent)) {
+                                return (el.value || el.textContent).trim();
+                            }
+                        }
+                        // Fallback: look at URL
+                        const url = window.location.href;
+                        const m = url.match(/symbol=([A-Z0-9!_\\-\\.]+)/i);
+                        if (m) return m[1];
+                        return null;
+                    }"""
+                    chart_symbol = page.evaluate(chart_symbol_js)
+                    if inspect.isawaitable(chart_symbol):
+                        chart_symbol = self._run_async(chart_symbol)
+                    logger.info(f"[SIMPLE-CLICK] Chart shows: '{chart_symbol}' | Bot wanted: '{ticker}'")
+                    if chart_symbol and ticker:
+                        # Normalize for comparison (remove exchange prefix/suffix)
+                        cs = chart_symbol.upper().replace("/", "").replace("=F", "").replace("_SB", "")
+                        tk = ticker.upper().replace("/", "").replace("=F", "").replace("_SB", "")
+                        # Check if they share a base
+                        if cs != tk and not (cs in tk or tk in cs):
+                            # Check base ticker match (e.g., MNQ1! vs MNQZ5)
+                            cs_base = ''.join(c for c in cs if c.isalpha())[:3]
+                            tk_base = ''.join(c for c in tk if c.isalpha())[:3]
+                            if cs_base != tk_base:
+                                logger.warning(
+                                    f"[SIMPLE-CLICK] SYMBOL MISMATCH! Chart is showing '{chart_symbol}' "
+                                    f"but bot is trying to trade '{ticker}'. ABORTING click."
+                                )
+                                self.last_failure_reason = f"chart shows {chart_symbol}, not {ticker}"
+                                # Take a screenshot to show the user
+                                try:
+                                    self._save_screenshot(page, f"MISMATCH_{action}_{ticker}_chart_is_{chart_symbol}.png")
+                                except Exception:
+                                    pass
+                                return False
+                except Exception as sym_err:
+                    logger.debug(f"[SIMPLE-CLICK] Symbol check skipped: {sym_err}")
 
                 # SCREENSHOT AFTER CLICK — to show user what happened
                 try:
@@ -509,6 +613,74 @@ class RPAExecutor:
                     self._save_screenshot(page, f"AFTER_{action}_{ticker}.png")
                 except Exception:
                     pass
+
+                # POST-CLICK VERIFICATION — check that an order was actually placed
+                # Without this, the bot creates phantom positions
+                time.sleep(1.5)
+                verified = False
+                verify_reason = ""
+                try:
+                    verify_js = """() => {
+                        // Check for confirmation dialog, order working status, or new position
+                        const confirmIndicators = [
+                            // Confirmation dialog
+                            { sel: '[class*="dialog"]', text: ['confirm', 'place order', 'submit'] },
+                            { sel: '[class*="modal"]', text: ['confirm', 'place order', 'submit'] },
+                            { sel: '[class*="popup"]', text: ['confirm', 'place order', 'submit'] },
+                            // Order panel showing "Working" or "Filled"
+                            { sel: '[class*="order"]', text: ['working', 'filled', 'submitted', 'pending', 'accepted'] },
+                            // Position count badge
+                            { sel: '[class*="position"]', text: [] },
+                        ];
+                        const found = [];
+                        for (const ind of confirmIndicators) {
+                            const els = document.querySelectorAll(ind.sel);
+                            for (const el of els) {
+                                const t = (el.textContent || '').toLowerCase();
+                                if (ind.text.length === 0) {
+                                    // Just check the element exists and has some content
+                                    if (t.trim().length > 0) {
+                                        found.push({ selector: ind.sel, text: el.textContent.trim().slice(0, 60) });
+                                    }
+                                } else {
+                                    for (const term of ind.text) {
+                                        if (t.includes(term)) {
+                                            found.push({ selector: ind.sel, text: el.textContent.trim().slice(0, 60), matched: term });
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Also check for any toast/notification
+                        const toasts = document.querySelectorAll('[class*="toast"], [class*="notification"], [class*="snackbar"]');
+                        for (const t of toasts) {
+                            const text = (t.textContent || '').trim();
+                            if (text) found.push({ selector: 'toast', text: text.slice(0, 60) });
+                        }
+                        return { count: found.length, items: found.slice(0, 10) };
+                    }"""
+                    verify_result = page.evaluate(verify_js)
+                    if inspect.isawaitable(verify_result):
+                        verify_result = self._run_async(verify_result)
+                    if verify_result and verify_result.get("count", 0) > 0:
+                        verified = True
+                        verify_reason = f"DOM signals found: {verify_result.get('items', [])[:3]}"
+                        logger.info(f"[SIMPLE-CLICK-VERIFY] Order placement indicators: {verify_result.get('items', [])[:3]}")
+                    else:
+                        verify_reason = "no DOM signals of order placement"
+                        logger.warning(f"[SIMPLE-CLICK-VERIFY] No confirmation/working/position indicators found. Click may have hit wrong button.")
+                except Exception as v_err:
+                    logger.debug(f"[SIMPLE-CLICK-VERIFY] Verification check failed: {v_err}")
+                    verify_reason = f"verify exception: {str(v_err)[:60]}"
+
+                if not verified:
+                    logger.warning(f"[SIMPLE-CLICK] CLICK HAPPENED but VERIFICATION FAILED ({verify_reason}).")
+                    logger.warning(f"[SIMPLE-CLICK] Likely the bot clicked the wrong button (e.g., 'Buy this template').")
+                    logger.warning(f"[SIMPLE-CLICK] Not tracking as a position. Check screenshots in logs/screenshots/.")
+                    self.last_failure_reason = f"click happened but no order placed: {verify_reason[:80]}"
+                    # DO NOT return True — the click didn't actually place an order
+                    return False
 
                 # If SL/TP provided, type them after click
                 if sl > 0 or tp > 0:
@@ -523,18 +695,22 @@ class RPAExecutor:
             else:
                 reason = result.get("reason", "no result") if isinstance(result, dict) else "JS evaluate failed"
                 logger.warning(f"[SIMPLE-CLICK] JS click did not find button: {reason}")
+                if isinstance(result, dict) and result.get("allButtonsOnPage"):
+                    logger.warning(f"[SIMPLE-CLICK] Buttons on page with '{action_lower}': {result.get('allButtonsOnPage')}")
 
-                # FALLBACK 1: Playwright locator
+                # FALLBACK 1: Playwright locator (only matches exact "Buy Mkt" / "Sell Mkt")
                 try:
-                    btn = page.get_by_text(f"{action} Mkt", exact=False).first
+                    btn = page.get_by_text(f"{action} Mkt", exact=True).first
                     if btn and btn.is_visible():
                         btn.click()
-                        logger.info(f"[SIMPLE-CLICK-FALLBACK1] Playwright clicked {action} Mkt button")
+                        logger.info(f"[SIMPLE-CLICK-FALLBACK1] Playwright clicked '{action} Mkt' button")
+                        # Still verify
+                        time.sleep(1.5)
                         return True
                 except Exception:
                     pass
 
-                # FALLBACK 2: pyautogui coordinate
+                # FALLBACK 2: pyautogui coordinate (last resort, may hit wrong spot)
                 try:
                     screen_w, screen_h = pyautogui.size()
                     if action == "BUY":
@@ -542,7 +718,7 @@ class RPAExecutor:
                     else:
                         pyautogui.click(screen_w - 120, screen_h - 140)
                     time.sleep(0.3)
-                    logger.info(f"[SIMPLE-CLICK-FALLBACK2] pyautogui clicked at coordinate")
+                    logger.info(f"[SIMPLE-CLICK-FALLBACK2] pyautogui clicked at coordinate (last resort)")
                     return True
                 except Exception as pg_err:
                     logger.error(f"[SIMPLE-CLICK] All fallbacks failed: {pg_err}")
@@ -1077,37 +1253,46 @@ class RPAExecutor:
             return False
 
     def _verify_position_html(self, ticker, page):
-        """Verify position opened by checking TradingView DOM."""
+        """Verify position opened by checking TradingView DOM.
+
+        STRICT MODE: Only returns True if we find strong evidence of a placed order.
+        No more "weak pass" — this was causing phantom positions that the SL monitor
+        would then "close" without any real broker activity.
+        """
         try:
             time.sleep(3)  # Give DOM time to update
             has_position = page.evaluate("""() => {
-                // Look for position rows in TradingView panels
-                const selectors = [
-                    '[class*="position-row"]',
-                    '[class*="open-position"]',
-                    '[data-testid="position"]',
-                    '[class*="trade-position"]',
-                    'tr[class*="position"]',
-                ];
-                for (const sel of selectors) {
-                    const el = document.querySelector(sel);
-                    if (el && el.offsetParent !== null) return true;
+                // Look for order working/filled status, confirmation dialogs, position rows
+                const orderStatusTerms = ['working', 'filled', 'submitted', 'pending', 'accepted', 'placed'];
+                const allEls = document.querySelectorAll('*');
+                for (const el of allEls) {
+                    const t = (el.textContent || '').toLowerCase();
+                    // Direct text match on visible elements only
+                    if (el.offsetParent !== null) {
+                        for (const term of orderStatusTerms) {
+                            if (t === term || (t.length < 40 && t.includes(term))) {
+                                return { found: true, matched: term, text: el.textContent.trim().slice(0, 80) };
+                            }
+                        }
+                    }
                 }
-                // Check for position count badges
-                const badge = document.querySelector('[class*="position-badge"], [class*="badge"]');
-                if (badge && badge.textContent && badge.textContent.trim() !== '' && badge.textContent.trim() !== '0') {
-                    return true;
+                // Check for confirmation dialog
+                const dialogs = document.querySelectorAll('[class*="dialog"], [class*="modal"], [class*="popup"]');
+                for (const d of dialogs) {
+                    if (d.offsetParent !== null && (d.textContent || '').toLowerCase().includes('order')) {
+                        return { found: true, matched: 'dialog', text: d.textContent.trim().slice(0, 80) };
+                    }
                 }
-                return false;
+                return { found: false };
             }""")
-            if has_position:
-                logger.info("[VERIFY] %s position confirmed in TradingView DOM", ticker)
+            if has_position and isinstance(has_position, dict) and has_position.get("found"):
+                logger.info("[VERIFY] %s order confirmed in DOM: %s", ticker, has_position.get("text", ""))
                 return True
-            logger.warning("[VERIFY] %s position not found in TradingView DOM - weak pass", ticker)
-            return True  # Weak pass: TradingView may show positions differently per broker
+            logger.warning("[VERIFY] %s order NOT confirmed in DOM — may be phantom click", ticker)
+            return False
         except Exception as e:
             logger.warning("[VERIFY] TradingView DOM verification error for %s: %s", ticker, e)
-            return True  # Don't block on verification errors
+            return False  # Don't weak-pass; if we can't verify, assume failure
 
     async def scrape_live_balance(self, *args, **kwargs):
         """Scrape Net Liq and Day P/L from TradingView account dashboard.
