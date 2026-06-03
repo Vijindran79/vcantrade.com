@@ -464,16 +464,55 @@ class RPAExecutor:
                     actionLower + ' mkt',
                     actionLower + ' market',
                     actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Mkt',
-                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Market'
+                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Market',
+                    actionLower,
+                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1)
                 ];
                 const selectorPatterns = [
                     '[data-name="header-toolbar-' + actionLower + '"]',
+                    '[data-name="dom-' + actionLower + '-button"]',
+                    '[class*="' + actionLower + 'Button" i]',
+                    '[class*="order-' + actionLower + '" i]',
+                    '[class*="quick-' + actionLower + '" i]',
                     '[data-name="buy-button"]',
                     '[data-name="sell-button"]',
                     'button[class*="' + actionLower + 'Button"]',
                     'button.tv-button--' + actionLower,
                     '[aria-label*="' + actionLower + '" i][aria-label*="market" i]'
                 ];
+
+                // EXTRA: TradingView's DOM/quick-trade widget at top-left of chart.
+                // These are the green BUY and red SELL price boxes. They're not
+                // standard <button> elements — they're <div> with click handlers.
+                const domWidgetSelectors = [
+                    '[class*="ask" i][class*="price" i]',
+                    '[class*="bid" i][class*="price" i]',
+                    '[class*="buyButton" i]',
+                    '[class*="sellButton" i]',
+                    '[class*="dom-widget" i] [class*="' + actionLower + '" i]',
+                    '[class*="order-widget" i] [class*="' + actionLower + '" i]',
+                    '[class*="trading" i] [class*="' + actionLower + '" i]',
+                ];
+                const isBuy = actionLower === 'buy';
+                for (const sel of domWidgetSelectors) {
+                    try {
+                        const els = document.querySelectorAll(sel);
+                        for (const el of els) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) continue;
+                            const bg = window.getComputedStyle(el).backgroundColor || '';
+                            // Green = buy side, Red = sell side
+                            const isGreen = bg.includes('0, 1') || bg.includes('34, 1') || bg.includes('16, 1') || bg.includes('38, 1') || bg.includes('76, 1');
+                            const isRed = bg.includes('255, 0') || bg.includes('247, 8') || bg.includes('234, 5') || bg.includes('239, 6');
+                            if ((isBuy && isGreen) || (!isBuy && isRed)) {
+                                exactMatches.unshift({ text: el.textContent.trim().substring(0, 20),
+                                    x: rect.left + rect.width/2, y: rect.top + rect.height/2,
+                                    width: rect.width, height: rect.height,
+                                    selector: sel });
+                            }
+                        }
+                    } catch(e) {}
+                }
 
                 const buttons = Array.from(document.querySelectorAll('button'));
                 const exactMatches = [];
