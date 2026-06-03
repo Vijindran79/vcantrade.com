@@ -29,7 +29,7 @@ SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() ==
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
 # If only one symbol, the scanner locks onto it and executes directly.
-ACTIVE_SYMBOLS = ["MNQ1!", "ESM6", "MCL1!", "MGC1!"]
+ACTIVE_SYMBOLS = ["MNQ1!", "MES1!", "MCL1!", "MGC1!"]
 
 # Confidence-Based Take Profit Targets
 TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  ($50)
@@ -286,13 +286,13 @@ SYMBOL_FUZZY_TERMS = {
 # ===== ACTIVE WATCHLIST =====
 ACTIVE_WATCHLIST = [
     "MNQ1!",
-    "ESM6",
+    "MES1!",
     "MCL1!",
     "MGC1!",
 ]
 
 # ===== MULTI-ASSET HUNTER =====
-MULTI_ASSET_TICKERS = ["MNQ1!", "ESM6", "MCL1!", "MGC1!"]
+MULTI_ASSET_TICKERS = ["MNQ1!", "MES1!", "MCL1!", "MGC1!"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # ===== EXECUTION MODE SWITCH =====
