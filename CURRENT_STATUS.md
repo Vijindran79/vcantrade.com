@@ -1,12 +1,42 @@
 # Current Status
 
-Date: 2026-06-02
+Date: 2026-06-03
 
 ## Repository Sync
 
-- GitHub `origin/main` is current through commit `9e7553b`.
+- GitHub `origin/main` is current through commit `f37a00b`.
 - Local branch `main` matches `origin/main`.
 - Working tree clean.
+
+## Recent Critical Fix: Phantom Positions
+
+**Problem**: Bot was reporting "CLICKED! BUY MNQ1! placed on TradingView" but the
+user didn't see orders in their TradingView. The smart exit monitor would then
+"close" the position 2 minutes later when price hit the SL — but no real trade
+existed. These were **phantom positions**.
+
+**Root cause** (now fixed in `f37a00b`):
+1. The JavaScript click was matching ANY button with "buy" or "sell" in its text
+   (e.g., "Buy this template", "Sell alert"). The fix now matches ONLY
+   "Buy Mkt", "Sell Mkt", "Buy Market", "Sell Market" — the actual order panel
+   buttons.
+2. The old `_verify_position_html` had a "weak pass" that returned `True` even
+   when no order was detected in the DOM. Replaced with strict verification.
+3. The new `execute_trade_simple_click` had NO post-click verification at all.
+   Added: checks for confirmation dialog, "working"/"filled" status, position
+   indicators, AND verifies the chart actually shows the symbol being traded.
+
+**What the user will see now if the click hits the wrong button**:
+- Log: `[SIMPLE-CLICK] SYMBOL MISMATCH! Chart shows 'X' but bot is trying to trade 'Y'. ABORTING click.`
+- Log: `[SIMPLE-CLICK-VERIFY] No confirmation/working/position indicators found. Click may have hit wrong button.`
+- Log: `[SIMPLE-CLICK] CLICK HAPPENED but VERIFICATION FAILED. Not tracking as a position.`
+- Screenshot saved to `logs/screenshots/MISMATCH_*.png` for inspection
+
+**What the user will see now when a real order is placed**:
+- Log: `[SIMPLE-CLICK] Chart shows: 'MNQ1!' | Bot wanted: 'MNQ1!'`
+- Log: `[SIMPLE-CLICK-VERIFY] Order placement indicators: [{...working...}]`
+- Log: `>>> CLICKED! BUY MNQ1! placed on TradingView (real money)`
+- Screenshot saved to `logs/screenshots/AFTER_BUY_MNQ1!.png`
 
 ## What Is Already In The Repo (Live & Working)
 
