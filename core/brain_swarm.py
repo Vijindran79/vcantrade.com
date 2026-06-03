@@ -405,7 +405,7 @@ def analyze_chart_with_vision(
             # This is the critical step that turns the moondream description into a real SIGNAL
             brain_out = call_local_brain(
                 brain_prompt,
-                model="qwen:latest",
+                model="qwen2.5:1.5b-instruct-q4_K_M",
                 timeout=int(getattr(config, "OLLAMA_PREDATOR_VERDICT_TIMEOUT", 25)),
                 num_predict=int(getattr(config, "OLLAMA_BRAIN_NUM_PREDICT", 96)),
             )
@@ -702,30 +702,40 @@ RULES:
 Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under 100 chars"}}
 """
         
-        # === SEQUENTIAL SWARM (VRAM-safe) ===
-        # Single model call with strict timeout. If LLM is too slow on this hardware,
-        # we fall back to rule-based verdict using the proposed_action (which already
-        # passed the scanner's technical filters).
+        # === PARALLEL SWARM (Friday-working config restored) ===
+        # Three different LLMs fire simultaneously. Each brings a different
+        # perspective. Total time = slowest single call (~3-5s) instead of
+        # 3× sequential (~15s). This was the setup that gave "superb" results.
         models = [
-            ("qwen2.5:0.5b", "QWEN-FAST"),
+            ("qwen2.5:1.5b-instruct-q4_K_M", "QWEN-VIBE"),
+            ("gemma:2b", "GEMMA-LIQUIDITY"),
+            ("qwen2.5-coder:1.5b", "CODER-CLOSER"),
         ]
         
         results = []
         import time as _time
+        import concurrent.futures
         
-        for model_name, label in models:
+        # Fire all 3 models in parallel threads (VRAM handles sequential
+        # internally via Ollama's queue, but we get overlap on CPU pre/post).
+        def _call_model(model_name, label):
             try:
-                result = call_local_brain(prompt, model=model_name, timeout=15)
-                if "error" not in result:
-                    results.append((label, result))
-                    logger.info("[SWARM] %s responded: %s", label, str(result.get("signal", "?"))[:20])
-                else:
-                    logger.warning("[SWARM] %s error: %s", label, str(result.get("error", ""))[:80])
+                return label, call_local_brain(prompt, model=model_name, timeout=15)
             except Exception as e:
-                logger.warning("[SWARM] %s exception: %s", label, str(e)[:80])
-            
-            # VRAM cooldown
-            _time.sleep(1)
+                return label, {"error": str(e)}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(_call_model, m, l) for m, l in models]
+            for future in concurrent.futures.as_completed(futures, timeout=20):
+                try:
+                    label, result = future.result()
+                    if "error" not in result:
+                        results.append((label, result))
+                        logger.info("[SWARM] %s responded: %s", label, str(result.get("signal", "?"))[:20])
+                    else:
+                        logger.warning("[SWARM] %s error: %s", label, str(result.get("error", ""))[:80])
+                except Exception as e:
+                    logger.warning("[SWARM] parallel call exception: %s", str(e)[:80])
         
         # === RULE-BASED FALLBACK ===
         # If LLM is unavailable/slow, commit to the proposed action since the
@@ -881,7 +891,7 @@ Return JSON only:
     
     async def compute_sequential_swarm_consensus(self, ticker: str, technical_strength: float) -> float:
         """Runs swarm analysis models sequentially with 8-second thread-gate protection to prevent VRAM jams."""
-        models = ["qwen:latest", "qwen:latest", "qwen:latest"]
+        models = ["qwen2.5:1.5b-instruct-q4_K_M", "gemma:2b", "qwen2.5-coder:1.5b"]
         verdicts = []
         base_url = "http://127.0.0.1:11434/api/generate"
         
