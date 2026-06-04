@@ -459,6 +459,11 @@ class RPAExecutor:
             action_lower = action.lower()
             js_find_button = """(args) => {
                 const actionLower = args.actionLower;
+                // Declare match arrays FIRST (the domWidget loop below uses
+                // exactMatches before the old declaration point — that was a
+                // ReferenceError crashing the whole finder).
+                const exactMatches = [];
+                const otherMatches = [];
                 // STRICT terms — must be the order panel button, not random text
                 const exactTerms = [
                     actionLower + ' mkt',
@@ -469,6 +474,9 @@ class RPAExecutor:
                     actionLower.charAt(0).toUpperCase() + actionLower.slice(1)
                 ];
                 const selectorPatterns = [
+                    // CONFIRMED live via CDP 2026-06-04 — these are THE buttons:
+                    '[data-name="' + actionLower + '-order-button"]',
+                    '[class*="' + actionLower + 'Button-"]',
                     '[data-name="header-toolbar-' + actionLower + '"]',
                     '[data-name="dom-' + actionLower + '-button"]',
                     '[class*="' + actionLower + 'Button" i]',
@@ -515,8 +523,6 @@ class RPAExecutor:
                 }
 
                 const buttons = Array.from(document.querySelectorAll('button'));
-                const exactMatches = [];
-                const otherMatches = [];
 
                 for (const btn of buttons) {
                     const text = (btn.textContent || '').toLowerCase().trim();
@@ -561,7 +567,14 @@ class RPAExecutor:
                                  return t.includes(actionLower);
                              }).map(b => b.textContent.trim()).slice(0, 10) };
                 }
-                allMatches.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+                // Prefer confirmed -order-button / *Button- selectors over fuzzy text.
+                const rank = (s) => {
+                    if (!s) return 9;
+                    if (s.includes('-order-button')) return 0;
+                    if (s.includes('Button-')) return 1;
+                    return 5;
+                };
+                allMatches.sort((a, b) => rank(a.selector) - rank(b.selector));
                 const m = allMatches[0];
                 return { success: true, text: m.text, x: m.x, y: m.y,
                          width: m.width, height: m.height,
