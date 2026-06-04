@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 # Tunable parameters (PRACTICAL defaults — get trades flowing)
-PERSISTENCE_MINUTES = 0.5          # Signal must hold 30s (1/2 cycle) before firing
-                                   # Was 1.0, 1.5, 2.0 — all too strict for 60s scan cycle
-                                   # The user wants trades to FIRE
+PERSISTENCE_MINUTES = 0.0          # DISABLED: Let signals fire immediately once brain confirms.
+                                   # The confluence filters (TF alignment, EMA, RSI) already
+                                   # provide enough protection. Persistence timer was causing
+                                   # 85-100% signals to expire before they could execute.
 CONFLUENCE_TFS = ["5m", "15m"]     # Higher TFs checked if available
 MIN_CONFLUENCE_AGREEMENT = 0       # 0 = TF check is informational, doesn't block
                                    # Set to 1+ to require higher-TF agreement
