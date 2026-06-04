@@ -5,6 +5,10 @@ Humanized trade execution via keyboard hotkeys and mouse clicks.
 Uses Bezier curve mouse trajectories with non-uniform easing speed,
 image-based visual button verification, window safety interlocks,
 and micro-hesitation delays to appear indistinguishable from a human.
+
+CRITICAL FIX: When TRADOVATE_API_ENABLED=True, orders are placed via
+Tradovate REST API instead of DOM clicks, bypassing all Playwright/React
+quote-session disruption problems.
 """
 
 import logging
@@ -13,6 +17,8 @@ import os
 import random
 import time
 import ctypes
+import asyncio
+import aiohttp
 from typing import Callable, Dict, List, Optional, Tuple
 
 import config
@@ -205,25 +211,31 @@ class RPAExecutor:
         self.hotkey_close = config.HOTKEY_CLOSE
         self.on_blind_error = on_blind_error  # Safety interlock callback
         self.last_failure_reason = ""
-
+        
+        # CRITICAL FIX: Tradovate API execution flag
+        self.use_tradovate_api = config.TRADOVATE_API_ENABLED
+        
         # Load calibrated coordinates
         self.calibration_manager = CalibrationManager()
 
-        # Only import pyautogui if needed
+        # Only import pyautogui if needed (not required for API mode)
         self.pyautogui = None
         self._gw = None
         
-        try:
-            import pyautogui
-            import pygetwindow as gw
+        if not self.use_tradovate_api:
+            try:
+                import pyautogui
+                import pygetwindow as gw
 
-            self.pyautogui = pyautogui
-            self._gw = gw
-            pyautogui.FAILSAFE = True
-            pyautogui.PAUSE = 0  # Disable built-in delay — we handle it
-            logger.info("RPA Hand: PyAutoGUI & PyGetWindow initialized")
-        except ImportError:
-            logger.warning("RPA Hand: Required libraries missing - mouse execution disabled")
+                self.pyautogui = pyautogui
+                self._gw = gw
+                pyautogui.FAILSAFE = True
+                pyautogui.PAUSE = 0  # Disable built-in delay — we handle it
+                logger.info("RPA Hand: PyAutoGUI & PyGetWindow initialized")
+            except ImportError:
+                logger.warning("RPA Hand: Required libraries missing - mouse execution disabled")
+        else:
+            logger.info("RPA Hand: TRADOVATE API MODE ENABLED - bypassing DOM clicks")
 
     def get_permission_status(self) -> dict:
         """Return a best-effort snapshot of OS privileges required for mouse control."""
@@ -671,12 +683,30 @@ class RPAExecutor:
         return None
 
     def execute_trade(self, trade: TradeRecord) -> bool:
-        """Execute a trade via RPA. Returns True if successful."""
+        """Execute a trade via RPA or Tradovate API. Returns True if successful."""
         self.last_failure_reason = ""
         if config.DRY_RUN:
             logger.info(f"[DRY RUN] Would execute {trade.action.value} {trade.asset}")
             return True
 
+        # CRITICAL FIX: Use Tradovate API instead of DOM clicks
+        if self.use_tradovate_api:
+            logger.info(f"[TRADOVATE API] Executing {trade.action.value} {trade.asset} via REST API")
+            try:
+                # Run async API call in sync context
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    success = loop.run_until_complete(self._execute_via_tradovate_api(trade))
+                    return success
+                finally:
+                    loop.close()
+            except Exception as e:
+                logger.error(f"Tradovate API execution failed: {e}")
+                self.last_failure_reason = f"Tradovate API error: {e}"
+                # Fallback to RPA if API fails
+                logger.warning("Falling back to RPA DOM execution...")
+        
         # ── Safety Interlock ─────────────────────────────────────────────
         # Do NOT click if TradingView is minimized or covered by another app
         if not self.bring_tradingview_to_front(ticker_hint=trade.asset):
@@ -698,6 +728,92 @@ class RPAExecutor:
             self.last_failure_reason = f"RPA execution error | {e}"
             logger.error(f"RPA execution failed: {e}")
             return False
+    
+    async def _execute_via_tradovate_api(self, trade: TradeRecord) -> bool:
+        """
+        Execute trade via Tradovate REST API.
+        
+        This bypasses all DOM/Playwright/React problems by placing orders
+        directly through Tradovate's API endpoint.
+        
+        POST https://tv-demo.tradovateapi.com/v1/order/placeOrder
+        {
+          "accountId": "D52230487",
+          "action": "Buy",
+          "symbol": "MNQM6",
+          "orderQty": 1,
+          "orderType": "Market"
+        }
+        """
+        # Convert symbol format (e.g., "MNQ1!" -> "MNQM6")
+        symbol = self._convert_symbol_to_tradovate(trade.asset)
+        action = "Buy" if trade.action == SignalAction.BUY else "Sell"
+        
+        payload = {
+            "accountId": config.TRADOVATE_ACCOUNT_ID,
+            "action": action,
+            "symbol": symbol,
+            "orderQty": abs(int(trade.quantity)) if trade.quantity else 1,
+            "orderType": "Market"
+        }
+        
+        url = f"{config.TRADOVATE_API_URL}/v1/order/placeOrder"
+        
+        logger.info(f"[TRADOVATE API] POST {url}")
+        logger.info(f"[TRADOVATE API] Payload: {payload}")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    result = await response.json()
+                    
+                    if response.status == 200:
+                        logger.info(f"[TRADOVATE API] ✅ Order placed successfully: {result}")
+                        return True
+                    else:
+                        logger.error(f"[TRADOVATE API] ❌ Order failed: {response.status} - {result}")
+                        return False
+        except asyncio.TimeoutError:
+            logger.error("[TRADOVATE API] Request timed out")
+            return False
+        except Exception as e:
+            logger.error(f"[TRADOVATE API] Execution error: {e}")
+            return False
+    
+    def _convert_symbol_to_tradovate(self, asset: str) -> str:
+        """
+        Convert broker symbol format to Tradovate symbol format.
+        
+        Examples:
+        - "MNQ1!" -> "MNQM6" (Nasdaq futures June 2025)
+        - "ES1!" -> "ESM6" (S&P 500 futures June 2025)
+        - "BTC-USD" -> "BTCUSD"
+        """
+        # Remove special characters and normalize
+        symbol = asset.replace("!", "").replace("=F", "").replace("-", "")
+        
+        # Map common futures symbols
+        symbol_map = {
+            "MNQ": "MNQM6",  # Micro Nasdaq
+            "MES": "MESM6",  # Micro S&P
+            "NQ": "NQM6",    # Nasdaq
+            "ES": "ESM6",    # S&P 500
+            "CL": "CLM6",    # Crude Oil
+            "GC": "GCM6",    # Gold
+            "BTCUSD": "BTCUSD",
+            "ETHUSD": "ETHUSD",
+        }
+        
+        # Extract base symbol (first 2-4 letters)
+        import re
+        match = re.match(r'^([A-Z]{2,4})', symbol)
+        if match:
+            base = match.group(1)
+            if base in symbol_map:
+                return symbol_map[base]
+        
+        # Default: return cleaned symbol
+        return symbol.upper()
 
     def draw_liquidity_zone(self, ticker: str, liquidity_zone: Optional[dict]) -> bool:
         """Draw nearest liquidity zone using rectangle tool when optional calibration exists."""

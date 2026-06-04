@@ -9,11 +9,17 @@ from dotenv import load_dotenv
 # Load environment variables from .env file if it exists
 load_dotenv()
 
+# ===== TRADOVATE API CONFIGURATION =====
+TRADOVATE_API_ENABLED = os.getenv("USE_TRADOVATE_API", "False").lower() == "true"
+TRADOVATE_ACCOUNT_ID = os.getenv("TRADOVATE_ACCOUNT_ID", "D52230487")
+TRADOVATE_API_URL = os.getenv("TRADOVATE_API_URL", "https://tv-demo.tradovateapi.com")
+TRADOVATE_API_TOKEN = None  # Will be extracted from TradingView localStorage at runtime
+
 # ===== PROP FIRM RULES (The "Professor" - Knows Every Firm's Rules) =====
 PROP_FIRM_ENABLED = (
     os.getenv("PROP_FIRM_ENABLED", "True").lower() == "true"
 )  # Enable prop firm rule enforcement
-PROP_FIRM_NAME = os.getenv("PROP_FIRM_NAME", "TopStep")  # TopStep, Apex, MyFunded, FTMO
+PROP_FIRM_NAME = os.getenv("PROP_FIRM_NAME", "Apex")  # TopStep, Apex, MyFunded, FTMO
 PROP_ACCOUNT_SIZE = float(os.getenv("PROP_ACCOUNT_SIZE", "50000.0"))  # Starting balance
 PROP_PHASE = int(os.getenv("PROP_PHASE", "1"))  # Phase 1 or 2
 PROP_IS_FUNDED = (
@@ -48,9 +54,15 @@ TEACHER_MODE = (
 # ===== LLM CONFIGURATION (Local Ollama + Qwen 2.5) =====
 # Running 100% locally - NO cloud tokens needed!
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")  # Fixed: Use actual model name from ollama list
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")  # Fixed: Use accurate model for JSON output
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")  # For parallel swarm
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")  # Not needed for local, kept for compatibility
 VAST_API_TOKEN = None  # No longer using Vast.ai - running locally!
+
+# Required models for parallel swarm (install via: ollama pull <model>)
+# - qwen2.5:1.5b-instruct-q4_K_M (main brain)
+# - gemma:2b (second opinion)
+# - qwen2.5-coder:1.5b (code analysis)
 
 # ===== GEMINI LIVE BRAIN =====
 GEMINI_ENABLED = os.getenv("GEMINI_ENABLED", "True").lower() == "true"
@@ -186,11 +198,16 @@ NEWS_DNS_FALLBACK = tuple(
 )
 
 # ===== RPA EXECUTION =====
-USE_HOTKEYS = True  # Prefer keyboard hotkeys over mouse clicks
-HOTKEY_BUY = "<ctrl>+b"  # Buy order hotkey
-HOTKEY_SELL = "<ctrl>+s"  # Sell order hotkey
-HOTKEY_CLOSE = "<ctrl>+x"  # Close position hotkey
+USE_HOTKEYS = False  # Use Tradovate API instead of hotkeys
+HOTKEY_BUY = "<ctrl>+b"  # Buy order hotkey (fallback)
+HOTKEY_SELL = "<ctrl>+s"  # Sell order hotkey (fallback)
+HOTKEY_CLOSE = "<ctrl>+x"  # Close position hotkey (fallback)
 POSITION_OPEN_IMAGE = os.getenv("POSITION_OPEN_IMAGE", "assets/tv_position_open_label.png")
+
+# ===== TRADOVATE DIRECT API EXECUTION =====
+# When enabled, orders are placed via REST API instead of DOM clicks
+# This bypasses all Playwright/React/quote-session problems
+TRADOVATE_API_ENABLED = os.getenv("USE_TRADOVATE_API", "False").lower() == "true"
 
 # ===== SLIPPAGE GUARD (Execution Safety) =====
 # Increased for volatile futures like CL=F, GC=F - was 2.50%
