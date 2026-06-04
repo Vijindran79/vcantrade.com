@@ -41,6 +41,41 @@ logger = logging.getLogger(__name__)
 # Cache for available Ollama models to avoid repeated /api/tags calls
 _OLLAMA_MODEL_CACHE: Dict[str, bool] = {}
 
+# ---------------------------------------------------------------------------
+# PERSISTENT HTTP SESSION POOL (Task 2)
+# A single keep-alive Session is reused for every Ollama call. This removes
+# the TCP/TLS handshake cost of opening a fresh connection on every brain
+# request and lets the local port stay warm between the machine-gun swarm
+# calls. The session is created lazily and is thread-safe for our usage
+# pattern (each thread issues independent POSTs against localhost).
+# ---------------------------------------------------------------------------
+import threading as _threading
+
+_OLLAMA_SESSION: Optional["requests.Session"] = None
+_OLLAMA_SESSION_LOCK = _threading.Lock()
+
+
+def get_ollama_session() -> "requests.Session":
+    """Return the shared keep-alive requests.Session, creating it on first use."""
+    global _OLLAMA_SESSION
+    if _OLLAMA_SESSION is None:
+        with _OLLAMA_SESSION_LOCK:
+            if _OLLAMA_SESSION is None:
+                sess = requests.Session()
+                # Pool sized for the 3-model parallel swarm + headroom.
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=8,
+                    pool_maxsize=8,
+                    max_retries=0,  # we do our own retry/backoff below
+                )
+                sess.mount("http://", adapter)
+                sess.mount("https://", adapter)
+                sess.headers.update({"Content-Type": "application/json"})
+                _OLLAMA_SESSION = sess
+                logger.info("[BRAIN] Persistent Ollama HTTP session pool initialized")
+    return _OLLAMA_SESSION
+
+
 def _is_openrouter_url(url: str) -> bool:
     """Return True when an Ollama URL has accidentally been pointed at OpenRouter."""
     return "openrouter.ai" in str(url or "").lower()
@@ -214,7 +249,41 @@ def call_local_brain(
             url,
             request_timeout,
         )
-        response = requests.post(url, json=payload, headers=headers, timeout=request_timeout)
+
+        # PERSISTENT SESSION + RETRY/BACKOFF (Task 2)
+        # Use the shared keep-alive session. On a dropped connection or
+        # timeout, back off 1 second and retry up to 2 more times (3 total
+        # attempts) before falling through to the error path, which the
+        # caller treats as the OLLAMA_PREDATOR mathematical fallback.
+        session = get_ollama_session()
+        response = None
+        last_exc = None
+        max_attempts = 3  # 1 initial + 2 retries
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = session.post(url, json=payload, headers=headers, timeout=request_timeout)
+                break  # success — exit retry loop
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as net_err:
+                last_exc = net_err
+                if attempt < max_attempts:
+                    logger.warning(
+                        "[BRAIN] Ollama connection issue (attempt %d/%d): %s — backing off 1s",
+                        attempt, max_attempts, str(net_err)[:120],
+                    )
+                    import time as _t
+                    _t.sleep(1.0)
+                    continue
+                # Exhausted retries — drop to predator fallback
+                logger.error(
+                    "[FAIL] Ollama unreachable after %d attempts: %s — falling back to OLLAMA_PREDATOR",
+                    max_attempts, str(net_err)[:120],
+                )
+                return {"error": "Ollama not running", "fallback_mode": True, "brain_used": "OLLAMA_PREDATOR"}
+
+        if response is None:
+            return {"error": f"Ollama request failed: {last_exc}", "fallback_mode": True, "brain_used": "OLLAMA_PREDATOR"}
+
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as http_err:
