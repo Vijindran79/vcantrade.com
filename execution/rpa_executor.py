@@ -658,27 +658,57 @@ class RPAExecutor:
                 clicked = False
                 click_method = ""
                 try:
-                    # Strategy A: Use the button's exact text with Playwright locator
-                    btn_text = result.get("text", "").strip()
-                    if btn_text:
-                        locator = page.get_by_text(btn_text, exact=True).first
+                    # Strategy A (PROVEN 2026-06-04): click the exact order-button
+                    # selector directly. This placed a real Tradovate order in
+                    # live testing. The button text ("4,492.3Buy") changes every
+                    # tick so we DO NOT match on text — we match the data-name.
+                    sel = f'[data-name="{action_lower}-order-button"]'
+                    try:
+                        locator = page.locator(sel).first
                         if locator:
-                            try:
-                                locator.wait_for(state="visible", timeout=3000)
-                                locator.click()
+                            cnt = locator.count()
+                            if inspect.isawaitable(cnt):
+                                cnt = self._run_async(cnt)
+                            if cnt and cnt > 0:
+                                wait_res = locator.wait_for(state="visible", timeout=3000)
+                                if inspect.isawaitable(wait_res):
+                                    self._run_async(wait_res)
+                                click_res = locator.click(timeout=4000)
+                                if inspect.isawaitable(click_res):
+                                    self._run_async(click_res)
                                 clicked = True
-                                click_method = f"Playwright locator: exact text '{btn_text}'"
-                                logger.info(f"[SIMPLE-CLICK] Clicked via Playwright locator: '{btn_text}'")
-                            except Exception:
-                                logger.debug(f"[SIMPLE-CLICK] Locator click failed for '{btn_text}', trying coordinate click")
+                                click_method = f"data-name selector {sel}"
+                                logger.info(f"[SIMPLE-CLICK] Clicked via {sel} (confirmed-working method)")
+                    except Exception as sel_err:
+                        logger.debug(f"[SIMPLE-CLICK] data-name click failed: {sel_err}, trying class selector")
 
-                    # Strategy B: Coordinate click using JS-found position (Playwright real mouse events)
+                    # Strategy A2: class-based selector (buyButton- / sellButton-)
+                    if not clicked:
+                        sel2 = f'[class*="{action_lower}Button-"]'
+                        try:
+                            locator = page.locator(sel2).first
+                            cnt = locator.count()
+                            if inspect.isawaitable(cnt):
+                                cnt = self._run_async(cnt)
+                            if cnt and cnt > 0:
+                                click_res = locator.click(timeout=4000)
+                                if inspect.isawaitable(click_res):
+                                    self._run_async(click_res)
+                                clicked = True
+                                click_method = f"class selector {sel2}"
+                                logger.info(f"[SIMPLE-CLICK] Clicked via {sel2}")
+                        except Exception:
+                            pass
+
+                    # Strategy B: Coordinate click using JS-found position (last resort)
                     if not clicked:
                         x = result.get("x", 0)
                         y = result.get("y", 0)
                         if x > 0 and y > 0:
                             try:
-                                page.mouse.click(x, y)
+                                mc = page.mouse.click(x, y)
+                                if inspect.isawaitable(mc):
+                                    self._run_async(mc)
                                 clicked = True
                                 click_method = f"Playwright mouse.click at ({x:.0f}, {y:.0f})"
                                 logger.info(f"[SIMPLE-CLICK] Clicked via Playwright mouse at ({x:.0f}, {y:.0f})")
