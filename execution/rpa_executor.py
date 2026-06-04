@@ -786,20 +786,13 @@ class RPAExecutor:
             except Exception:
                 pass
 
-            # FALLBACK 2: pyautogui coordinate (last resort)
-            try:
-                screen_w, screen_h = pyautogui.size()
-                if action == "BUY":
-                    pyautogui.click(screen_w - 120, screen_h - 180)
-                else:
-                    pyautogui.click(screen_w - 120, screen_h - 140)
-                time.sleep(0.3)
-                logger.info(f"[SIMPLE-CLICK-FALLBACK2] pyautogui clicked at coordinate (last resort)")
-                return True
-            except Exception as pg_err:
-                logger.error(f"[SIMPLE-CLICK] All fallbacks failed: {pg_err}")
-
-            self.last_failure_reason = f"could not find {action} button"
+            # FALLBACK 2: DISABLED. The blind pyautogui coordinate click was
+            # hitting random screen positions and logging "CLICKED!" even though
+            # no order was placed. This caused the bot to report false success.
+            # If we get here, the button truly was not found. Return False honestly.
+            logger.error(f"[SIMPLE-CLICK] Could not find {action} button on TradingView DOM. "
+                        f"Check that the order panel (green BUY / red SELL boxes) is visible on the chart.")
+            self.last_failure_reason = f"could not find {action} button — no blind coordinate fallback"
             return False
 
         except Exception as e:
