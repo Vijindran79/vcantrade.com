@@ -94,8 +94,10 @@ class AutomatedSignalBridge(QObject):
 class SingleAssetLock:
     """Thread-safe single-asset target lock.
     
-    Enforces zero-overlap execution: while locked, all other symbols
-    are ignored until the lock is released.
+    DISABLED: The user wants to trade multiple symbols simultaneously.
+    This lock was causing REJECTED_LOCK for every symbol whenever one
+    trade was open. Now it always returns True (lock acquired) and
+    never blocks.
     """
     
     def __init__(self):
@@ -103,63 +105,39 @@ class SingleAssetLock:
         self.is_currently_holding = False
         self.active_locked_ticker = None
         self.lock_acquired_at = 0.0
-        self.lock_timeout_seconds = 300  # 5 minutes max hold
+        self.lock_timeout_seconds = 30  # Shortened from 300s
         
     def acquire(self, ticker: str) -> bool:
-        """Acquire the lock for a specific ticker.
-        
-        Returns True if lock acquired, False if another ticker is active.
-        """
-        with self._lock:
-            if self.is_currently_holding:
-                if self.active_locked_ticker == ticker:
-                    return True  # Already locked for this ticker
-                logger.warning(
-                    "[LOCK] Cannot acquire lock for %s — already holding %s",
-                    ticker, self.active_locked_ticker
-                )
-                return False
-            
-            self.is_currently_holding = True
-            self.active_locked_ticker = ticker
-            self.lock_acquired_at = time.monotonic()
-            logger.info("[LOCK] Single-asset lock ACQUIRED for %s", ticker)
-            return True
+        """Always returns True — multi-asset trading enabled."""
+        return True
     
     def release(self):
-        """Release the lock."""
-        with self._lock:
-            if self.is_currently_holding:
-                logger.info(
-                    "[LOCK] Single-asset lock RELEASED for %s (held %.1fs)",
-                    self.active_locked_ticker,
-                    time.monotonic() - self.lock_acquired_at
-                )
+        """No-op — lock is disabled."""
+        pass
+
+    def force_reset(self):
+        """Unconditionally clear ALL lock state back to the open gate.
+        Called on every position close (SL/TP/Giveback) so the execution
+        thread can never be left stuck holding a stale ticker lock."""
+        try:
+            with self._lock:
+                self.is_currently_holding = False
+                self.active_locked_ticker = None
+                self.lock_acquired_at = 0.0
+        except Exception:
+            # Even if the RLock misbehaves, force the attributes clear.
             self.is_currently_holding = False
             self.active_locked_ticker = None
             self.lock_acquired_at = 0.0
     
     def is_locked_for(self, ticker: str) -> bool:
-        """Return True if locked for a DIFFERENT ticker."""
-        with self._lock:
-            if not self.is_currently_holding:
-                return False
-            return self.active_locked_ticker != ticker
+        """Always returns False — never blocks any ticker."""
+        return False
     
     def check_timeout(self) -> bool:
-        """Return True if lock has timed out and should be released."""
-        with self._lock:
-            if not self.is_currently_holding:
-                return False
-            if time.monotonic() - self.lock_acquired_at > self.lock_timeout_seconds:
-                logger.warning(
-                    "[LOCK] Single-asset lock for %s timed out after %.1fs — auto-releasing",
-                    self.active_locked_ticker,
-                    self.lock_timeout_seconds
-                )
-                self.release()
-                return True
+        """Always returns False — no timeout needed."""
         return False
+
 
 # =========================================================================
 # DYNAMIC AI EXIT CONDITIONS
@@ -798,7 +776,27 @@ class VcaniTradeEngine:
                 logger.warning("[EXIT] Error checking dynamic exit for %s: %s", ticker, e)
     
     def close_position(self, ticker: str, reason: str = ""):
-        """Close a position and release the asset lock."""
+        """Close a position and release the asset lock.
+
+        TASK 1 — GLOBAL LOCK LEAK FIX: the execution gate is reset
+        UNCONDITIONALLY the instant a position closes (Stop Loss, Take
+        Profit, or Profit Giveback Shield). This happens BEFORE the broker
+        flatten call so that even if the flatten throws, the gate is already
+        open and ESM6/MCL1!/MGC1! can immediately claim the execution thread.
+        """
+        # --- UNCONDITIONAL GATE RESET (must happen first, no matter what) ---
+        try:
+            self.asset_lock.force_reset()
+            logger.info("[LOCK] Execution gate force-reset to None on close of %s", ticker)
+        except Exception as lock_err:
+            logger.error("[LOCK] force_reset failed for %s: %s", ticker, lock_err)
+        # Also clear any per-ticker churn lock dict if present
+        try:
+            if hasattr(self, "locked_tickers") and isinstance(self.locked_tickers, dict):
+                self.locked_tickers.pop(ticker, None)
+        except Exception:
+            pass
+
         try:
             # Execute close
             if config.get_active_mode() == "TRADINGVIEW":
@@ -806,14 +804,17 @@ class VcaniTradeEngine:
             else:
                 self.trade_executor.close_position(ticker)
             
-            # Release lock
-            if self.asset_lock.active_locked_ticker == ticker:
+            # Lock already force-reset above — this is a belt-and-suspenders release.
+            try:
                 self.asset_lock.release()
+            except Exception:
+                pass
             
             logger.info("[CLOSE] Position closed: %s | Reason: %s", ticker, reason)
             
         except Exception as e:
             logger.error("[CLOSE] Error closing position %s: %s", ticker, e)
+            # Gate is already open from force_reset above; nothing to recover.
     
     def _run_pretrade_market_audit(self, ticker: str, entry_price: float) -> bool:
         """Run pre-trade market audit."""

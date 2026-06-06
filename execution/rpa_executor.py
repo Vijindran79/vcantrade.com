@@ -522,15 +522,29 @@ class RPAExecutor:
             action_lower = action.lower()
             js_find_button = """(args) => {
                 const actionLower = args.actionLower;
+                // Declare match arrays FIRST (the domWidget loop below uses
+                // exactMatches before the old declaration point — that was a
+                // ReferenceError crashing the whole finder).
+                const exactMatches = [];
+                const otherMatches = [];
                 // STRICT terms — must be the order panel button, not random text
                 const exactTerms = [
                     actionLower + ' mkt',
                     actionLower + ' market',
                     actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Mkt',
-                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Market'
+                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1) + ' Market',
+                    actionLower,
+                    actionLower.charAt(0).toUpperCase() + actionLower.slice(1)
                 ];
                 const selectorPatterns = [
+                    // CONFIRMED live via CDP 2026-06-04 — these are THE buttons:
+                    '[data-name="' + actionLower + '-order-button"]',
+                    '[class*="' + actionLower + 'Button-"]',
                     '[data-name="header-toolbar-' + actionLower + '"]',
+                    '[data-name="dom-' + actionLower + '-button"]',
+                    '[class*="' + actionLower + 'Button" i]',
+                    '[class*="order-' + actionLower + '" i]',
+                    '[class*="quick-' + actionLower + '" i]',
                     '[data-name="buy-button"]',
                     '[data-name="sell-button"]',
                     'button[class*="' + actionLower + 'Button"]',
@@ -538,9 +552,40 @@ class RPAExecutor:
                     '[aria-label*="' + actionLower + '" i][aria-label*="market" i]'
                 ];
 
+                // EXTRA: TradingView's DOM/quick-trade widget at top-left of chart.
+                // These are the green BUY and red SELL price boxes. They're not
+                // standard <button> elements — they're <div> with click handlers.
+                const domWidgetSelectors = [
+                    '[class*="ask" i][class*="price" i]',
+                    '[class*="bid" i][class*="price" i]',
+                    '[class*="buyButton" i]',
+                    '[class*="sellButton" i]',
+                    '[class*="dom-widget" i] [class*="' + actionLower + '" i]',
+                    '[class*="order-widget" i] [class*="' + actionLower + '" i]',
+                    '[class*="trading" i] [class*="' + actionLower + '" i]',
+                ];
+                const isBuy = actionLower === 'buy';
+                for (const sel of domWidgetSelectors) {
+                    try {
+                        const els = document.querySelectorAll(sel);
+                        for (const el of els) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) continue;
+                            const bg = window.getComputedStyle(el).backgroundColor || '';
+                            // Green = buy side, Red = sell side
+                            const isGreen = bg.includes('0, 1') || bg.includes('34, 1') || bg.includes('16, 1') || bg.includes('38, 1') || bg.includes('76, 1');
+                            const isRed = bg.includes('255, 0') || bg.includes('247, 8') || bg.includes('234, 5') || bg.includes('239, 6');
+                            if ((isBuy && isGreen) || (!isBuy && isRed)) {
+                                exactMatches.unshift({ text: el.textContent.trim().substring(0, 20),
+                                    x: rect.left + rect.width/2, y: rect.top + rect.height/2,
+                                    width: rect.width, height: rect.height,
+                                    selector: sel });
+                            }
+                        }
+                    } catch(e) {}
+                }
+
                 const buttons = Array.from(document.querySelectorAll('button'));
-                const exactMatches = [];
-                const otherMatches = [];
 
                 for (const btn of buttons) {
                     const text = (btn.textContent || '').toLowerCase().trim();
@@ -585,7 +630,14 @@ class RPAExecutor:
                                  return t.includes(actionLower);
                              }).map(b => b.textContent.trim()).slice(0, 10) };
                 }
-                allMatches.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+                // Prefer confirmed -order-button / *Button- selectors over fuzzy text.
+                const rank = (s) => {
+                    if (!s) return 9;
+                    if (s.includes('-order-button')) return 0;
+                    if (s.includes('Button-')) return 1;
+                    return 5;
+                };
+                allMatches.sort((a, b) => rank(a.selector) - rank(b.selector));
                 const m = allMatches[0];
                 return { success: true, text: m.text, x: m.x, y: m.y,
                          width: m.width, height: m.height,
@@ -669,27 +721,57 @@ class RPAExecutor:
                 clicked = False
                 click_method = ""
                 try:
-                    # Strategy A: Use the button's exact text with Playwright locator
-                    btn_text = result.get("text", "").strip()
-                    if btn_text:
-                        locator = page.get_by_text(btn_text, exact=True).first
+                    # Strategy A (PROVEN 2026-06-04): click the exact order-button
+                    # selector directly. This placed a real Tradovate order in
+                    # live testing. The button text ("4,492.3Buy") changes every
+                    # tick so we DO NOT match on text — we match the data-name.
+                    sel = f'[data-name="{action_lower}-order-button"]'
+                    try:
+                        locator = page.locator(sel).first
                         if locator:
-                            try:
-                                locator.wait_for(state="visible", timeout=3000)
-                                locator.click()
+                            cnt = locator.count()
+                            if inspect.isawaitable(cnt):
+                                cnt = self._run_async(cnt)
+                            if cnt and cnt > 0:
+                                wait_res = locator.wait_for(state="visible", timeout=3000)
+                                if inspect.isawaitable(wait_res):
+                                    self._run_async(wait_res)
+                                click_res = locator.click(timeout=4000)
+                                if inspect.isawaitable(click_res):
+                                    self._run_async(click_res)
                                 clicked = True
-                                click_method = f"Playwright locator: exact text '{btn_text}'"
-                                logger.info(f"[SIMPLE-CLICK] Clicked via Playwright locator: '{btn_text}'")
-                            except Exception:
-                                logger.debug(f"[SIMPLE-CLICK] Locator click failed for '{btn_text}', trying coordinate click")
+                                click_method = f"data-name selector {sel}"
+                                logger.info(f"[SIMPLE-CLICK] Clicked via {sel} (confirmed-working method)")
+                    except Exception as sel_err:
+                        logger.debug(f"[SIMPLE-CLICK] data-name click failed: {sel_err}, trying class selector")
 
-                    # Strategy B: Coordinate click using JS-found position (Playwright real mouse events)
+                    # Strategy A2: class-based selector (buyButton- / sellButton-)
+                    if not clicked:
+                        sel2 = f'[class*="{action_lower}Button-"]'
+                        try:
+                            locator = page.locator(sel2).first
+                            cnt = locator.count()
+                            if inspect.isawaitable(cnt):
+                                cnt = self._run_async(cnt)
+                            if cnt and cnt > 0:
+                                click_res = locator.click(timeout=4000)
+                                if inspect.isawaitable(click_res):
+                                    self._run_async(click_res)
+                                clicked = True
+                                click_method = f"class selector {sel2}"
+                                logger.info(f"[SIMPLE-CLICK] Clicked via {sel2}")
+                        except Exception:
+                            pass
+
+                    # Strategy B: Coordinate click using JS-found position (last resort)
                     if not clicked:
                         x = result.get("x", 0)
                         y = result.get("y", 0)
                         if x > 0 and y > 0:
                             try:
-                                page.mouse.click(x, y)
+                                mc = page.mouse.click(x, y)
+                                if inspect.isawaitable(mc):
+                                    self._run_async(mc)
                                 clicked = True
                                 click_method = f"Playwright mouse.click at ({x:.0f}, {y:.0f})"
                                 logger.info(f"[SIMPLE-CLICK] Clicked via Playwright mouse at ({x:.0f}, {y:.0f})")
@@ -810,20 +892,13 @@ class RPAExecutor:
             except Exception:
                 pass
 
-            # FALLBACK 2: pyautogui coordinate (last resort)
-            try:
-                screen_w, screen_h = pyautogui.size()
-                if action == "BUY":
-                    pyautogui.click(screen_w - 120, screen_h - 180)
-                else:
-                    pyautogui.click(screen_w - 120, screen_h - 140)
-                time.sleep(0.3)
-                logger.info(f"[SIMPLE-CLICK-FALLBACK2] pyautogui clicked at coordinate (last resort)")
-                return True
-            except Exception as pg_err:
-                logger.error(f"[SIMPLE-CLICK] All fallbacks failed: {pg_err}")
-
-            self.last_failure_reason = f"could not find {action} button"
+            # FALLBACK 2: DISABLED. The blind pyautogui coordinate click was
+            # hitting random screen positions and logging "CLICKED!" even though
+            # no order was placed. This caused the bot to report false success.
+            # If we get here, the button truly was not found. Return False honestly.
+            logger.error(f"[SIMPLE-CLICK] Could not find {action} button on TradingView DOM. "
+                        f"Check that the order panel (green BUY / red SELL boxes) is visible on the chart.")
+            self.last_failure_reason = f"could not find {action} button — no blind coordinate fallback"
             return False
 
         except Exception as e:
