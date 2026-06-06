@@ -34,13 +34,16 @@ PERSISTENCE_MINUTES = 0.5          # Signal must hold 30s (1/2 cycle) before fir
 CONFLUENCE_TFS = ["5m", "15m"]     # Higher TFs checked if available
 MIN_CONFLUENCE_AGREEMENT = 0       # 0 = TF check is informational, doesn't block
                                    # Set to 1+ to require higher-TF agreement
-VOLUME_MULTIPLIER = 1.2            # Current vol must be > 1.2x average
+VOLUME_MULTIPLIER = 1.0            # RELAXED: was 1.2, now 1.0 (allow more trades)
 VOLUME_REQUIRE_DATA = False        # Always skip volume check if data is missing
 SKIP_TF_IF_MISSING = True          # If 5m/15m data is unavailable, skip that check
-RSI_OVERSOLD = 30                  # Buy zone
-RSI_OVERBOUGHT = 70                # Sell zone
+RSI_OVERSOLD = 15                  # RELAXED: was 30, now 15 (only block extreme)
+RSI_OVERBOUGHT = 85                # RELAXED: was 70, now 85 (only block extreme)
 TREND_EMA_PERIOD = 50              # EMA for trend filter
 BB_PERIOD = 20                     # Bollinger Band period
+
+# Multi-timeframe fallback: if signal strength >= 75%, allow even without TF agreement
+MTF_STRENGTH_FALLBACK = 0.75     # 75% threshold for bypassing TF check
 
 
 class ConfluenceEngine:
@@ -143,11 +146,18 @@ class ConfluenceEngine:
             # ---- HIGHER-TIMEFRAME CONFLUENCE ----
             tf_agrees_count = sum([state["tf_5m"], state["tf_15m"]])
             if tf_agrees_count < MIN_CONFLUENCE_AGREEMENT:
-                return (
-                    False,
-                    f"no higher-TF agreement: 5m={state['tf_5m']}, 15m={state['tf_15m']}",
-                    confidence,
-                )
+                # MULTI-TIMEFRAME FALLBACK: if signal strength >= 75%, allow even without TF agreement
+                if confidence >= MTF_STRENGTH_FALLBACK:
+                    logger.info(
+                        "[CONFLUENCE] %s: Low TF agreement but signal strength %.0f%% >= %.0f%% - allowing trade",
+                        ticker, confidence * 100, MTF_STRENGTH_FALLBACK * 100
+                    )
+                else:
+                    return (
+                        False,
+                        f"no higher-TF agreement: 5m={state['tf_5m']}, 15m={state['tf_15m']} (strength %.0f%%)" % (confidence * 100),
+                        confidence,
+                    )
 
             # ---- VOLUME CONFIRMATION ----
             # ALWAYS skip volume check if EITHER volume_current is 0 OR volume_avg is 0
@@ -172,10 +182,10 @@ class ConfluenceEngine:
                     return False, f"trend filter: price {close:.2f} above EMA50 {ema_50:.2f} (no SELL)", confidence
 
             # ---- RSI EXTREME CAUTION ----
-            # Only block at extreme levels (RSI < 20 or > 80) — gives more room to trade
-            if action == "BUY" and rsi_1m > 80:
+            # Only block at extreme levels (RSI < 15 or > 85) — gives more room to trade
+            if action == "BUY" and rsi_1m > RSI_OVERBOUGHT:
                 return False, f"RSI {rsi_1m:.1f} extreme overbought (no BUY)", confidence
-            if action == "SELL" and rsi_1m < 20:
+            if action == "SELL" and rsi_1m < RSI_OVERSOLD:
                 return False, f"RSI {rsi_1m:.1f} extreme oversold (no SELL)", confidence
 
             # ---- ALL CONDITIONS MET ----

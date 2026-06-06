@@ -17,7 +17,7 @@ class DataScoutListenerThread(QThread):
     Listens for market intelligence and data updates from external sources.
     """
 
-    data_received = pyqtSignal(object)     # Emits received data
+    signal_received = pyqtSignal(object)     # Emits received data
     scout_error = pyqtSignal(str)          # Emits error message
 
     def __init__(self):

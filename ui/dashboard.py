@@ -127,6 +127,9 @@ class CommandCenter(QWidget):
         self._setup_window()
         self._build_ui()
         self._update_analysis_option_visibility()
+        # EMIT WATCHLIST SIGNAL ON STARTUP so bot syncs tickers!
+        if self.watchlist:
+            self.watchlist_updated.emit(list(self.watchlist))
         logger.info("Command Center initialized - Professional Trading Mode")
 
     def _setup_window(self):
@@ -301,7 +304,18 @@ class CommandCenter(QWidget):
             f"font-size: 12px; font-weight: bold; font-family: 'Consolas';"
         )
         layout.addWidget(self.mode_badge)
-
+        
+        # Minimize button
+        self.minimize_btn = QPushButton("—")
+        self.minimize_btn.setFixedSize(30, 30)
+        self.minimize_btn.setStyleSheet(f"""
+            QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER};
+                         border-radius: 4px; font-size: 16px; font-weight: bold; }}
+            QPushButton:hover {{ background: {BORDER}; color: {WHITE}; }}
+        """)
+        self.minimize_btn.clicked.connect(self.showMinimized)
+        layout.addWidget(self.minimize_btn)
+        
         self.bridge_status_widget = QFrame()
         self.bridge_status_widget.setStyleSheet(
             f"background: {BG_INPUT}; border: 1px solid {BORDER}; border-radius: 6px;"

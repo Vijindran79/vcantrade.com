@@ -1499,6 +1499,26 @@ class AINarratorOverlayClassWindow(GlassmorphicPanel):
             datetime.now().strftime("%H:%M:%S")
         )
     
+    def set_watchlist(self, tickers: list):
+        """Update the watchlist displayed in the AI Narrator.
+        Called when the Dashboard watchlist is updated.
+        """
+        # Clear existing watchlist labels
+        for label in self.ticker_status_labels.values():
+            self.watchlist_status_layout.removeWidget(label)
+            label.deleteLater()
+        self.ticker_status_labels = {}
+        
+        # Add new tickers
+        for ticker in tickers:
+            label = QLabel(f"[WHITE] {ticker}")
+            label.setStyleSheet("color: #E6EDF3; font-size: 11px; background: transparent;")
+            self.watchlist_status_layout.addWidget(label)
+            self.ticker_status_labels[ticker] = label
+        
+        self.add_activity("[WATCHLIST]", f"Updated watchlist: {', '.join(tickers) if tickers else 'Empty'}")
+        logger.info("[AI-NARRATOR] Watchlist updated: %s", tickers)
+
     def clear_activities(self):
         """Clear all activities from feed."""
         while self.activity_layout.count():

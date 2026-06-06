@@ -703,11 +703,12 @@ Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under
 """
         
         # === SEQUENTIAL SWARM (VRAM-safe) ===
-        # Single model call with strict timeout. If LLM is too slow on this hardware,
-        # we fall back to rule-based verdict using the proposed_action (which already
-        # passed the scanner's technical filters).
+        # MULTIPLE AGENTS for super-intelligent analysis
+        # Agent 1: Chart patterns (Predator brain)
+        # Agent 2: RSI + liquidity analysis (Qwen 7B)
         models = [
-            ("qwen2.5:0.5b", "QWEN-FAST"),
+            ("predator:latest", "PREDATOR"),  # Chart patterns + predator brain
+            ("qwen2.5:7b", "QWEN-7B"),    # RSI + liquidity analysis
         ]
         
         results = []

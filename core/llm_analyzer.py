@@ -70,22 +70,41 @@ class LLMAnalyzer:
                                 VLM-enhanced Technical Sniper analysis
         """
         try:
-            loop, loop_was_running = _get_or_create_event_loop()
-
-            if loop_was_running:
-                # Loop already running, use run_coroutine_threadsafe
-                import concurrent.futures
-
-                future = asyncio.run_coroutine_threadsafe(
-                    self.swarm.run(market_data, news_context, chart_image_base64), loop
-                )
-                output, transcript = future.result(timeout=config.OLLAMA_TIMEOUT)
-            else:
-                # No loop running, safe to use asyncio.run
-                output, transcript = loop.run_until_complete(
-                    self.swarm.run(market_data, news_context, chart_image_base64)
-                )
-                loop.close()
+            # FIX: request_decision() is SYNC (not async), call it directly!
+            # Build package for swarm decision
+            package = {
+                "recent_ohlcv": [],
+                "liquidity_zones": [],
+                "signal_type": "TECHNICAL",
+                "rsi": market_data.indicators.get("RSI", 50.0),
+                "atr": market_data.indicators.get("ATR", 0.0),
+                "asset": market_data.asset,
+            }
+            
+            # Call request_decision directly (it's a sync method!)
+            decision = self.swarm.request_decision("BUY", package)
+            
+            # Convert decision to LLMAnalysisOutput
+            from core.models import LLMAnalysisOutput, SignalAction, ConfidenceLevel
+            action_str = decision.get("verdict", "HOLD")
+            action = SignalAction.BUY if "BUY" in action_str.upper() else SignalAction.SELL if "SELL" in action_str.upper() else SignalAction.HOLD
+            
+            # Extract confidence from decision if available
+            confidence_str = decision.get("confidence", "MEDIUM")
+            confidence_map = {
+                "LOW": ConfidenceLevel.LOW,
+                "MEDIUM": ConfidenceLevel.MEDIUM,
+                "HIGH": ConfidenceLevel.HIGH,
+            }
+            confidence = confidence_map.get(confidence_str.upper(), ConfidenceLevel.MEDIUM)
+            
+            output = LLMAnalysisOutput(
+                action=action,
+                asset=market_data.asset,
+                confidence=confidence,
+                reason=decision.get("reasoning", "Swarm decision")
+            )
+            transcript = None
 
             logger.info(
                 f"Swarm decision: {output.action.value} {market_data.asset} "

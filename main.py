@@ -44,7 +44,6 @@ from services.signal_dispatcher import SignalDispatcher
 from threads.cloud_scanner import CloudScannerThread
 from threads.signal_listener import SignalListenerThread
 from threads.data_scout_listener import DataScoutListenerThread
-from threads.hunter import MultiAssetHunterThread
 from threads._utils import _speak_alert
 # Import UI components after QApplication is available
 from ui.dashboard import CommandCenter as Dashboard
@@ -257,8 +256,7 @@ class VcaniTradeEngine:
             level=getattr(logging, config.LOG_LEVEL),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             filename=config.LOG_FILE,
-            filemode='a',
-            encoding='utf-8',
+            filemode='a'
         )
         
         # Core components
@@ -340,10 +338,6 @@ class VcaniTradeEngine:
         
         self.data_scout_listener = DataScoutListenerThread()
         
-        # Hunter thread (screenshot → vision LLM pipeline)
-        self.hunter_thread = MultiAssetHunterThread(self)
-        self._wire_hunter_signals()
-        
         # State
         self.current_mode = "AUTONOMOUS" if not config.TEACHER_MODE else "TEACHER"
         self.is_running = False
@@ -400,76 +394,6 @@ class VcaniTradeEngine:
         except Exception as exc:
             logger.warning("[UI-WIRE] Failed to wire UI signals: %s", exc)
 
-    def _wire_hunter_signals(self):
-        """Connect Hunter thread signals to dashboard and narrator."""
-        try:
-            self.hunter_thread.trade_signal.connect(self._on_hunter_trade_signal)
-            self.hunter_thread.status_update.connect(self._on_hunter_status)
-            self.hunter_thread.narrator_update.connect(
-                lambda icon, msg: self.ai_narrator.add_activity(icon, msg)
-            )
-            logger.info("[HUNTER] Hunter signals wired")
-        except Exception as exc:
-            logger.warning("[HUNTER] Failed to wire hunter signals: %s", exc)
-
-    def _on_hunter_trade_signal(self, symbol: str, action: str, reason: str):
-        """Handle trade signals from the Hunter vision pipeline."""
-        self._log_dashboard(f"[HUNTER] {symbol}: {action} | {reason}")
-        
-        # Extract confidence from reason (brain returns "Confidence: High" etc.)
-        confidence = 0.70  # default
-        reason_lower = reason.lower()
-        if "confidence: high" in reason_lower or "confidence: very high" in reason_lower:
-            confidence = 0.90
-        elif "confidence: medium" in reason_lower:
-            confidence = 0.75
-        elif "confidence: low" in reason_lower:
-            confidence = 0.50
-        
-        # Update dashboard watchlist with signal and confidence
-        try:
-            self.dashboard.update_watchlist_signal(symbol, action, confidence)
-        except Exception:
-            pass
-        
-        # Update AI narrator confidence meter
-        try:
-            self.ai_narrator.update_confidence_meter(symbol, action, confidence * 100)
-            self.ai_narrator.notify_signal_detected(symbol, action, confidence)
-            self.ai_narrator.flash_brain_verdict(
-                symbol, f"[VISION] {action}", reason, hold_ms=1200,
-                brain_used="VISION_LLM"
-            )
-            _speak_alert(f"Vision signal. {action} {symbol}. Confidence {confidence:.0%}. {reason}")
-        except Exception:
-            pass
-        # Route to execution
-        self.process_validated_execution_path({
-            "ticker": symbol, "action": action, "reason": reason,
-            "confidence": confidence,
-        })
-
-    def _on_hunter_status(self, symbol: str, status: str, message: str):
-        """Handle status updates from Hunter — update dashboard watchlist."""
-        self._log_dashboard(f"[HUNTER] {symbol}: {status} - {message}")
-        try:
-            # Map status to dashboard colors
-            confidence = 0.0
-            if status == "BUY":
-                confidence = 0.85
-            elif status == "SELL":
-                confidence = 0.85
-            elif status == "HOLD":
-                confidence = 0.50
-            elif status == "ANALYZING":
-                confidence = 0.30
-            
-            if confidence > 0:
-                self.dashboard.update_watchlist_status(symbol, status, confidence, message)
-                self.ai_narrator.update_confidence_meter(symbol, status, confidence * 100)
-        except Exception:
-            pass
-
     def set_runtime_mode(self, mode: str):
         """Apply dashboard mode changes to backend components."""
         normalized = str(mode or "TEACHER").upper().strip()
@@ -477,8 +401,7 @@ class VcaniTradeEngine:
             normalized = "TEACHER"
         self.current_mode = normalized
         try:
-            if hasattr(self.session_detector, 'set_runtime_mode'):
-                getattr(self.session_detector, 'set_runtime_mode')(normalized)  # type: ignore[union-attr]
+            self.session_detector.set_runtime_mode(normalized)
         except Exception:
             pass
         try:
@@ -585,9 +508,6 @@ class VcaniTradeEngine:
         self._log_dashboard(f"[TARGET] {ticker}: {signal_type} -> {action} ({confidence:.0%})")
         try:
             self.ai_narrator.add_activity("[TARGET]", f"{ticker} {signal_type} -> {action}")
-            # Update confidence meter and watchlist
-            self.ai_narrator.update_confidence_meter(ticker, action, confidence * 100)
-            self.dashboard.update_watchlist_signal(ticker, action, confidence)
         except Exception:
             pass
 
@@ -595,11 +515,9 @@ class VcaniTradeEngine:
         ticker = payload.get("ticker", "UNKNOWN")
         action = payload.get("action", "WAIT")
         reason = payload.get("reason", "")
-        confidence = float(payload.get("confidence", 0.70) or 0.70)
         self._log_dashboard(f"[BRAIN] {ticker}: {action} | {reason}")
         try:
             verdict = f"[SIGNAL] {action}"
-            self.ai_narrator.update_confidence_meter(ticker, action, confidence * 100)
             self.ai_narrator.flash_brain_verdict(
                 ticker,
                 verdict,
@@ -608,217 +526,9 @@ class VcaniTradeEngine:
                 fallback_mode=bool(payload.get("fallback_mode", False)),
                 brain_used=str(payload.get("brain_used", "LOCAL_BRAIN")),
             )
-            self.dashboard.update_watchlist_signal(ticker, action, confidence)
-            _speak_alert(f"Brain verdict. {action} {ticker}. Confidence {confidence:.0%}. {reason}")
+            _speak_alert(f"Brain verdict. {action} {ticker}. {reason}")
         except Exception:
             pass
-
-        # SOUND: track confidence per ticker — play "level up" or "ready to buy" sounds
-        try:
-            from core.audio_alerts import on_confidence_update
-            on_confidence_update(ticker, confidence)
-        except Exception:
-            pass
-
-        # CONFLUENCE CHECK: require multi-timeframe agreement + persistence + volume
-        # before routing to execution. This is the "safest, most reliable" gate.
-        if action in {"BUY", "SELL"} and ticker not in {"", "UNKNOWN"}:
-            try:
-                from core.confluence_engine import confluence
-                # Compute higher-TF agreement from data_feed (5m, 15m trends)
-                tf_5m_agrees, tf_15m_agrees = self._check_higher_tf_agreement(ticker, action)
-                # Pull recent indicator values from data_feed
-                indicators = self._fetch_indicators_for_confluence(ticker)
-                should_fire, fire_reason, boosted = confluence.evaluate(
-                    ticker=ticker,
-                    action=action,
-                    confidence=confidence,
-                    rsi_1m=indicators.get("rsi", 50.0),
-                    close=indicators.get("close", 0.0),
-                    ema_50=indicators.get("ema_50", 0.0),
-                    bb_upper=indicators.get("bb_upper", 0.0),
-                    bb_lower=indicators.get("bb_lower", 0.0),
-                    volume_current=indicators.get("volume", 0.0),
-                    volume_avg=indicators.get("volume_avg", 0.0),
-                    tf_5m_agrees=tf_5m_agrees,
-                    tf_15m_agrees=tf_15m_agrees,
-                )
-                if not should_fire:
-                    # Log the "wait" — the bot is being patient for a safer entry
-                    self._log_dashboard(
-                        f"[CONFLUENCE-WAIT] {action} {ticker}: {fire_reason}"
-                    )
-                    return
-                # Boost confidence from confluence
-                payload = dict(payload)
-                payload["confidence"] = boosted
-                payload["reason"] = f"[CONFLUENCE] {fire_reason}"
-                self._log_dashboard(
-                    f"[CONFLUENCE-OK] {action} {ticker} boosted to {boosted:.0%}"
-                )
-            except Exception as exc:
-                logger.warning("[CONFLUENCE] Check failed, falling back to direct execution: %s", exc)
-
-            # Route actionable BUY/SELL signals into the real execution path
-            try:
-                self._log_dashboard(
-                    f"[ROUTE] Brain signal -> execution: {action} {ticker} (conf={confidence:.0%})"
-                )
-                # DIRECT CALL (bypass unreliable Qt signal/slot for cross-thread delivery)
-                # The Qt signal is still emitted as a backup.
-                try:
-                    self.execution_signal.emit(dict(payload))
-                except Exception:
-                    pass
-                # ALSO call directly — this is the reliable path
-                try:
-                    direct_payload = dict(payload)
-                    direct_payload["confluence_validated"] = True
-                    self.process_validated_execution_path(direct_payload)
-                except Exception as exc:
-                    logger.error("[ROUTE] Direct execution call failed: %s", exc)
-                    self._log_dashboard(f"[ROUTE-FAIL] {action} {ticker}: {exc}")
-            except Exception as exc:
-                logger.error("[ROUTE] Failed to forward brain signal: %s", exc)
-
-    # ==================== CONFLUENCE HELPERS ====================
-
-    def _check_higher_tf_agreement(self, ticker: str, action: str) -> tuple:
-        """
-        Check if 5m and 15m timeframes AGREE with the 1m signal.
-        Returns (tf_5m_agrees, tf_15m_agrees).
-        Uses SMA20 vs SMA50 cross as the higher-TF trend direction.
-        NOTE: Returns True for unavailable data so confluence can pass.
-        """
-        try:
-            from core.data_feed import data_feed
-            # Default: True (data unavailable = no objection)
-            tf_5m_agrees = True
-            tf_15m_agrees = True
-
-            # 5m timeframe: get 100 bars of 5m data
-            bars_5m = data_feed.get_bars_multi(ticker, interval="5m", count=100)
-            if bars_5m and len(bars_5m) >= 50:
-                closes_5m = [b["close"] for b in bars_5m]
-                sma20_5m = sum(closes_5m[-20:]) / 20
-                sma50_5m = sum(closes_5m[-50:]) / 50
-                # BUY agrees if 5m trend is up (sma20 > sma50)
-                # SELL agrees if 5m trend is down (sma20 < sma50)
-                tf_5m_agrees = False  # Have data — now actually check
-                if action == "BUY" and sma20_5m > sma50_5m:
-                    tf_5m_agrees = True
-                elif action == "SELL" and sma20_5m < sma50_5m:
-                    tf_5m_agrees = True
-
-            # 15m timeframe: get 100 bars of 15m data
-            bars_15m = data_feed.get_bars_multi(ticker, interval="15m", count=100)
-            if bars_15m and len(bars_15m) >= 50:
-                closes_15m = [b["close"] for b in bars_15m]
-                sma20_15m = sum(closes_15m[-20:]) / 20
-                sma50_15m = sum(closes_15m[-50:]) / 50
-                tf_15m_agrees = False  # Have data — now actually check
-                if action == "BUY" and sma20_15m > sma50_15m:
-                    tf_15m_agrees = True
-                elif action == "SELL" and sma20_15m < sma50_15m:
-                    tf_15m_agrees = True
-
-            return tf_5m_agrees, tf_15m_agrees
-        except Exception as e:
-            logger.debug("[CONFLUENCE] Higher-TF check failed for %s: %s", ticker, e)
-            # On error, default to True so we don't block trades
-            return True, True
-
-    def _fetch_indicators_for_confluence(self, ticker: str) -> dict:
-        """
-        Fetch recent indicators (RSI, close, EMA50, BB, volume) for the confluence check.
-        """
-        result = {
-            "rsi": 50.0,
-            "close": 0.0,
-            "ema_50": 0.0,
-            "bb_upper": 0.0,
-            "bb_lower": 0.0,
-            "volume": 0.0,
-            "volume_avg": 0.0,
-        }
-        try:
-            from core.data_feed import data_feed
-            # Use 1m data for the trigger
-            bars = data_feed.get_bars_multi(ticker, interval="1m", count=100)
-            if not bars or len(bars) < 20:
-                return result
-            closes = [b["close"] for b in bars]
-            volumes = [b["volume"] for b in bars]
-            result["close"] = closes[-1]
-            # EMA 50
-            if len(closes) >= 50:
-                ema = sum(closes[:50]) / 50
-                k = 2.0 / 51
-                for c in closes[50:]:
-                    ema = (c * k) + (ema * (1 - k))
-                result["ema_50"] = ema
-            else:
-                result["ema_50"] = sum(closes) / len(closes)
-            # RSI 14
-            gains = 0.0
-            losses = 0.0
-            for i in range(-14, 0):
-                diff = closes[i] - closes[i - 1]
-                if diff > 0:
-                    gains += diff
-                else:
-                    losses -= diff
-            avg_gain = gains / 14
-            avg_loss = losses / 14
-            if avg_loss == 0:
-                result["rsi"] = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                result["rsi"] = 100.0 - (100.0 / (1.0 + rs))
-            # Bollinger Bands (20-period, 2 std dev)
-            if len(closes) >= 20:
-                window = closes[-20:]
-                sma = sum(window) / 20
-                variance = sum((c - sma) ** 2 for c in window) / 20
-                std = variance ** 0.5
-                result["bb_upper"] = sma + (2 * std)
-                result["bb_lower"] = sma - (2 * std)
-            # Volume
-            result["volume"] = volumes[-1]
-            if len(volumes) >= 20:
-                result["volume_avg"] = sum(volumes[-20:]) / 20
-            else:
-                result["volume_avg"] = sum(volumes) / max(1, len(volumes))
-            return result
-        except Exception as e:
-            logger.debug("[CONFLUENCE] Indicator fetch failed for %s: %s", ticker, e)
-            return result
-
-    def _calculate_atr(self, ticker: str, period: int = 14) -> float:
-        """
-        Calculate Average True Range for stop loss / take profit sizing.
-        Returns 0.0 if insufficient data.
-        """
-        try:
-            from core.data_feed import data_feed
-            bars = data_feed.get_bars_multi(ticker, interval="1m", count=period + 5)
-            if not bars or len(bars) < period:
-                return 0.0
-            true_ranges = []
-            for i in range(1, len(bars)):
-                high = bars[i]["high"]
-                low = bars[i]["low"]
-                prev_close = bars[i - 1]["close"]
-                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                true_ranges.append(tr)
-            if len(true_ranges) < period:
-                return 0.0
-            # Simple moving average of TR
-            atr = sum(true_ranges[-period:]) / period
-            return float(atr)
-        except Exception as e:
-            logger.debug("[ATR] Calculation failed for %s: %s", ticker, e)
-            return 0.0
 
     def process_validated_execution_path(self, payload: dict):
         """Route validated bridge/swarm signals into teacher or autonomous execution."""
@@ -832,46 +542,6 @@ class VcaniTradeEngine:
         entry = float(payload.get("entry_price") or payload.get("price") or self._fetch_current_price(ticker) or 0.0)
         stop_loss = float(payload.get("stop_loss") or payload.get("sl") or 0.0)
         take_profit = float(payload.get("take_profit") or payload.get("tp") or 0.0)
-
-        # AUTO-COMPUTE SL/TP using ATR if not provided in payload
-        # This is critical — the brain doesn't pass SL/TP, so we must calculate them
-        if stop_loss <= 0 or take_profit <= 0:
-            try:
-                atr_value = self._calculate_atr(ticker, period=14)
-                if atr_value and atr_value > 0:
-                    sl_distance = atr_value * 1.5  # 1.5x ATR for SL
-                    tp_distance = atr_value * 2.5  # 2.5x ATR for TP (1.67 R:R)
-                    if action == "BUY":
-                        if stop_loss <= 0:
-                            stop_loss = entry - sl_distance
-                        if take_profit <= 0:
-                            take_profit = entry + tp_distance
-                    elif action == "SELL":
-                        if stop_loss <= 0:
-                            stop_loss = entry + sl_distance
-                        if take_profit <= 0:
-                            take_profit = entry - tp_distance
-                    self._log_dashboard(
-                        f"[AUTO-SL/TP] {action} {ticker} | SL={stop_loss:.2f} TP={take_profit:.2f} (ATR={atr_value:.2f})"
-                    )
-            except Exception as e:
-                logger.debug("[AUTO-SL/TP] Calculation failed for %s: %s", ticker, e)
-                # Fall back to percentage-based SL/TP
-                if entry > 0:
-                    if action == "BUY":
-                        if stop_loss <= 0:
-                            stop_loss = entry * 0.99  # 1% below entry
-                        if take_profit <= 0:
-                            take_profit = entry * 1.02  # 2% above entry
-                    elif action == "SELL":
-                        if stop_loss <= 0:
-                            stop_loss = entry * 1.01  # 1% above entry
-                        if take_profit <= 0:
-                            take_profit = entry * 0.98  # 2% below entry
-                    self._log_dashboard(
-                        f"[AUTO-SL/TP-FALLBACK] {action} {ticker} | SL={stop_loss:.2f} TP={take_profit:.2f}"
-                    )
-
         self._log_dashboard(f"[ROUTE] {self.current_mode}: {action} {ticker} | {reason[:140]}")
 
         try:
@@ -879,13 +549,9 @@ class VcaniTradeEngine:
         except Exception:
             pass
 
-        # Mode check — but confluence-validated signals bypass this gate
-        # (they've already passed 5 safety checks, no need for manual approval)
-        if self.current_mode != "AUTONOMOUS" and not payload.get("confluence_validated"):
+        if self.current_mode != "AUTONOMOUS":
             self._log_dashboard(f"[TEACHER] Approval required for {action} {ticker}")
             return
-        if payload.get("confluence_validated") and self.current_mode != "AUTONOMOUS":
-            self._log_dashboard(f"[CONFLUENCE-VALIDATED] Bypassing TEACHER mode for {action} {ticker}")
 
         result = self.execute_trade(ticker, action, entry, stop_loss, take_profit)
         self._log_dashboard(f"[EXEC] {result.status}: {action} {ticker} {result.reason or ''}")
@@ -910,22 +576,11 @@ class VcaniTradeEngine:
         return normalized or ["BTCUSD"]
     
     def _init_browser_agent(self):
-        """Initialize browser agent for TradingView RPA and connect via CDP."""
+        """Initialize browser agent for TradingView RPA."""
         try:
             self.browser_agent = BrowserAgent(headless=False)
             self.rpa_executor.set_browser_agent(self.browser_agent)
             logger.info("[BROWSER] Browser agent initialized")
-            # Connect to Chrome via CDP in a background thread (start() is async)
-            import threading
-            def _connect_chrome():
-                try:
-                    import asyncio as _asyncio
-                    _asyncio.run(self.browser_agent.start())
-                    logger.info("[BROWSER] CDP connected - ready for TradingView RPA")
-                except Exception as e:
-                    logger.error("[BROWSER] CDP connect failed: %s - RPA will use fallback paths", e)
-            t = threading.Thread(target=_connect_chrome, daemon=True)
-            t.start()
         except Exception as e:
             logger.warning("[BROWSER] Browser agent init failed: %s", e)
             self.browser_agent = None
@@ -935,49 +590,17 @@ class VcaniTradeEngine:
         if self.is_running:
             logger.warning("Engine already running")
             return
-
+        
         self.is_running = True
-
-        # ===== SIMPLE ENGLISH STATUS BANNER =====
-        # "HAND ON" = bot will click real trades with real money
-        # "HAND OFF" = bot is in paper mode, will NOT place real orders
-        if config.DRY_RUN:
-            self._log_dashboard("")
-            self._log_dashboard("============================================")
-            self._log_dashboard("  HAND IS OFF - PAPER MODE (NO REAL MONEY)")
-            self._log_dashboard("  Bot will LOG signals but NOT click trades.")
-            self._log_dashboard("  Set DRY_RUN=False in .env to go live.")
-            self._log_dashboard("============================================")
-        else:
-            self._log_dashboard("")
-            self._log_dashboard("============================================")
-            self._log_dashboard("  HAND IS ON - LIVE TRADING (REAL MONEY)")
-            self._log_dashboard("  Bot WILL click BUY/SELL on TradingView.")
-            self._log_dashboard("  Every signal = real money at stake.")
-            self._log_dashboard("============================================")
-        # CONFLUENCE STRATEGY explanation — the "safest, most reliable" gate
-        self._log_dashboard("")
-        self._log_dashboard("  CONFLUENCE STRATEGY ACTIVE (safest):")
-        self._log_dashboard("    • Signal must hold 90s+ before firing (was 2min)")
-        self._log_dashboard("    • 5m + 15m timeframes must agree (multi-TF)")
-        self._log_dashboard("    • Volume > 1.2x avg (skipped if no volume data)")
-        self._log_dashboard("    • Price on right side of EMA50 (with 0.2% buffer)")
-        self._log_dashboard("    • RSI not extreme (only blocks RSI <20 or >80)")
-        self._log_dashboard("  = FEWER trades, HIGHER accuracy")
-        self._log_dashboard("============================================")
-        self._log_dashboard("")
-
+        
         # Start periodic scanner (scanner is NOT a thread - use QTimer)
         self._start_scanner_timer()
         QTimer.singleShot(250, self._run_scanner_cycle)
-
-        # Start EXIT MONITOR — the missing piece that manages open positions
-        self._start_exit_monitor()
-
+        
         # Start trade monitor (it manages its own internal thread)
         if hasattr(self.trade_monitor, 'start'):
             self.trade_monitor.start()
-
+        
         # Start background threads
         if self.cloud_scanner:
             self.cloud_scanner.start()
@@ -990,13 +613,7 @@ class VcaniTradeEngine:
         if self.data_scout_listener:
             self.data_scout_listener.start()
             self._log_dashboard("[DATA-SCOUT] Listener armed")
-
-        # Start Hunter thread (screenshot → vision LLM pipeline)
-        if self.hunter_thread and config.USE_VISION:
-            self.hunter_thread.start()
-            self._log_dashboard("[HUNTER] Vision Hunter armed — screenshot analysis active")
-            _speak_alert("Vision Hunter armed. Screenshot analysis active.")
-
+        
         logger.info("[ENGINE] VcaniTrade Engine STARTED")
     
     def _start_scanner_timer(self):
@@ -1012,203 +629,24 @@ class VcaniTradeEngine:
             pass
         self._log_dashboard(f"[SCAN] Scanner armed: {len(self.current_watchlist)} markets, 60s structural cycle")
 
-    def _start_exit_monitor(self):
-        """Start the position exit monitor — checks open positions every 3 seconds.
-        
-        This is the CRITICAL loop that was missing. It handles:
-        1. Profit giveback shield (close when profit reverses)
-        2. Trailing stop management (tighten stops as profit grows)
-        3. RSI reversal exits
-        4. Regime change exits
-        5. Brain-based exit evaluation
-        """
-        self._peak_profits = {}  # ticker -> peak unrealized profit
-        self._position_entry_times = {}  # ticker -> datetime of entry
-        
-        self.exit_timer = QTimer()
-        self.exit_timer.timeout.connect(self._check_position_exits)
-        self.exit_timer.start(3000)  # Check every 3 seconds
-        logger.info("[EXIT] Position exit monitor armed (3s interval)")
-        self._log_dashboard("[EXIT] Smart exit monitor armed — profit protection active")
-
-    def _check_position_exits(self):
-        """Check all open positions for exit conditions.
-        
-        Called every 3 seconds by exit_timer. Implements:
-        1. Profit Giveback Shield: if position was in profit and gives back 40%, close it
-        2. Trailing Stop: tighten stop as profit grows (ATR-based)
-        3. RSI reversal: close when RSI hits extreme opposite to position
-        4. Time-based: close positions held too long without movement
-        """
-        if not self.is_running:
-            return
-        
-        positions = list(self.positions)
-        if not positions:
-            return
-        
-        for position in positions:
-            ticker = position.get("asset") or position.get("ticker", "")
-            if not ticker:
-                continue
-            
-            action = str(position.get("action", "")).upper()
-            entry_price = float(position.get("entry_price", 0) or 0)
-            stop_loss = float(position.get("stop_loss", 0) or 0)
-            take_profit = float(position.get("take_profit", 0) or 0)
-            
-            if entry_price <= 0:
-                continue
-            
-            # Get current price
-            current_price = self._fetch_current_price(ticker)
-            if current_price <= 0:
-                # Fallback: try scanner data
-                try:
-                    df = self.scanner._fetch_market_data(ticker, period="1d", interval="1m")
-                    if df is not None and not df.empty:
-                        current_price = float(df["Close"].iloc[-1])
-                except Exception:
-                    continue
-            
-            if current_price <= 0:
-                continue
-            
-            # Calculate P&L
-            if action == "BUY":
-                pnl_points = current_price - entry_price
-            else:
-                pnl_points = entry_price - current_price
-            
-            pnl_dollars = pnl_points * float(position.get("point_value", 1.0) or 1.0)
-            
-            # Track peak profit for giveback detection
-            peak = self._peak_profits.get(ticker, 0.0)
-            if pnl_dollars > peak:
-                self._peak_profits[ticker] = pnl_dollars
-                peak = pnl_dollars
-            
-            # ===== EXIT CONDITION 1: PROFIT GIVEBACK SHIELD =====
-            # If we were in profit and gave back 40%+ of peak, close it
-            if peak > 20.0:  # Only if we had $20+ profit
-                giveback_pct = ((peak - pnl_dollars) / peak) * 100 if peak > 0 else 0
-                if pnl_dollars < peak and giveback_pct >= 40:
-                    reason = f"PROFIT GIVEBACK SHIELD: Peak ${peak:.2f}, gave back {giveback_pct:.0f}%, now ${pnl_dollars:.2f}"
-                    logger.info("[EXIT] %s: %s", ticker, reason)
-                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
-                    self.close_position(ticker, reason)
-                    _speak_alert(f"Profit protection. Closing {ticker}. Gave back {giveback_pct:.0f} percent of profit.")
-                    continue
-            
-            # ===== EXIT CONDITION 2: RSI REVERSAL =====
-            try:
-                df = self.scanner._fetch_market_data(ticker, period="1d", interval="1m")
-                if df is not None and len(df) >= 20:
-                    from ta import momentum
-                    import pandas as _pd
-                    rsi = momentum.RSIIndicator(close=_pd.Series(df["Close"].values), window=14).rsi()
-                    current_rsi = float(rsi.iloc[-1])
-                    
-                    # BUY position + RSI overbought = exit
-                    if action == "BUY" and current_rsi > 80 and pnl_dollars > 0:
-                        reason = f"RSI REVERSAL: RSI={current_rsi:.0f} (overbought) with ${pnl_dollars:.2f} profit"
-                        logger.info("[EXIT] %s: %s", ticker, reason)
-                        self._log_dashboard(f"[EXIT] {ticker}: {reason}")
-                        self.close_position(ticker, reason)
-                        _speak_alert(f"RSI overbought at {current_rsi:.0f}. Taking profit on {ticker}.")
-                        continue
-                    
-                    # SELL position + RSI oversold = exit
-                    if action == "SELL" and current_rsi < 20 and pnl_dollars > 0:
-                        reason = f"RSI REVERSAL: RSI={current_rsi:.0f} (oversold) with ${pnl_dollars:.2f} profit"
-                        logger.info("[EXIT] %s: %s", ticker, reason)
-                        self._log_dashboard(f"[EXIT] {ticker}: {reason}")
-                        self.close_position(ticker, reason)
-                        _speak_alert(f"RSI oversold at {current_rsi:.0f}. Taking profit on {ticker}.")
-                        continue
-            except Exception:
-                pass
-            
-            # ===== EXIT CONDITION 3: TRAILING STOP TIGHTENING =====
-            # As profit grows, tighten the stop loss
-            if stop_loss > 0 and pnl_dollars > 30:
-                if action == "BUY":
-                    # Move stop to breakeven + small buffer when profit > $30
-                    new_stop = entry_price + 5.0  # $5 above entry
-                    if new_stop > stop_loss:
-                        position["stop_loss"] = new_stop
-                        self._log_dashboard(f"[TRAIL] {ticker}: Stop moved to ${new_stop:.2f} (breakeven+)")
-                        _speak_alert(f"Trailing stop updated for {ticker}. Stop at breakeven plus.")
-                
-                elif action == "SELL":
-                    new_stop = entry_price - 5.0
-                    if stop_loss == 0 or new_stop < stop_loss:
-                        position["stop_loss"] = new_stop
-                        self._log_dashboard(f"[TRAIL] {ticker}: Stop moved to ${new_stop:.2f} (breakeven+)")
-            
-            # ===== EXIT CONDITION 4: TAKE PROFIT HIT =====
-            if take_profit > 0:
-                if action == "BUY" and current_price >= take_profit:
-                    reason = f"TAKE PROFIT HIT: ${current_price:.2f} >= ${take_profit:.2f} (+${pnl_dollars:.2f})"
-                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
-                    self.close_position(ticker, reason)
-                    _speak_alert(f"Take profit hit on {ticker}. Profit: {pnl_dollars:.0f} dollars.")
-                    continue
-                elif action == "SELL" and current_price <= take_profit:
-                    reason = f"TAKE PROFIT HIT: ${current_price:.2f} <= ${take_profit:.2f} (+${pnl_dollars:.2f})"
-                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
-                    self.close_position(ticker, reason)
-                    _speak_alert(f"Take profit hit on {ticker}. Profit: {pnl_dollars:.0f} dollars.")
-                    continue
-            
-            # ===== EXIT CONDITION 5: STOP LOSS HIT =====
-            if stop_loss > 0:
-                if action == "BUY" and current_price <= stop_loss:
-                    reason = f"STOP LOSS HIT: ${current_price:.2f} <= ${stop_loss:.2f} (-${abs(pnl_dollars):.2f})"
-                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
-                    self.close_position(ticker, reason)
-                    _speak_alert(f"Stop loss hit on {ticker}. Loss: {abs(pnl_dollars):.0f} dollars.")
-                    continue
-                elif action == "SELL" and current_price >= stop_loss:
-                    reason = f"STOP LOSS HIT: ${current_price:.2f} >= ${stop_loss:.2f} (-${abs(pnl_dollars):.2f})"
-                    self._log_dashboard(f"[EXIT] {ticker}: {reason}")
-                    self.close_position(ticker, reason)
-                    _speak_alert(f"Stop loss hit on {ticker}. Loss: {abs(pnl_dollars):.0f} dollars.")
-                    continue
-
     def execute_market_scan_sequence(self):
         """QTimer entrypoint for continuous multi-timeframe market sweeps."""
         self._run_scanner_cycle()
     
     def _run_scanner_cycle(self):
-        """Run one scanner cycle with brain analysis and voice narration."""
+        """Run one scanner cycle."""
         try:
             if not self.is_running:
                 return
             tickers = list(self.current_watchlist or self.scanner.tickers or [])
             self._log_dashboard(f"[SCAN] Cycle started: {', '.join(tickers[:10])}")
-            
-            # Narrate scan start
-            try:
-                self.ai_narrator.notify_scan_start(len(tickers))
-                self.ai_narrator.add_activity("[SCAN]", f"Scanning {len(tickers)} markets...")
-            except Exception:
-                pass
-            
-            _speak_alert(f"Scanning {len(tickers)} markets")
-            
             signals = self.scanner.scan()
             logger.info("[SCAN] Cycle completed with %d technical signal(s)", len(signals or []))
-            
             if not signals:
                 self._log_dashboard("[SCAN] Cycle complete: no technical trigger yet")
-                # Run periodic brain commentary even without signals
-                self._run_periodic_brain_commentary(tickers)
                 return
 
             self._log_dashboard(f"[TARGET] Found {len(signals)} technical trigger(s); background brain thread evaluating")
-            _speak_alert(f"Found {len(signals)} technical triggers. Evaluating with brain.")
-            
             for signal in signals:
                 self._on_technical_signal_detected({
                     "ticker": getattr(signal, "ticker", "UNKNOWN"),
@@ -1220,421 +658,108 @@ class VcaniTradeEngine:
         except Exception as e:
             logger.error(f"[SCAN] Scanner cycle error: {e}")
             self._on_scanner_error(str(e))
-
-    def _run_periodic_brain_commentary(self, tickers: list):
-        """Run lightweight brain analysis every few cycles for continuous narration."""
-        if not hasattr(self, '_brain_commentary_counter'):
-            self._brain_commentary_counter = 0
-        self._brain_commentary_counter += 1
-        
-        # Run brain commentary every 3rd cycle
-        if self._brain_commentary_counter % 3 != 0:
-            return
-        
-        if not tickers:
-            return
-        
-        ticker = tickers[0]
-        try:
-            self._log_dashboard(f"[BRAIN] Running periodic analysis on {ticker}...")
-            self.ai_narrator.add_activity("[BRAIN]", f"Analyzing {ticker} with local brain...")
-            
-            # Build a lightweight package for the brain
-            package = {
-                "asset": ticker,
-                "signal_type": "PERIODIC_SCAN",
-                "technical_strength": 0.0,
-                "rsi": 50.0,
-                "atr": 0.0,
-                "recent_ohlcv": [],
-                "liquidity_zones": [],
-                "regime_context": "Periodic market scan - no technical trigger",
-            }
-            
-            decision = self.scanner.brain.request_decision("ANALYZE", package)
-            reasoning = str(decision.get("reasoning", "") or decision.get("reason", ""))[:200]
-            brain_used = decision.get("brain_used", "LOCAL_BRAIN")
-            
-            if reasoning:
-                self._log_dashboard(f"[BRAIN] {ticker}: {reasoning}")
-                self.ai_narrator.add_activity(f"[BRAIN]", f"{ticker}: {reasoning}")
-                _speak_alert(f"Brain update. {ticker}. {reasoning[:100]}")
-            else:
-                self._log_dashboard(f"[BRAIN] {ticker}: No commentary from {brain_used}")
-                
-        except Exception as e:
-            logger.debug(f"[BRAIN] Periodic analysis error: {e}")
     
     def stop(self):
         """Stop the trading engine."""
         self.is_running = False
         
         if hasattr(self.scanner, 'stop'):
-            getattr(self.scanner, 'stop')()
+            self.scanner.stop()
         if hasattr(self.trade_monitor, 'stop'):
             self.trade_monitor.stop()
         
         logger.info("[ENGINE] VcaniTrade Engine STOPPED")
     
-    # ==================== SYMBOL RESOLUTION ====================
-    
-    def _resolve_broker_symbol(self, clean_symbol: str) -> str:
-        """Dynamically probes the MT5 terminal to match clean symbols with broker-specific names/suffixes.
-        
-        Handles: BTCUSD -> BTCUSD_SB, BTCUSD.raw, BTCUSD.m, etc.
-        """
-        import MetaTrader5 as mt5  # type: ignore[import-untyped]
-        
-        # Step 1: Check config map first
-        mapped = config.MT5_SYMBOL_MAP.get(clean_symbol, "")
-        if mapped:
-            info = mt5.symbol_info(mapped)  # type: ignore[attr-defined]
-            if info:
-                mt5.symbol_select(mapped, True)  # type: ignore[attr-defined]
-                logger.info("[RESOLVE] Config map: %s -> %s", clean_symbol, mapped)
-                return mapped
-        
-        # Step 2: Direct lookup
-        info = mt5.symbol_info(clean_symbol)  # type: ignore[attr-defined]
-        if info:
-            mt5.symbol_select(clean_symbol, True)  # type: ignore[attr-defined]
-            return clean_symbol
-        
-        # Step 3: Broad keyword scan
-        all_symbols = mt5.symbols_get()  # type: ignore[attr-defined]
-        if all_symbols:
-            search = clean_symbol.upper().replace("_SB", "").replace(".RAW", "").replace("=F", "")
-            # Extract base keyword (BTC from BTCUSD, ETH from ETHUSD)
-            base = ""
-            for kw in ["BTC", "ETH", "XAU", "XAG", "NAS", "US500", "CRUDE", "GOLD"]:
-                if kw in search:
-                    base = kw
-                    break
-            if not base:
-                base = search[:3]
-            
-            candidates = []
-            for sym in all_symbols:
-                sname = sym.name.upper()
-                if base in sname:
-                    candidates.append(sym.name)
-            
-            if candidates:
-                # Prefer exact match, then shortest name (most likely the primary symbol)
-                best = sorted(candidates, key=lambda n: (n.upper() != clean_symbol.upper(), len(n)))[0]
-                mt5.symbol_select(best, True)  # type: ignore[attr-defined]
-                logger.info("[SELF-HEAL] Mapped '%s' -> '%s' (found %d candidates)", clean_symbol, best, len(candidates))
-                return best
-        
-        logger.warning("[RESOLVE] No MT5 symbol found for '%s'", clean_symbol)
-        return clean_symbol
-    
-    def _resolve_tradingview_symbol(self, ticker: str) -> str:
-        """Resolve ticker to TradingView chart symbol using config map."""
-        mapped = config.TRADINGVIEW_SYMBOL_MAP.get(ticker, "")
-        if mapped:
-            return mapped
-        # Try common variations
-        for suffix in ["", "1!", "=F"]:
-            candidate = ticker + suffix
-            if candidate in config.TRADINGVIEW_SYMBOL_MAP:
-                return config.TRADINGVIEW_SYMBOL_MAP[candidate]
-        return ticker
-    
-    # ==================== TRADE EXECUTION ====================
-    
     def execute_trade(self, ticker: str, action: str, entry: float, sl: float, tp: float) -> TradeResult:
-        """Execute a trade with dynamic symbol resolution, single-asset lock, and multi-path fallback."""
+        """Execute a trade with single-asset lock enforcement."""
         
-        # 0. Enforce asset class permission
+        # 0. Enforce native timezone-aware asset class permission gates cleanly
         if not getattr(self, 'can_trade', True):
             if not is_crypto_ticker(ticker) and not is_futures_ticker(ticker):
-                logger.warning("[RULE-GUARD] Execution blocked: %s not in allowed asset classes", ticker)
-                return TradeResult(status="REJECTED_ASSET_CLASS", ticker=ticker, reason=f"Asset class {ticker} not allowed")
+                logger.warning(f"[RULE-GUARD] Execution blocked: {ticker} does not clear our active asset class clearance profiles.")
+                return TradeResult(
+                    status="REJECTED_ASSET_CLASS",
+                    ticker=ticker,
+                    reason=f"Asset class {ticker} not in allowed futures/crypto profiles"
+                )
         
-        # 1. Lock check
+        # 1. Check if we're locked for a different ticker
         if self.asset_lock.is_locked_for(ticker):
-            logger.warning("[LOCK] Trade REJECTED for %s — locked for %s", ticker, self.asset_lock.active_locked_ticker)
-            return TradeResult(status="REJECTED_LOCK", ticker=ticker, reason=f"Locked for {self.asset_lock.active_locked_ticker}")
+            logger.warning(
+                "[LOCK] Trade REJECTED for %s — locked for %s",
+                ticker, self.asset_lock.active_locked_ticker
+            )
+            return TradeResult(
+                status="REJECTED_LOCK",
+                ticker=ticker,
+                reason=f"Locked for {self.asset_lock.active_locked_ticker}"
+            )
         
         # 2. Acquire lock
         if not self.asset_lock.acquire(ticker):
-            return TradeResult(status="REJECTED_LOCK", ticker=ticker, reason="Failed to acquire lock")
+            return TradeResult(
+                status="REJECTED_LOCK",
+                ticker=ticker,
+                reason="Failed to acquire asset lock"
+            )
         
         try:
-            # 3. Pre-trade audit (permissive — allows trades even with missing data)
+            # 3. Pre-trade audit
             if not self._run_pretrade_market_audit(ticker, entry):
                 self.asset_lock.release()
-                return TradeResult(status="REJECTED_AUDIT", ticker=ticker, reason="Pre-trade audit failed")
+                return TradeResult(
+                    status="REJECTED_AUDIT",
+                    ticker=ticker,
+                    reason="Pre-trade audit failed"
+                )
             
-            # 4. Build trade object
-            # 4. Resolve true broker symbol dynamically
-            true_symbol = self._resolve_broker_symbol(ticker)
+            # 4. Execute via appropriate executor
+            if config.get_active_mode() == "TRADINGVIEW":
+                success = self.rpa_executor.execute_trade(
+                    type('Trade', (), {
+                        'asset': ticker,
+                        'action': action,
+                        'entry_price': entry,
+                        'stop_loss': sl,
+                        'take_profit': tp
+                    })()
+                )
+            else:
+                # MT5 or other execution paths
+                success = self.trade_executor.execute(
+                    ticker=ticker,
+                    action=action,
+                    entry=entry,
+                    sl=sl,
+                    tp=tp
+                )
             
-            # 4b. Pre-flight: build trade object
-            trade = type('Trade', (), {
-                'asset': true_symbol,
-                'action': action,
-                'entry_price': entry,
-                'stop_loss': sl,
-                'take_profit': tp,
-                'confidence': 'HIGH',
-            })()
-            
-            # 5. EXECUTE — try all paths with detailed logging
-            success = False
-            errors = []
-            
-            # Path A: TradingView RPA (primary for all assets) with 30s hard timeout
-            active_mode = config.get_active_mode()
-            logger.info("[EXEC] Attempting %s execution for %s %s (%s) @ %.2f", active_mode, action, ticker, true_symbol, entry)
-            # SIMPLE ENGLISH: tell the user the bot is about to click
-            self._log_dashboard(
-                f">>> ATTEMPTING TO CLICK {action} {ticker} on TradingView... (waiting up to 45s)"
-            )
-            
-            try:
-                import threading as _threading
-                _rpa_result = {"success": False, "reason": "timeout"}
-                def _rpa_worker():
-                    try:
-                        # Try SIMPLE-CLICK first (no navigation, no typing the ticker)
-                        # This is what the user wants: just click the BUY/SELL button
-                        # on the current chart. User has the watchlist set up.
-                        if self.browser_agent and getattr(self.browser_agent, 'page', None):
-                            simple_ok = self.rpa_executor.execute_trade_simple_click(
-                                self.browser_agent, true_symbol, action,
-                                sl=sl, tp=tp,
-                            )
-                            if simple_ok:
-                                _rpa_result["success"] = True
-                                _rpa_result["reason"] = "simple-click (no nav, no typing)"
-                                return
-                        # Try HUMAN-LIKE execution second (Bézier mouse, variable typing)
-                        if self.browser_agent and getattr(self.browser_agent, 'page', None):
-                            human_ok = self.rpa_executor.execute_trade_human(
-                                self.browser_agent, true_symbol, action,
-                                entry_price=entry, sl=sl, tp=tp,
-                            )
-                            if human_ok:
-                                _rpa_result["success"] = True
-                                _rpa_result["reason"] = "human-like RPA"
-                                return
-                        # Fall back to standard execution (may navigate, but better than nothing)
-                        _rpa_result["success"] = self.rpa_executor.execute_trade(trade)
-                        _rpa_result["reason"] = getattr(self.rpa_executor, 'last_failure_reason', '') or "no-reason"
-                    except Exception as e:
-                        _rpa_result["reason"] = str(e)
-                _rpa_thread = _threading.Thread(target=_rpa_worker, daemon=True)
-                _rpa_thread.start()
-                # Non-blocking check: poll for completion with short intervals so the
-                # main thread is NEVER blocked. This keeps the Qt event loop free
-                # so subsequent signals can be processed.
-                _deadline = time.time() + 45
-                _rpa_done = False
-                while time.time() < _deadline:
-                    if not _rpa_thread.is_alive():
-                        _rpa_done = True
-                        break
-                    time.sleep(0.1)
-                if not _rpa_done:
-                    logger.warning("[EXEC] TradingView RPA timed out after 45s for %s %s — falling through", action, true_symbol)
-                    errors.append("TradingView RPA: 45s timeout (CDP may not be connected)")
-                    # SIMPLE ENGLISH: tell user what happened
-                    self._log_dashboard(
-                        f"!!! DID NOT CLICK {action} {ticker} — took too long (>45s). Check Chrome is open with TradingView."
-                    )
-                else:
-                    success = _rpa_result["success"]
-                    if success:
-                        logger.info("[EXEC] TradingView RPA SUCCESS for %s %s", action, true_symbol)
-                        # SIMPLE ENGLISH: confirm the click happened
-                        if not config.DRY_RUN:
-                            self._log_dashboard(
-                                f">>> CLICKED! {action} {ticker} placed on TradingView (real money)"
-                            )
-                        else:
-                            self._log_dashboard(
-                                f">>> CLICKED! {action} {ticker} (paper mode — no real money)"
-                            )
-                        # SOUND: play buy or sell sound on successful execution
-                        try:
-                            from core.audio_alerts import play_buy_sound, play_sell_sound
-                            if action == "BUY":
-                                play_buy_sound()
-                            elif action == "SELL":
-                                play_sell_sound()
-                        except Exception:
-                            pass
-                    else:
-                        errors.append(f"TradingView RPA: {_rpa_result['reason']}")
-                        logger.warning("[EXEC] TradingView RPA returned False for %s %s: %s", action, true_symbol, _rpa_result['reason'])
-                        # SIMPLE ENGLISH: tell user it failed
-                        self._log_dashboard(
-                            f"!!! DID NOT CLICK {action} {ticker} — reason: {_rpa_result['reason'][:120]}"
-                        )
-                        # SOUND: play warning on failure
-                        try:
-                            from core.audio_alerts import play_warning_sound
-                            play_warning_sound()
-                        except Exception:
-                            pass
-            except Exception as e:
-                errors.append(f"TradingView RPA exception: {e}")
-                logger.error("[EXEC] TradingView RPA exception for %s %s: %s", action, true_symbol, e)
-            
-            # Path B: Ghost Executor fallback (JS injection via CDP)
-            if not success:
-                try:
-                    ghost = getattr(self, '_ghost_executor', None)
-                    if ghost and hasattr(ghost, 'execute_js'):
-                        import asyncio
-                        loop = asyncio.new_event_loop()
-                        try:
-                            success = loop.run_until_complete(ghost.execute_js(action))
-                            if success:
-                                logger.info("[EXEC] Ghost Executor SUCCESS for %s %s", action, true_symbol)
-                            else:
-                                errors.append("Ghost JS injection returned False")
-                        finally:
-                            loop.close()
-                except Exception as e:
-                    errors.append(f"Ghost Executor: {e}")
-                    logger.error("[EXEC] Ghost Executor exception: %s", e)
-            
-            # Path C: MT5 Direct Order (with full compliance checks)
-            if not success:
-                try:
-                    mt5_result = self._execute_mt5_order(true_symbol, action, entry, sl, tp)
-                    if mt5_result.get("success"):
-                        success = True
-                        logger.info("[EXEC] MT5 Direct SUCCESS for %s %s", action, true_symbol)
-                    else:
-                        errors.append(f"MT5: {mt5_result.get('error', 'unknown')}")
-                except Exception as e:
-                    errors.append(f"MT5 exception: {e}")
-                    logger.error("[EXEC] MT5 exception: %s", e)
-            
-            # 6. Handle result
             if success:
                 logger.info("[EXEC] Trade executed: %s %s @ %.2f", action, ticker, entry)
-                self.positions.append({
-                    "asset": ticker, "ticker": ticker, "action": action,
-                    "entry_price": entry, "stop_loss": sl, "take_profit": tp,
-                    "point_value": 1.0, "entry_time": datetime.now().isoformat(),
-                })
-                self._log_dashboard(f"[POSITION] Tracking {action} {ticker} @ ${entry:.2f} | SL=${sl:.2f} | TP=${tp:.2f}")
-                return TradeResult(status="EXECUTED", ticker=ticker, action=action, entry_price=entry, stop_loss=sl, take_profit=tp)
+                return TradeResult(
+                    status="EXECUTED",
+                    ticker=ticker,
+                    action=action,
+                    entry_price=entry,
+                    stop_loss=sl,
+                    take_profit=tp
+                )
             else:
                 self.asset_lock.release()
-                error_detail = " | ".join(errors) if errors else "All execution paths failed"
-                logger.error("[EXEC] FAILED: %s %s — %s", action, ticker, error_detail)
-                return TradeResult(status="FAILED", ticker=ticker, reason=error_detail)
+                return TradeResult(
+                    status="FAILED",
+                    ticker=ticker,
+                    reason="Execution failed"
+                )
         
         except Exception as e:
             logger.error("[EXEC] Trade execution error: %s", e)
             self.asset_lock.release()
-            return TradeResult(status="ERROR", ticker=ticker, reason=str(e))
-    
-    def _execute_mt5_order(self, true_symbol: str, action: str, entry: float, sl: float, tp: float) -> dict:
-        """MT5 Direct Order with full compliance: symbol discovery, volume validation, error translation."""
-        import MetaTrader5 as mt5  # type: ignore[import-untyped]
-        
-        # Real-time contract and volume compliance layer
-        symbol_info = mt5.symbol_info(true_symbol)  # type: ignore[attr-defined]
-        if not symbol_info:
-            # Try dynamic discovery one more time
-            true_symbol = self._resolve_broker_symbol(true_symbol)
-            symbol_info = mt5.symbol_info(true_symbol)  # type: ignore[attr-defined]
-        
-        if not symbol_info:
-            error_msg = f"Symbol unavailable: {true_symbol} not found in MT5 terminal"
-            logger.error("[EXEC-CRITICAL] %s", error_msg)
-            self._log_dashboard(f"[EXEC-CRITICAL] {error_msg}")
-            return {"success": False, "error": error_msg}
-        
-        # Force-select symbol in Market Watch if not visible
-        if not symbol_info.visible:
-            mt5.symbol_select(true_symbol, True)  # type: ignore[attr-defined]
-            symbol_info = mt5.symbol_info(true_symbol)  # type: ignore[attr-defined]
-        
-        # Auto-override volume to broker limits
-        safe_lot = max(symbol_info.volume_min, min(0.01, symbol_info.volume_max))
-        
-        # Build the order request
-        order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL  # type: ignore[attr-defined]
-        
-        tick = mt5.symbol_info_tick(true_symbol)  # type: ignore[attr-defined]
-        if not tick:
-            return {"success": False, "error": f"No tick data for {true_symbol}"}
-        
-        price = tick.ask if action == "BUY" else tick.bid
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,  # type: ignore[attr-defined]
-            "symbol": true_symbol,
-            "volume": safe_lot,
-            "type": order_type,
-            "price": price,
-            "deviation": 20,
-            "magic": 20250530,
-            "comment": f"VcanTrade_{action}",
-            "type_time": mt5.ORDER_TIME_GTC,  # type: ignore[attr-defined]
-            "type_filling": mt5.ORDER_FILLING_IOC,  # type: ignore[attr-defined]
-        }
-        
-        # Add SL/TP if provided
-        if sl > 0:
-            request["sl"] = sl
-        if tp > 0:
-            request["tp"] = tp
-        
-        logger.info("[MT5-ORDER] Sending: %s %s vol=%.4f @ %.5f SL=%s TP=%s",
-                     action, true_symbol, safe_lot, price,
-                     f"{sl:.5f}" if sl > 0 else "None",
-                     f"{tp:.5f}" if tp > 0 else "None")
-        
-        # Submit order
-        result = mt5.order_send(request)  # type: ignore[attr-defined]
-        
-        if not result:
-            error_code = mt5.last_error()  # type: ignore[attr-defined]
-            detailed_reason = f"MT5 order_send returned None | API Error {error_code}"
-            logger.error("[EXEC] FAILED: %s %s — %s", action, true_symbol, detailed_reason)
-            self._log_dashboard(f"[EXEC] FAILED: {action} {true_symbol} — {detailed_reason}")
-            return {"success": False, "error": detailed_reason}
-        
-        if result.retcode != mt5.TRADE_RETCODE_DONE:  # type: ignore[attr-defined]
-            error_code = mt5.last_error()  # type: ignore[attr-defined]
-            detailed_reason = f"MT5 Code {result.retcode} | API Error {error_code}"
-            
-            # Translate common architectural blocks for the dashboard
-            if error_code == 4756:
-                detailed_reason += " (Enable Algo-Trading in MT5 Tools > Options > Expert Advisors)"
-            elif result.retcode == 10014:
-                detailed_reason += f" (Invalid volume: requested {safe_lot}, min={symbol_info.volume_min}, max={symbol_info.volume_max})"
-            elif result.retcode == 10018:
-                detailed_reason += " (Market closed or session frozen by broker)"
-            elif result.retcode == 10019:
-                detailed_reason += " (Not enough money for this volume)"
-            elif result.retcode == 10021:
-                detailed_reason += " (No price available — market data feed offline)"
-            elif result.retcode == 10026:
-                detailed_reason += " (AutoTrading disabled in MT5 terminal)"
-            elif result.retcode == 10013:
-                detailed_reason += " (Invalid request — check symbol permissions)"
-            elif result.retcode == 10016:
-                detailed_reason += " (Invalid stops — SL/TP too close to market price)"
-            
-            logger.error("[EXEC] FAILED: %s %s — %s", action, true_symbol, detailed_reason)
-            self._log_dashboard(f"[EXEC] FAILED: {action} {true_symbol} — {detailed_reason}")
-            return {"success": False, "error": detailed_reason}
-        
-        # Success
-        logger.info("[MT5-ORDER] SUCCESS: %s %s vol=%.4f @ %.5f ticket=%s",
-                     action, true_symbol, safe_lot, price, result.order)
-        self._log_dashboard(f"[MT5] {action} {true_symbol} filled @ {price:.5f} ticket={result.order}")
-        return {"success": True, "ticket": result.order, "price": price}
+            return TradeResult(
+                status="ERROR",
+                ticker=ticker,
+                reason=str(e)
+            )
     
     def check_dynamic_exits(self):
         """Check all open positions for dynamic AI exit conditions."""
@@ -1650,18 +775,18 @@ class VcaniTradeEngine:
             # Fetch current market data
             try:
                 market_data = self.scanner._fetch_market_data(ticker)
-                if market_data is None or (hasattr(market_data, 'empty') and market_data.empty):
+                if not market_data:
                     continue
                 
                 # Get regime context
                 regime = self.brain_swarm.mia.get_market_wisdom(ticker)
-                regime_context = regime.get("regime", "") if isinstance(regime, dict) else ""
+                regime_context = regime.get("regime", "")
                 
                 # Evaluate exit conditions
                 should_exit, reason = evaluate_dynamic_ai_exit_conditions(
                     ticker=ticker,
                     position_data=position,
-                    market_data=market_data,  # type: ignore[arg-type]
+                    market_data=market_data,
                     regime_context=regime_context
                 )
                 
@@ -1679,24 +804,12 @@ class VcaniTradeEngine:
             if config.get_active_mode() == "TRADINGVIEW":
                 self.rpa_executor.flatten_position(ticker)
             else:
-                self.trade_executor.process_signal(  # type: ignore[union-attr]
-                    type('CloseSignal', (), {'asset': ticker, 'action': 'CLOSE'})()
-                )
-            
-            # Remove from position tracking
-            self.positions = [p for p in self.positions if (p.get("asset") or p.get("ticker")) != ticker]
-            self._peak_profits.pop(ticker, None)
+                self.trade_executor.close_position(ticker)
             
             # Release lock
             if self.asset_lock.active_locked_ticker == ticker:
                 self.asset_lock.release()
             
-            # Narrate the close
-            self._log_dashboard(f"[CLOSE] Position closed: {ticker} | {reason}")
-            try:
-                self.ai_narrator.add_activity("[CLOSE]", f"{ticker}: {reason}")
-            except Exception:
-                pass
             logger.info("[CLOSE] Position closed: %s | Reason: %s", ticker, reason)
             
         except Exception as e:
@@ -1704,26 +817,14 @@ class VcaniTradeEngine:
     
     def _run_pretrade_market_audit(self, ticker: str, entry_price: float) -> bool:
         """Run pre-trade market audit."""
-        # If we have no price data at all, allow the trade (best effort)
         if entry_price <= 0:
-            logger.info("[AUDIT] No entry price for %s — allowing trade (best effort)", ticker)
-            return True
-
-        # Check slippage — with a 5s hard timeout to never block execution
-        import concurrent.futures
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(self._fetch_current_price, ticker)
-                current_price = future.result(timeout=5)
-        except concurrent.futures.TimeoutError:
-            logger.warning("[AUDIT] Price fetch timed out for %s — allowing trade", ticker)
-            return True
-        except Exception:
-            return True
-
+            return False
+        
+        # Check slippage
+        current_price = self._fetch_current_price(ticker)
         if current_price <= 0:
             return True  # Proceed if can't fetch price
-
+        
         slippage_pct = abs(current_price - entry_price) / entry_price * 100
         if slippage_pct > config.MAX_SLIPPAGE_PERCENT:
             logger.warning(
@@ -1731,33 +832,18 @@ class VcaniTradeEngine:
                 slippage_pct, config.MAX_SLIPPAGE_PERCENT, ticker
             )
             return False
-
+        
         return True
-
+    
     def _fetch_current_price(self, ticker: str) -> float:
         """Fetch current price for a ticker."""
         try:
-            # Try yfinance directly first (fast, no browser blocking)
-            try:
-                from core.symbol_mapper import normalize_yfinance_symbol
-                import yfinance as yf  # type: ignore[import-untyped]
-                yf_symbol = normalize_yfinance_symbol(ticker)
-                t = yf.Ticker(yf_symbol)
-                hist = t.history(period="1d", interval="1m")
-                if not hist.empty:
-                    return float(hist["Close"].iloc[-1])
-            except Exception:
-                pass
-
-            # Fallback to scanner data
-            try:
-                df = self.scanner._fetch_market_data(ticker)
-                if df is not None and not df.empty:
-                    return float(df["Close"].iloc[-1])
-            except Exception:
-                pass
-
-            return 0.0
+            if config.get_active_mode() == "TRADINGVIEW" and self.browser_agent:
+                # Use browser agent to fetch price
+                return self.browser_agent.get_current_price(ticker)
+            else:
+                # Use MT5 or yfinance
+                return self.scanner._fetch_market_data(ticker)["Close"].iloc[-1]
         except Exception:
             return 0.0
 
