@@ -21,6 +21,11 @@ class ConfidenceLevel(str, Enum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     VERY_HIGH = "VERY_HIGH"
+    
+    def numeric(self) -> float:
+        """Convert confidence level to numeric value for threshold comparison."""
+        mapping = {"LOW": 0.25, "MEDIUM": 0.50, "HIGH": 0.75, "VERY_HIGH": 0.90}
+        return mapping.get(self.value, 0.0)
 
 
 class LLMAnalysisOutput(BaseModel):

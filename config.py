@@ -29,7 +29,9 @@ SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() ==
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
 # If only one symbol, the scanner locks onto it and executes directly.
-ACTIVE_SYMBOLS = ["MNQ1!", "ESM6", "MCL1!", "MGC1!"]
+# NOW CONNECTED TO DASHBOARD WATCHLIST - reads from Dashboard UI dynamically!
+# Remove old tickers (MNQ, MES, MCL, MGC) - user wants BTCUSD/ETHUSD
+ACTIVE_SYMBOLS = []  # Dashboard watchlist will populate this
 
 # Confidence-Based Take Profit Targets
 TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  ($50)
@@ -104,7 +106,7 @@ BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 # ===== SYMBOL BRIDGE (TradingView → MT5 Broker) =====
 # TradingView chart symbols can differ from broker-specific MT5 names.
 # Override any value with an environment variable if your broker labels differ.
-TRADINGVIEW_TICKERS = ("NQM6", "ESM6", "CL1!", "MGC")
+TRADINGVIEW_TICKERS = ("NQM6", "MES1!", "CL1!", "MGC")
 
 # TradingView is the sole charting surface. No legacy aliases remain.
 
@@ -284,15 +286,12 @@ SYMBOL_FUZZY_TERMS = {
 }
 
 # ===== ACTIVE WATCHLIST =====
-ACTIVE_WATCHLIST = [
-    "MNQ1!",
-    "ESM6",
-    "MCL1!",
-    "MGC1!",
-]
+# NOW CONNECTED TO DASHBOARD - reads from Dashboard UI dynamically!
+ACTIVE_WATCHLIST = []  # Dashboard watchlist will populate this
 
 # ===== MULTI-ASSET HUNTER =====
-MULTI_ASSET_TICKERS = ["MNQ1!", "ESM6", "MCL1!", "MGC1!"]
+# NOW CONNECTED TO DASHBOARD WATCHLIST - reads from Dashboard UI dynamically!
+MULTI_ASSET_TICKERS = []  # Dashboard watchlist will populate this
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # ===== EXECUTION MODE SWITCH =====
@@ -334,10 +333,10 @@ FALLBACK_COORDS = TRADINGVIEW_FALLBACK_COORDS
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
-MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:0.5b")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen2.5:0.5b")
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5-coder:1.5b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen2.5-coder:1.5b")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
-OLLAMA_TIMEOUT = 180
+OLLAMA_TIMEOUT = 300  # 5 minutes for large models
 JSON_OUTPUT = True
 
 # ===== GEMINI LIVE BRAIN =====

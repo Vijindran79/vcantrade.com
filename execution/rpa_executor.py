@@ -146,7 +146,32 @@ class RPAExecutor:
                 # 2. SKIP NAVIGATION — user has watchlist set up
                 # (Previously typed ticker into search box — user found this annoying)
                 logger.info("[HY3-SIMPLE] Skipping symbol navigation (user has watchlist set up)")
-
+                
+                # 2.5 VALIDATE: Click ticker in watchlist to ensure correct chart is loaded
+                # NOTE: browser_agent.page is None after simple CDP changes
+                # Use simple_browser (WebSocket CDP) or pyautogui instead
+                if browser_agent and hasattr(browser_agent, 'simple_browser') and browser_agent.simple_browser:
+                    try:
+                        display_ticker = ticker.replace("1!", "").replace("=F", "")
+                        logger.info(f"[WATCHLIST-VALIDATE] Using simple CDP to validate {ticker}")
+                        # Simple CDP doesn't have watchlist click yet, so we use pyautogui
+                        # to click on the watchlist area (left side of TradingView)
+                        import pygetwindow as gw
+                        tv_windows = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
+                        if tv_windows:
+                            window = tv_windows[0]
+                            # Click in watchlist area (left side of TV)
+                            pyautogui.click(window.left + 100, window.top + 200)
+                            time.sleep(0.5)
+                            # Type the ticker to search
+                            pyautogui.write(display_ticker, interval=0.05)
+                            time.sleep(0.5)
+                            pyautogui.press('enter')
+                            time.sleep(1.0)
+                            logger.info(f"[WATCHLIST-VALIDATE] Navigated to {display_ticker}")
+                    except Exception as e:
+                        logger.warning(f"[WATCHLIST-VALIDATE] Failed to validate ticker: {e}")
+                
                 # 3. Force close any stuck UI dialogue remnants
                 pyautogui.press('escape')
                 time.sleep(0.2)
@@ -366,36 +391,52 @@ class RPAExecutor:
             return False
 
     def execute_trade_simple_click(self, browser_agent, ticker: str, action: str,
-                                    sl: float = 0.0, tp: float = 0.0) -> bool:
+                                     sl: float = 0.0, tp: float = 0.0) -> bool:
         """
         SIMPLEST execution: just click the BUY/SELL button on the CURRENT chart.
         No navigation. No typing the ticker. No search box interference.
         Assumes the user has the right chart open in their watchlist.
         Uses JavaScript injection for maximum reliability.
 
-        This is the "what worked before" approach — direct click on the
-        current chart's order panel, exactly where the user manually trades.
-
-        NEW: Re-finds the active TradingView tab right before clicking (in case
-        the user switched tabs). Takes a screenshot before and after so the user
-        can see exactly what the bot is doing.
+        UPDATED: Now uses simple_cdp_browser (WebSocket CDP) to bypass Playwright timeout.
+        Falls back to pyautogui coordinate clicking if simple CDP fails.
         """
         try:
             logger.info(f"[SIMPLE-CLICK] {action} {ticker} on current chart (no navigation)")
 
-            # RE-FIND THE TRADINGVIEW TAB — user may have switched tabs since startup
-            try:
-                page = self._get_active_tradingview_page(browser_agent)
-                if page:
-                    browser_agent.page = page
-            except Exception as refresh_err:
-                logger.debug("[SIMPLE-CLICK] Could not refresh tab: %s", refresh_err)
+            # PRIMARY: Use simple_cdp_browser if available (bypasses Playwright timeout issues)
+            simple_browser = getattr(browser_agent, 'simple_browser', None)
+            if simple_browser and simple_browser.websocket:
+                logger.info("[SIMPLE-CLICK] Using simple CDP browser for reliable clicking")
+                
+                # Click the buy/sell button via simple CDP (returns True/False)
+                # NOTE: simple_browser.click_button() is ASYNC, need to run it properly
+                try:
+                    # Run the async function synchronously
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    try:
+                        click_result = loop.run_until_complete(simple_browser.click_button(action))
+                    finally:
+                        loop.close()
+                except Exception as cdp_err:
+                    logger.warning(f"[SIMPLE-CLICK] Simple CDP click exception: {cdp_err}")
+                    click_result = False
+                
+                if click_result is True:
+                    logger.info(f"[SIMPLE-CLICK] Successfully clicked {action} button via simple CDP")
+                    return True
+                else:
+                    logger.warning(f"[SIMPLE-CLICK] Simple CDP click failed for {action}, trying pyautogui fallback")
 
-            page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
-            if not page:
-                logger.error("[SIMPLE-CLICK] No browser page available")
-                self.last_failure_reason = "no browser page"
-                return False
+# FALLBACK: Use pyautogui to click at TradingView button coordinates
+            logger.info(f"[SIMPLE-CLICK] Using pyautogui fallback for {action}")
+            return self._click_via_controlled_page(f"{action.lower()}_button", "simple-click-fallback")
+
+        except Exception as e:
+            logger.error(f"[SIMPLE-CLICK] Exception: {str(e)[:200]}")
+            self.last_failure_reason = f"simple_click exception: {str(e)[:100]}"
+            return False
 
             # Log the EXACT tab the bot is interacting with
             try:
@@ -426,6 +467,28 @@ class RPAExecutor:
                     return False
             except Exception:
                 pass
+
+            # ===== WATCHLIST VALIDATION: Ensure correct ticker chart is loaded =====
+            try:
+                display_ticker = ticker.replace("1!", "").replace("=F", "").replace("_SB", "")
+                watchlist_selectors = [
+                    f'[data-symbol="{display_ticker}"]',
+                    f'[data-symbol="{ticker}"]',
+                    f'div:has-text("{display_ticker}")',
+                    f'td:has-text("{display_ticker}")',
+                    f'[class*="watchlist"] [data-symbol*="{display_ticker}" i]',
+                ]
+                for selector in watchlist_selectors:
+                    try:
+                        if page.locator(selector).count() > 0:
+                            page.locator(selector).first.click()
+                            logger.info(f"[WATCHLIST-VALIDATE] Clicked {ticker} ({display_ticker}) in watchlist sidebar")
+                            time.sleep(1.2)  # Wait for chart to switch and render
+                            break
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning(f"[WATCHLIST-VALIDATE] Failed to validate/click ticker in watchlist: {e}")
 
             # Bring the page to front
             try:
@@ -1925,7 +1988,13 @@ class RPAExecutor:
         Bridges sync->async via the stored browser event loop."""
         page = getattr(self, "_controlled_page", None)
         if not page or page.is_closed():
+            # Fallback to browser_agent's page
+            agent = getattr(self, "_browser_agent", None)
+            page = getattr(agent, "page", None)
+        
+        if not page or page.is_closed():
             return False
+            
         try:
             if ticker and not self._verify_chart_landmark(page, ticker):
                 logger.warning("[CONTROLLED-PAGE] Refusing HTML click because chart landmark does not match %s", ticker)
@@ -2823,20 +2892,27 @@ class RPAExecutor:
         """Attach the browser agent so active RPA strikes can pause CDP polling."""
         self._browser_agent = browser_agent
 
-    def _run_async(self, coro):
-        """Run an async coroutine on the browser event loop from sync context."""
+    def _run_async(self, coro, browser_agent=None):
+        """Run an async coroutine on the persistent browser event loop."""
         import asyncio
+        # 1. Use provided or internal browser_agent's loop handler (Reliable)
+        agent = browser_agent or getattr(self, "browser_agent", None)
+        if agent and hasattr(agent, "run_in_loop"):
+            return agent.run_in_loop(coro)
+
+        # 2. Legacy fallback: use internal loop reference
         loop = getattr(self, "_controlled_loop", None)
         if loop and not loop.is_closed():
             future = asyncio.run_coroutine_threadsafe(coro, loop)
-            return future.result(timeout=8)
-        # Fallback: try to create/get a loop
+            return future.result(timeout=10)
+        
+        # 3. Last resort: create/get a local loop
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    return pool.submit(asyncio.run, coro).result(timeout=8)
+                    return pool.submit(asyncio.run, coro).result(timeout=10)
             return loop.run_until_complete(coro)
         except Exception:
             return asyncio.run(coro)

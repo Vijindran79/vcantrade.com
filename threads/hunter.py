@@ -305,7 +305,7 @@ class MultiAssetHunterThread(QThread):
 
             # Execute if BUY/SELL AND confidence meets threshold
             if signal in ("BUY", "SELL"):
-                if confidence >= config.MIN_CONFIDENCE_THRESHOLD:
+                if confidence >= config.MIN_CONFIDENCE_THRESHOLD * 100:
                     logger.critical(
                         "[HUNTER] %s SIGNAL: %s | Confidence: %d%% | Threat: %s | %s",
                         symbol,
@@ -321,13 +321,13 @@ class MultiAssetHunterThread(QThread):
                         symbol,
                         signal,
                         confidence,
-                        config.MIN_CONFIDENCE_THRESHOLD,
+                        int(config.MIN_CONFIDENCE_THRESHOLD * 100),
                         reason,
                     )
                     self.status_update.emit(
                         symbol,
                         "SKIPPED_LOW_CONFIDENCE",
-                        f"Confidence {confidence}% below {config.MIN_CONFIDENCE_THRESHOLD}%",
+                        f"Confidence {confidence}% below {int(config.MIN_CONFIDENCE_THRESHOLD * 100)}%",
                     )
             else:
                 logger.info("[HUNTER] %s no trade setup | %s", symbol, reason)
@@ -374,7 +374,7 @@ class MultiAssetHunterThread(QThread):
         self.narrator_update.emit("[CHART]", f"Setup: {reason}")
 
         if signal in ("BUY", "SELL"):
-            if confidence >= config.MIN_CONFIDENCE_THRESHOLD:
+            if confidence >= config.MIN_CONFIDENCE_THRESHOLD * 100:
                 verdict_icon = "[BOLT]" if confidence >= 80 else "[OK]"
                 verdict_msg = (
                     f"VERDICT: {signal} {symbol} | Passing to execution gate"
@@ -383,7 +383,7 @@ class MultiAssetHunterThread(QThread):
                 verdict_icon = "[PAUSE]"
                 verdict_msg = (
                     f"VERDICT: {signal} {symbol} | BLOCKED by confidence gate "
-                    f"(< {config.MIN_CONFIDENCE_THRESHOLD}%)"
+                    f"(< {config.MIN_CONFIDENCE_THRESHOLD * 100:.0f}%)"
                 )
             self.narrator_update.emit(verdict_icon, verdict_msg)
         else:
