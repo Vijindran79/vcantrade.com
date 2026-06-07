@@ -29,7 +29,8 @@ SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() ==
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
 # If only one symbol, the scanner locks onto it and executes directly.
-ACTIVE_SYMBOLS = ["MNQ1!", "MES1!", "MCL1!", "MGC1!"]
+ACTIVE_SYMBOLS = ["BTCUSD", "ETHUSD"]
+WATCHLIST = ["BTCUSD", "ETHUSD"]
 
 # Confidence-Based Take Profit Targets
 TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  ($50)
@@ -285,14 +286,12 @@ SYMBOL_FUZZY_TERMS = {
 
 # ===== ACTIVE WATCHLIST =====
 ACTIVE_WATCHLIST = [
-    "MNQ1!",
-    "MES1!",
-    "MCL1!",
-    "MGC1!",
+    "BTCUSD",
+    "ETHUSD",
 ]
 
 # ===== MULTI-ASSET HUNTER =====
-MULTI_ASSET_TICKERS = ["MNQ1!", "MES1!", "MCL1!", "MGC1!"]
+MULTI_ASSET_TICKERS = ["BTCUSD", "ETHUSD"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # ===== EXECUTION MODE SWITCH =====
@@ -334,8 +333,8 @@ FALLBACK_COORDS = TRADINGVIEW_FALLBACK_COORDS
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
-MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", MICRO_BRAIN_MODEL if MICRO_BRAIN_ENABLED else "qwen2.5:1.5b-instruct-q4_K_M")
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen:latest")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_TIMEOUT = 180
 JSON_OUTPUT = True

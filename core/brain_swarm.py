@@ -213,16 +213,8 @@ def call_local_brain(
     Simple wrapper to call local Ollama brain.
     This is the core "brain" function that runs locally.
     """
-    url = build_ollama_url(config.OLLAMA_BASE_URL, "api/generate")
-    chosen_model = model or config.OLLAMA_MODEL
-    if _is_openrouter_url(url) and _looks_like_local_ollama_model(chosen_model):
-        msg = (
-            f"OLLAMA_BASE_URL points to OpenRouter ({normalize_ollama_base_url(config.OLLAMA_BASE_URL)}) "
-            f"but OLLAMA_MODEL is local Ollama model '{chosen_model}'. "
-            "Set OLLAMA_BASE_URL=http://127.0.0.1:11434 or switch to a valid OpenRouter model."
-        )
-        logger.error("[BRAIN] %s", msg)
-        return {"error": msg}
+    url = "http://localhost:11434/api/generate"
+    chosen_model = "qwen:latest"
     
     # Simple headers for local connection
     headers = {"Content-Type": "application/json"}
@@ -231,69 +223,55 @@ def call_local_brain(
         "model": chosen_model,
         "prompt": prompt,
         "stream": False,
-        "keep_alive": getattr(config, "OLLAMA_KEEP_ALIVE", "30m"),
-        "options": {
-            "temperature": 0.1,  # Very low = consistent JSON, no rambling
-            "num_predict": int(num_predict or getattr(config, "OLLAMA_BRAIN_NUM_PREDICT", 96)),
-            "num_ctx": int(getattr(config, "OLLAMA_NUM_CTX", 2048)),
-            "top_p": 0.9,
-            "top_k": 40,
-        }
     }
     
     try:
         request_timeout = max(10, int(timeout or config.LLM_TIMEOUT))
-        logger.info(
-            "[BRAIN] Calling local brain: %s at %s (timeout=%ss)",
-            chosen_model,
-            url,
-            request_timeout,
+
+        # ---------------------------------------------------------------
+        # STEP 4 — PRE-POST AUDIT LOG (visible in both logger and stderr)
+        # ---------------------------------------------------------------
+        import sys
+        _audit_msg = (
+            f"\n{'='*72}\n"
+            f"[BRAIN-AUDIT] PRE-POST PAYLOAD DUMP\n"
+            f"  URL        : {url}\n"
+            f"  model used : {chosen_model!r}\n"
+            f"  stream     : {payload['stream']}\n"
+            f"  timeout    : {request_timeout}s\n"
+            f"  prompt[:80]: {str(prompt)[:80]!r}\n"
+            f"{'='*72}"
         )
+        print(_audit_msg, file=sys.stderr, flush=True)
+        logger.info(_audit_msg)
 
-        # PERSISTENT SESSION + RETRY/BACKOFF (Task 2)
-        # Use the shared keep-alive session. On a dropped connection or
-        # timeout, back off 1 second and retry up to 2 more times (3 total
-        # attempts) before falling through to the error path, which the
-        # caller treats as the OLLAMA_PREDATOR mathematical fallback.
         session = get_ollama_session()
-        response = None
-        last_exc = None
-        max_attempts = 3  # 1 initial + 2 retries
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = session.post(url, json=payload, headers=headers, timeout=request_timeout)
-                break  # success — exit retry loop
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout) as net_err:
-                last_exc = net_err
-                if attempt < max_attempts:
-                    logger.warning(
-                        "[BRAIN] Ollama connection issue (attempt %d/%d): %s — backing off 1s",
-                        attempt, max_attempts, str(net_err)[:120],
-                    )
-                    import time as _t
-                    _t.sleep(1.0)
-                    continue
-                # Exhausted retries — drop to predator fallback
-                logger.error(
-                    "[FAIL] Ollama unreachable after %d attempts: %s — falling back to OLLAMA_PREDATOR",
-                    max_attempts, str(net_err)[:120],
-                )
-                return {"error": "Ollama not running", "fallback_mode": True, "brain_used": "OLLAMA_PREDATOR"}
-
-        if response is None:
-            return {"error": f"Ollama request failed: {last_exc}", "fallback_mode": True, "brain_used": "OLLAMA_PREDATOR"}
-
         try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as http_err:
-            logger.error("[FAIL] Local AI HTTP error: %s | %s", http_err, _response_preview(response))
-            return {"error": f"Local AI HTTP error: {_response_preview(response)}"}
+            response = session.post(url, json=payload, headers=headers, timeout=request_timeout)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as net_err:
+            import traceback
+            print("\n" + "="*80, file=sys.stderr)
+            print("[CONNECTION-ERROR] Cannot reach Ollama REST instance!", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            print("="*80 + "\n", file=sys.stderr, flush=True)
+            logger.error("[CONNECTION-ERROR] Ollama connection failure: %s", net_err)
+            raise net_err
+
+        # Log the HTTP response status before raise_for_status so 404 is visible
+        logger.info("[BRAIN] HTTP response: %s %s", response.status_code, response.reason)
+        if response.status_code != 200:
+            logger.error(
+                "[BRAIN] Non-200 from Ollama — status=%s body=%s",
+                response.status_code,
+                response.text[:300],
+            )
+
+        response.raise_for_status()
         
         # Check for empty response body
         if not response.text.strip():
-            logger.warning("[WARN] Ollama returned an empty string. Check if 'ollama run qwen2.5:latest' is active!")
-            return {"error": "Ollama returned empty response. Is Ollama running?"}
+            logger.warning("[WARN] Ollama returned an empty string.")
+            return {"error": "Ollama returned empty response"}
         
         try:
             data = _decode_json_response(response, "Ollama /api/generate")
@@ -313,13 +291,11 @@ def call_local_brain(
         
         logger.info("[OK] Local brain responded successfully")
         return parse_json_response(raw_response)
-    except requests.exceptions.ConnectionError:
-        logger.error("[FAIL] Cannot connect to Ollama! Is Ollama running on localhost:11434?")
-        logger.error("   Run: ollama serve")
-        return {"error": "Ollama not running"}
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        raise
     except Exception as e:
         logger.error("[FAIL] Local AI Error: %s", e)
-        return {"error": str(e)}
+        raise e
 
 
 def analyze_chart_with_vision(
@@ -739,19 +715,60 @@ class OllamaSwarmConsensus:
         with self._brain_lock:
             return self._request_decision_inner(proposed_action, package)
     
+    async def run(
+        self,
+        market_data: MarketDataPoint,
+        news_context: str = "",
+        chart_image_base64: Optional[str] = None,
+    ) -> Tuple[LLMAnalysisOutput, DebateTranscript]:
+        """Runs single-model analysis directly on qwen:latest."""
+        package = {
+            "asset": market_data.asset,
+            "recent_ohlcv": market_data.indicators.get("RECENT_CANDLES", []),
+            "regime_context": market_data.indicators.get("REGIME_CONTEXT", ""),
+            "rsi": market_data.indicators.get("RSI", 50.0),
+            "atr": market_data.indicators.get("ATR", 0.0),
+            "signal_type": market_data.indicators.get("SIGNAL_TYPE", "SWARM_ANALYSIS"),
+        }
+        
+        proposed_action = "BUY" if market_data.indicators.get("SIGNAL_DIRECTION") == "BUY" else "SELL" if market_data.indicators.get("SIGNAL_DIRECTION") == "SELL" else "WAIT"
+        
+        decision = self.request_decision(proposed_action, package)
+        
+        verdict = decision.get("verdict", "[SIGNAL] WAIT")
+        action = SignalAction.BUY if "BUY" in verdict else SignalAction.SELL if "SELL" in verdict else SignalAction.HOLD
+        
+        confidence_val = decision.get("confidence", 70)
+        if confidence_val >= 85:
+            confidence = ConfidenceLevel.HIGH
+        elif confidence_val >= 60:
+            confidence = ConfidenceLevel.MEDIUM
+        else:
+            confidence = ConfidenceLevel.LOW
+            
+        output = LLMAnalysisOutput(
+            action=action,
+            asset=market_data.asset,
+            confidence=confidence,
+            reason=decision.get("reasoning", "No reason provided."),
+        )
+        
+        transcript = DebateTranscript(
+            asset=market_data.asset,
+            ceo_verdict=f"{verdict} {market_data.asset}",
+            ceo_full_statement=output.reason,
+        )
+        
+        return output, transcript
+
     def _request_decision_inner(self, proposed_action: str, package: dict[str, Any]) -> dict[str, Any]:
-        """Internal swarm decision (called under brain_lock)."""
+        """Internal single-model decision (called under brain_lock)."""
         asset = package.get("asset", "UNKNOWN")
         candles_json = json.dumps(package.get("recent_ohlcv", []), ensure_ascii=False)
         regime_context = package.get("regime_context", "")
         rsi = package.get("rsi", 50.0)
         atr = package.get("atr", 0.0)
         signal_type = package.get("signal_type", "UNKNOWN")
-        signal_strength = float(
-            package.get("signal_strength", 0)
-            or package.get("technical_strength", 0)
-            or 0.5
-        )
         
         prompt = f"""{PREDATOR_SYSTEM_INSTRUCTION}
 
@@ -770,144 +787,37 @@ RULES:
 
 Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under 100 chars"}}
 """
+        # Directly invoke qwen:latest via our persistent connection
+        result = call_local_brain(prompt, model="qwen:latest", timeout=15)
         
-        # === PARALLEL SWARM (Friday-working config restored) ===
-        # Three different LLMs fire simultaneously. Each brings a different
-        # perspective. Total time = slowest single call (~3-5s) instead of
-        # 3× sequential (~15s). This was the setup that gave "superb" results.
-        models = [
-            ("qwen2.5:1.5b-instruct-q4_K_M", "QWEN-VIBE"),
-            ("gemma:2b", "GEMMA-LIQUIDITY"),
-            ("qwen2.5-coder:1.5b", "CODER-CLOSER"),
-        ]
-        
-        results = []
-        import time as _time
-        import concurrent.futures
-        
-        # Fire all 3 models in parallel threads (VRAM handles sequential
-        # internally via Ollama's queue, but we get overlap on CPU pre/post).
-        def _call_model(model_name, label):
-            try:
-                return label, call_local_brain(prompt, model=model_name, timeout=15)
-            except Exception as e:
-                return label, {"error": str(e)}
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            futures = [pool.submit(_call_model, m, l) for m, l in models]
-            for future in concurrent.futures.as_completed(futures, timeout=20):
-                try:
-                    label, result = future.result()
-                    if "error" not in result:
-                        results.append((label, result))
-                        logger.info("[SWARM] %s responded: %s", label, str(result.get("signal", "?"))[:20])
-                    else:
-                        logger.warning("[SWARM] %s error: %s", label, str(result.get("error", ""))[:80])
-                except Exception as e:
-                    logger.warning("[SWARM] parallel call exception: %s", str(e)[:80])
-        
-        # === RULE-BASED FALLBACK ===
-        # If LLM is unavailable/slow, commit to the proposed action since the
-        # scanner already filtered for valid technical signals (RSI extremes,
-        # volume spikes, SMA crosses). The signal_strength becomes confidence.
-        if not results:
-            action = str(proposed_action or "WAIT").strip().upper()
-            if action in {"BUY", "SELL"}:
-                # Commit to the signal with confidence based on technical strength
-                confidence = max(40, min(90, int(signal_strength * 100)))
-                reason = f"Rule-based: {signal_type} confirmed (strength={signal_strength:.2f})"
-                logger.info(
-                    "[SWARM] No LLM available — committing rule-based %s for %s (conf=%d%%)",
-                    action, asset, confidence,
-                )
-                return {
-                    "verdict": f"[SIGNAL] {action}",
-                    "reasoning": reason,
-                    "brain_used": "RULE_BASED_FALLBACK",
-                    "fallback_mode": True,
-                    "confidence": confidence,
-                    "consensus": "RULE",
-                    "votes": {action: 1, "WAIT": 0, "SELL" if action == "BUY" else "BUY": 0},
-                    "models_used": ["RULE_BASED"],
-                }
-            # No LLM and no valid proposed action — only then return WAIT
-            return {
-                "verdict": "[SIGNAL] WAIT",
-                "reasoning": "No LLM available and no valid signal proposed.",
-                "brain_used": "RULE_BASED_FALLBACK",
-                "fallback_mode": True,
-                "confidence": 0,
-            }
-        
-        if not results:
-            return {
-                "verdict": "[SIGNAL] WAIT",
-                "reasoning": "All swarm models unavailable.",
-                "brain_used": "SWARM_FAILED",
-                "fallback_mode": True,
-                "confidence": 0,
-            }
-        
-        # === CONSENSUS ENGINE ===
-        votes = {"BUY": 0, "SELL": 0, "WAIT": 0}
-        confidences = []
-        reasons = []
-        models_used = []
-        
-        for label, result in results:
-            signal = str(result.get("signal", "WAIT") or "WAIT").upper()
-            if "BUY" in signal:
-                signal = "BUY"
-            elif "SELL" in signal:
-                signal = "SELL"
-            else:
-                signal = "WAIT"
-            
-            votes[signal] = votes.get(signal, 0) + 1
-            conf = int(result.get("confidence", 50) or 50)
-            confidences.append(conf)
-            reasons.append(f"{label}: {str(result.get('reason', ''))[:80]}")
-            models_used.append(label)
-        
-        total_votes = len(results)
-        winner = max(votes, key=votes.get)
-        winner_count = votes[winner]
-        avg_confidence = sum(confidences) / len(confidences) if confidences else 50
-        
-        if winner_count == total_votes and total_votes >= 2:
-            multiplier = 1.3
-            consensus_label = "UNANIMOUS"
-        elif winner_count > total_votes / 2:
-            multiplier = 1.0
-            consensus_label = "MAJORITY"
+        signal = str(result.get("signal", "WAIT") or "WAIT").upper()
+        if "BUY" in signal:
+            signal = "BUY"
+        elif "SELL" in signal:
+            signal = "SELL"
         else:
-            multiplier = 0.7
-            consensus_label = "SPLIT"
+            signal = "WAIT"
+            
+        confidence = int(result.get("confidence", 70) or 70)
+        reason = str(result.get("reason", "Local brain verdict.") or "Local brain verdict.").strip()
         
-        final_confidence = min(100, int(avg_confidence * multiplier))
-        
-        if winner == "WAIT":
-            final_confidence = max(20, final_confidence - 20)
-        
-        verdict = f"[SIGNAL] {winner}"
-        brain_label = "+".join(models_used)
-        reasoning = f"[{consensus_label} {total_votes}L] {' | '.join(reasons[:3])}"
+        verdict = f"[SIGNAL] {signal}"
         
         logger.info(
-            "[SWARM] %s consensus: %s (%d/%d models, confidence=%d%%, models=%s)",
-            consensus_label, winner, winner_count, total_votes, final_confidence, brain_label
+            "[BRAIN] Direct decision for %s: %s (confidence=%d%%, reason=%s)",
+            asset, signal, confidence, reason
         )
         
         return {
             "verdict": verdict,
-            "reasoning": reasoning[:500],
-            "model": brain_label,
-            "brain_used": f"SWARM_{brain_label}",
+            "reasoning": reason[:500],
+            "model": "qwen:latest",
+            "brain_used": "LOCAL_OLLAMA",
             "fallback_mode": False,
-            "confidence": final_confidence,
-            "consensus": consensus_label,
-            "votes": votes,
-            "models_used": models_used,
+            "confidence": confidence,
+            "consensus": "SINGLE_NODE",
+            "votes": {signal: 1},
+            "models_used": ["qwen:latest"],
         }
     
     def _build_fallback_brain_prompt(self, proposed_action: str, package: dict[str, Any]) -> str:
@@ -960,7 +870,7 @@ Return JSON only:
     
     async def compute_sequential_swarm_consensus(self, ticker: str, technical_strength: float) -> float:
         """Runs swarm analysis models sequentially with 8-second thread-gate protection to prevent VRAM jams."""
-        models = ["qwen2.5:1.5b-instruct-q4_K_M", "gemma:2b", "qwen2.5-coder:1.5b"]
+        models = ["qwen:latest"]
         verdicts = []
         base_url = "http://127.0.0.1:11434/api/generate"
         
