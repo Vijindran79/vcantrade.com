@@ -23,14 +23,16 @@ USE_VISION = False  # qwen:latest is text-only — no image input
 FAST_VISION_ENABLED = False
 VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
 MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream")
-MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.65"))
+MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.60"))  # Lowered for faster execution
 SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() == "true"
 
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
 # If only one symbol, the scanner locks onto it and executes directly.
-ACTIVE_SYMBOLS = ["BTCUSD", "ETHUSD"]
-WATCHLIST = ["BTCUSD", "ETHUSD"]
+ACTIVE_SYMBOLS = ["BTC-USD"]
+WATCHLIST = list(ACTIVE_SYMBOLS)
+CLOUD_TICKERS = list(ACTIVE_SYMBOLS)
+ACTIVE_WATCHLIST = list(ACTIVE_SYMBOLS)
 
 # Confidence-Based Take Profit Targets
 TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  ($50)
@@ -98,7 +100,7 @@ TRADING_END_HOUR_UTC = int(os.getenv("TRADING_END_HOUR_UTC", "21"))
 # ===== OPTIONAL SYMBOL SAFETY LISTS =====
 # These are only used by legacy broker-specific paths. TradingView and MT5 routes
 # through their own execution handlers and should not be blocked by a prop firm list.
-FUTURES_WHITELIST = ["MNQ1!", "MES1!", "MCL1!", "MGC1!", "MYM1!", "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!"]
+FUTURES_WHITELIST = ["MNQ1!", "MES1!", "MCL1!", "MGC1!", "GC=F", "XAUUSD", "XAU", "GOLD", "MYM1!", "M2K1!", "M6A1!", "M6E1!", "MBT1!", "MET1!"]
 # Block stocks like TSLA, AAPL, SPX from legacy futures-only routes.
 BLOCKED_STOCKS = ["TSLA", "AAPL", "SPX", "SPY", "NVDA"]
 
@@ -147,8 +149,12 @@ SYMBOL_MAP = {
     # COMEX Micro Gold
     "MGC1!": "XAUUSD_SB",
     "MGC": "XAUUSD_SB",
+    "MGC=F": "XAUUSD_SB",
     "GC=F": "XAUUSD_SB",
     "GC": "XAUUSD_SB",
+    "XAUUSD": "XAUUSD_SB",
+    "XAU": "XAUUSD_SB",
+    "GOLD": "XAUUSD_SB",
     # CBOT Micro Dow
     "MYM1!": "DJ30_SB",
     "MYM": "DJ30_SB",
@@ -183,7 +189,14 @@ MT5_SYMBOL_MAP = {
     "NYMEX:MCL1!": "Crude_SB",       
     "GC=F": "Gold_SB",               # Standard Comex Spot Gold
     "MGC1!": "Gold_SB",              # Micro Gold Future Mapping Override
+    "MGC=F": "Gold_SB",
+    "MGC": "Gold_SB",
+    "GC=F": "Gold_SB",
+    "GC": "Gold_SB",
     "COMEX:MGC1!": "Gold_SB",
+    "XAUUSD": "XAUUSD",
+    "XAU": "XAUUSD",
+    "GOLD": "Gold_SB",
     # Crypto — HydraTrade MT5 is Forex-only; crypto routes to TradingView RPA
     "BTCUSD": "BTCUSD",
     "ETHUSD": "ETHUSD",
@@ -196,6 +209,8 @@ TRADINGVIEW_SYMBOL_MAP = {
     "MES": "MES1!", "MES=F": "MES1!", "MES1!": "MES1!",
     "MCL": "MCL1!", "MCL=F": "MCL1!", "MCL1!": "MCL1!",
     "MGC": "MGC1!", "MGC=F": "MGC1!", "MGC1!": "MGC1!",
+    "GC": "MGC1!", "GC=F": "MGC1!", "XAUUSD": "MGC1!",
+    "XAU": "MGC1!", "GOLD": "MGC1!",
     "MYM": "MYM1!", "MYM=F": "MYM1!", "MYM1!": "MYM1!",
     "M2K": "M2K1!", "M2K=F": "M2K1!", "M2K1!": "M2K1!",
     "M6A": "M6A1!", "M6A1!": "M6A1!",
@@ -240,7 +255,8 @@ YFINANCE_SYMBOL_MAP = {
     "MNQ1!": "MNQ=F", "MNQ=F": "MNQ=F", "NQM6": "MNQ=F",
     "MES1!": "MES=F", "MES=F": "MES=F", "ESM6": "MES=F",
     "MCL1!": "MCL=F", "MCL=F": "MCL=F", "CL=F": "CL=F", "CL1!": "CL=F",
-    "MGC1!": "MGC=F", "MGC=F": "MGC=F", "GC=F": "GC=F", "GC": "GC=F",
+    "MGC1!": "MGC=F", "MGC=F": "MGC=F", "MGC": "MGC=F",
+    "GC=F": "GC=F", "GC": "GC=F", "XAUUSD": "GC=F", "XAU": "GC=F", "GOLD": "GC=F",
     "MYM1!": "MYM=F", "MYM=F": "MYM=F",
     "M2K1!": "RTY=F", "M2K=F": "RTY=F",
     # TradingView prefixed
@@ -257,6 +273,7 @@ SYMBOL_BRIDGE_CANDIDATES = {
     "CL1!": ("WTI_SB", "Crude_SB", "Crude", "USOIL", "WTI", "XTIUSD", "OIL", "CL"),
     "MCL1!": ("Crude_SB", "WTI_SB", "Crude", "USOIL", "WTI", "MCL"),
     "GC=F": ("XAUUSD_SB", "Gold_SB", "XAUUSD", "Gold", "XAU", "MGC", "GC"),
+    "MGC=F": ("XAUUSD_SB", "Gold_SB", "XAUUSD", "Gold", "XAU", "MGC"),
     "MGC": ("XAUUSD_SB", "XAUUSD", "Gold_SB", "Gold", "XAU", "MGC"),
     "MGC1!": ("XAUUSD_SB", "Gold_SB", "XAUUSD", "Gold", "XAU", "MGC"),
     "MNQ1!": ("NAS100_SB", "NAS100", "MNQ"),
@@ -274,6 +291,7 @@ SYMBOL_FUZZY_TERMS = {
     "CL1!": ("CL", "WTI", "Crude", "Oil"),
     "MCL1!": ("CL", "WTI", "Crude", "Oil"),
     "GC=F": ("GC", "MGC", "XAU", "GOLD", "Gold"),
+    "MGC=F": ("MGC", "GC", "XAU", "GOLD", "Gold"),
     "MGC": ("MGC", "XAU", "GOLD", "Gold"),
     "MGC1!": ("MGC", "XAU", "GOLD", "Gold"),
     "MNQ1!": ("NQ", "NAS", "Nasdaq"),
@@ -285,13 +303,10 @@ SYMBOL_FUZZY_TERMS = {
 }
 
 # ===== ACTIVE WATCHLIST =====
-ACTIVE_WATCHLIST = [
-    "BTCUSD",
-    "ETHUSD",
-]
+ACTIVE_WATCHLIST = ["BTC-USD"]
 
 # ===== MULTI-ASSET HUNTER =====
-MULTI_ASSET_TICKERS = ["BTCUSD", "ETHUSD"]
+MULTI_ASSET_TICKERS = ["BTC-USD"]
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # ===== EXECUTION MODE SWITCH =====
@@ -304,6 +319,10 @@ TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_DESKTOP")
 # "TRADINGVIEW" = Physical mouse clicks on TradingView web/paper interface
 # "MT5" = Native MetaTrader 5 order execution
 ACTIVE_EXECUTION_SURFACE = os.getenv("ACTIVE_EXECUTION_SURFACE", "TRADINGVIEW").upper().strip()
+DATA_SOURCE = os.getenv("DATA_SOURCE", "TRADINGVIEW").upper().strip()  # Live TV prices via CDP
+CHART_PATTERN_AGENT_ENABLED = os.getenv("CHART_PATTERN_AGENT_ENABLED", "True").lower() == "true"
+ALLOW_RPA_FALLBACK_COORDS = os.getenv("ALLOW_RPA_FALLBACK_COORDS", "True").lower() == "true"
+ALLOW_YFINANCE_FALLBACK = os.getenv("ALLOW_YFINANCE_FALLBACK", "True").lower() == "true"
 
 # TradingView account label to verify before clicking (e.g., "Paper Trading", "Live")
 TRADINGVIEW_ACCOUNT_LABEL = os.getenv("TRADINGVIEW_ACCOUNT_LABEL", "Paper Trading").strip()
@@ -333,8 +352,8 @@ FALLBACK_COORDS = TRADINGVIEW_FALLBACK_COORDS
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
-MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen:latest")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen:latest")
+MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_TIMEOUT = 180
 JSON_OUTPUT = True
@@ -358,11 +377,12 @@ SIGNAL_API_KEY = os.getenv("SIGNAL_API_KEY", "")
 SIGNAL_API_HEADER = os.getenv("SIGNAL_API_HEADER", "X-VcanTrade-Key")
 SWARM_CONFIDENCE_THRESHOLD = float(os.getenv("SWARM_CONFIDENCE_THRESHOLD", "0.70"))
 SWARM_INCUBATION_FLOOR = float(os.getenv("SWARM_INCUBATION_FLOOR", "60.0"))
-SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "85.0"))
+SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "70.0"))
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_URL = os.getenv("CLOUD_SCANNER_URL", "")
-SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "60"))
+SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "10"))
+HIGHER_TIMEFRAME_CACHE_SECONDS = float(os.getenv("HIGHER_TIMEFRAME_CACHE_SECONDS", "300"))
 
 # ===== SLIPPAGE PROTECTION =====
 MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "0.5"))
@@ -378,6 +398,13 @@ VISUAL_ALERT_MIN_CONFIDENCE = float(os.getenv("VISUAL_ALERT_MIN_CONFIDENCE", "0.
 ALERT_FLASH_DURATION_MS = int(os.getenv("ALERT_FLASH_DURATION_MS", "4500"))
 SCAN_ACTIVITY_THROTTLE_SECONDS = float(os.getenv("SCAN_ACTIVITY_THROTTLE_SECONDS", "8.0"))
 ENABLE_AUDIO_NARRATION = os.getenv("ENABLE_AUDIO_NARRATION", "True").lower() == "true"
+ENABLE_TECHNICAL_NARRATION = os.getenv("ENABLE_TECHNICAL_NARRATION", "True").lower() == "true"
+ENABLE_WAIT_NARRATION = os.getenv("ENABLE_WAIT_NARRATION", "False").lower() == "true"
+NARRATION_MIN_INTERVAL_SECONDS = float(os.getenv("NARRATION_MIN_INTERVAL_SECONDS", "18.0"))
+REQUIRE_HIGHER_TIMEFRAME_CONFIRMATION = os.getenv("REQUIRE_HIGHER_TIMEFRAME_CONFIRMATION", "True").lower() == "true"
+HIGHER_TIMEFRAME_INTERVAL = os.getenv("HIGHER_TIMEFRAME_INTERVAL", "1h")
+SIGNAL_STABILITY_CYCLES = int(os.getenv("SIGNAL_STABILITY_CYCLES", "2"))
+SIGNAL_STABILITY_WINDOW_SECONDS = float(os.getenv("SIGNAL_STABILITY_WINDOW_SECONDS", "180"))
 
 # ===== UNIFIED MODE HELPER =====
 def get_active_mode() -> str:

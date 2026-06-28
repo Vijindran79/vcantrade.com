@@ -101,6 +101,13 @@ class Scanner:
         self.status_callback = None
         self.market_data_cache: Dict[Tuple[str, str, str], pd.DataFrame] = {}
         self.last_close_cache: Dict[str, float] = {}
+        self.higher_timeframe_cache: Dict[Tuple[str, str], Tuple[float, Optional[pd.DataFrame]]] = {}
+        self.higher_timeframe_cache_seconds = float(getattr(config, "HIGHER_TIMEFRAME_CACHE_SECONDS", 300) or 300)
+        self.signal_history: Dict[str, List[Tuple[float, str]]] = {}
+        self.signal_stability_cycles = int(getattr(config, "SIGNAL_STABILITY_CYCLES", 2) or 2)
+        self.signal_stability_window_seconds = float(getattr(config, "SIGNAL_STABILITY_WINDOW_SECONDS", 180) or 180)
+        self.require_higher_timeframe_confirmation = bool(getattr(config, "REQUIRE_HIGHER_TIMEFRAME_CONFIRMATION", True))
+        self.higher_timeframe_interval = str(getattr(config, "HIGHER_TIMEFRAME_INTERVAL", "1h") or "1h")
         
         # Reference to engine lock (set externally)
         self._engine_lock = None
@@ -111,6 +118,123 @@ class Scanner:
         """Set reference to VcaniTradeEngine.asset_lock."""
         self._engine_lock = lock
         logger.info("[SCANNER] Engine lock reference set")
+    
+    def _simple_adx(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+        prev_close = close.shift(1)
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+        tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr
+        minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA)
+        return dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    
+    def _higher_timeframe_bias(self, df: Optional[pd.DataFrame]) -> Tuple[str, str, int, float, float, str]:
+        """Return 1H dropdown-style directional bias using multiple indicators."""
+        if df is None or df.empty or len(df) < 60:
+            return "UNKNOWN", "Not enough higher-timeframe bars", 0, 0.0, 0.0, "UNKNOWN"
+        try:
+            close = df["Close"].dropna()
+            if len(close) < 60:
+                return "UNKNOWN", "Not enough clean higher-timeframe closes", 0, 0.0, 0.0, "UNKNOWN"
+            ema9 = close.ewm(span=9, adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
+            ema50 = close.ewm(span=50, adjust=False).mean()
+            ema200 = close.ewm(span=200, adjust=False).mean()
+            ema12 = close.ewm(span=12, adjust=False).mean()
+            ema26 = close.ewm(span=26, adjust=False).mean()
+            macd_line = ema12 - ema26
+            macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+            macd_hist = float((macd_line - macd_signal).iloc[-1] or 0.0)
+            adx = float(self._simple_adx(df["High"], df["Low"], close).iloc[-1] or 0.0)
+            last_close = float(close.iloc[-1])
+            last_ema9 = float(ema9.iloc[-1])
+            last_ema21 = float(ema21.iloc[-1])
+            last_ema50 = float(ema50.iloc[-1])
+            last_ema200 = float(ema200.iloc[-1])
+            ema_alignment = "UNKNOWN"
+            score = 0
+            if last_close > last_ema9 > last_ema21 > last_ema50 > last_ema200:
+                score += 3
+                ema_alignment = "BULL_STACK"
+            elif last_close > last_ema21 > last_ema50:
+                score += 2
+                ema_alignment = "LEAN_BULL_STACK"
+            elif last_close > last_ema50 and last_ema9 > last_ema21:
+                score += 1
+                ema_alignment = "LEAN_BULL"
+            elif last_close < last_ema9 < last_ema21 < last_ema50 < last_ema200:
+                score -= 3
+                ema_alignment = "BEAR_STACK"
+            elif last_close < last_ema21 < last_ema50:
+                score -= 2
+                ema_alignment = "LEAN_BEAR_STACK"
+            elif last_close < last_ema50 and last_ema9 < last_ema21:
+                score -= 1
+                ema_alignment = "LEAN_BEAR"
+            else:
+                ema_alignment = "MIXED"
+            if macd_hist > 0:
+                score += 1
+            elif macd_hist < 0:
+                score -= 1
+            if adx >= 25:
+                if score > 0:
+                    score += 1
+                elif score < 0:
+                    score -= 1
+            if score >= 3:
+                bias = "BULLISH"
+                reason = "1H dropdown bullish: EMA stack and momentum aligned"
+            elif score >= 1:
+                bias = "LEAN_BULLISH"
+                reason = "1H dropdown lean-bullish: partial bullish structure"
+            elif score <= -3:
+                bias = "BEARISH"
+                reason = "1H dropdown bearish: EMA stack and momentum aligned"
+            elif score <= -1:
+                bias = "LEAN_BEARISH"
+                reason = "1H dropdown lean-bearish: partial bearish structure"
+            else:
+                bias = "MIXED"
+                reason = "1H dropdown mixed: no clean directional edge"
+            return bias, reason, score, adx, macd_hist, ema_alignment
+        except Exception as exc:
+            logger.debug("[SCANNER] Higher-timeframe bias failed: %s", exc)
+            return "UNKNOWN", f"1H filter error: {exc}", 0, 0.0, 0.0, "UNKNOWN"
+    
+    def _get_higher_timeframe_data(self, ticker: str) -> Optional[pd.DataFrame]:
+        """Fetch 1H context with a short cache so scanning stays fast."""
+        now = time.time()
+        key = (str(ticker), self.higher_timeframe_interval)
+        cached = self.higher_timeframe_cache.get(key)
+        if cached and now - cached[0] < self.higher_timeframe_cache_seconds:
+            return cached[1]
+        df = self._fetch_market_data(ticker, interval=self.higher_timeframe_interval)
+        self.higher_timeframe_cache[key] = (now, df)
+        return df
+    
+    def _signal_history_is_stable(self, ticker: str, action: str) -> Tuple[bool, int]:
+        """Require the same trade direction to survive multiple scanner cycles."""
+        now = time.monotonic()
+        cutoff = now - self.signal_stability_window_seconds
+        with self._lockdown_lock:
+            history = self.signal_history.setdefault(ticker, [])
+            history[:] = [(ts, past_action) for ts, past_action in history if ts >= cutoff]
+            if not history or history[-1][1] != action:
+                history[:] = [(now, action)]
+                return False, 1
+            history.append((now, action))
+            recent = history[-self.signal_stability_cycles:]
+            stable = len(recent) >= self.signal_stability_cycles and len({past_action for _, past_action in recent}) == 1
+            return stable, len(recent)
+    
+    def _clear_signal_history(self, ticker: str) -> None:
+        with self._lockdown_lock:
+            self.signal_history.pop(ticker, None)
     
     def _is_locked_for_different_ticker(self, ticker: str) -> bool:
         """Check if engine is locked for a different ticker."""
@@ -190,20 +314,31 @@ class Scanner:
                 self.status_callback(ticker, f"brain_fallback:{decision.get('brain_used', 'OLLAMA_PREDATOR')}")
             self.status_callback(ticker, f"brain_verdict:{verdict}")
 
+        # Brain can only CONFIRM or REJECT (WAIT). It cannot flip direction.
+        # The scanner's math-based direction is always correct.
+        # If brain says WAIT, we skip. If brain says BUY/SELL (either direction), we proceed
+        # with the SCANNER's original direction — not the brain's.
         if "BUY" not in verdict and "SELL" not in verdict:
             logger.info("[SCANNER] Brain returned WAIT for %s: %s", ticker, decision.get("reasoning", ""))
             return None
 
-        final_action = "BUY" if "BUY" in verdict else "SELL"
-        confidence = max(0.0, min(1.0, float(getattr(signal, "strength", 0.0) or 0.0)))
+        # USE SCANNER'S DIRECTION, not brain's. Brain is just a go/no-go gate.
+        final_action = action
+        logger.info("[SCANNER] Brain approved %s for %s (scanner direction: %s)", verdict, ticker, action)
+        metadata = getattr(signal, "metadata", {}) or {}
+        confidence = self._combined_confidence(signal, decision, action_override=final_action)
         return {
             "ticker": ticker,
             "action": final_action,
             "confidence": confidence,
+            "confidence_score": confidence,
             "reason": str(decision.get("reasoning") or f"{signal.signal_type} approved by local brain")[:500],
             "signal_type": str(getattr(signal, "signal_type", "SIGNAL") or "SIGNAL"),
+            "stop_loss": float(metadata.get("stop_loss", 0.0) or 0.0),
+            "take_profit": float(metadata.get("take_profit", 0.0) or 0.0),
             "brain_used": decision.get("brain_used", "LOCAL_BRAIN"),
             "fallback_mode": bool(decision.get("fallback_mode", False)),
+            "h1_analysis": metadata.get("h1_analysis", {}),
             "raw_decision": decision,
             "metadata": getattr(signal, "metadata", {}) or {},
         }
@@ -223,21 +358,74 @@ class Scanner:
     def _action_from_signal(self, signal: TechnicalSignal) -> str:
         signal_type = str(getattr(signal, "signal_type", "") or "").upper()
         metadata = getattr(signal, "metadata", {}) or {}
+        explicit = str(
+            metadata.get("direction")
+            or metadata.get("action_hint")
+            or metadata.get("liquidity_bias")
+            or metadata.get("action")
+            or ""
+        ).upper()
+        if explicit in {"BUY", "SELL"}:
+            return explicit
+        if explicit in {"UP", "LONG"}:
+            return "BUY"
+        if explicit in {"DOWN", "SHORT"}:
+            return "SELL"
         if "BULL" in signal_type or "OVERSOLD" in signal_type:
             return "BUY"
         if "BEAR" in signal_type or "OVERBOUGHT" in signal_type:
             return "SELL"
-        action = str(
-            metadata.get("action_hint")
-            or metadata.get("liquidity_bias")
-            or metadata.get("direction")
-            or "WAIT"
-        ).upper()
-        if action in {"UP", "LONG"}:
-            return "BUY"
-        if action in {"DOWN", "SHORT"}:
-            return "SELL"
-        return action if action in {"BUY", "SELL"} else "WAIT"
+        return "WAIT"
+
+    def _combined_confidence(self, signal: TechnicalSignal, decision: dict, action_override: Optional[str] = None) -> float:
+        """Combine technical, brain, higher-timeframe, stability, and volume evidence."""
+        metadata = getattr(signal, "metadata", {}) or {}
+        action = str(action_override or self._action_from_signal(signal)).upper()
+        technical = float(getattr(signal, "strength", 0.0) or 0.0)
+        brain_conf = float(decision.get("confidence", 0.0) or 0.0) / 100.0
+        h1_score = float(metadata.get("h1_score", 0.0) or 0.0)
+        h1_strength = min(abs(h1_score) / 5.0, 1.0)
+        cycles = max(int(metadata.get("stability_required", self.signal_stability_cycles) or 1), 1)
+        stability = min(float(metadata.get("stability_count", 0.0) or 0.0) / cycles, 1.0)
+        volume_ratio = float(metadata.get("volume_ratio", 0.0) or 0.0)
+        rsi = float(metadata.get("rsi", 50.0) or 50.0)
+
+        h1_aligned = (
+            (action == "BUY" and h1_score >= 3)
+            or (action == "SELL" and h1_score <= -3)
+        )
+        h1_mixed = abs(h1_score) < 2
+        rsi_in_zone = (
+            (action == "BUY" and 35.0 <= rsi <= 68.0)
+            or (action == "SELL" and 32.0 <= rsi <= 65.0)
+        )
+        high_conviction_signal = any(
+            token in str(getattr(signal, "signal_type", "") or "").upper()
+            for token in ("SMA_CROSS", "MACD_CROSS", "RSI_OVER", "BB_OVER")
+        )
+
+        score = (
+            0.35 * technical
+            + 0.35 * brain_conf
+            + 0.15 * h1_strength
+            + 0.15 * stability
+        )
+        if h1_aligned:
+            score += 0.08
+        if h1_mixed:
+            score -= 0.06
+        if rsi_in_zone:
+            score += 0.03
+        if high_conviction_signal and technical >= 0.75:
+            score += 0.04
+        if volume_ratio >= 1.5:
+            score += 0.03
+        elif volume_ratio <= 0.4:
+            score -= 0.02
+
+        if technical >= 0.80 and brain_conf >= 0.90 and h1_aligned and stability >= 1.0:
+            return 1.0
+        return max(0.0, min(1.0, round(score, 3)))
 
     def _brain_package_from_signal(self, signal: TechnicalSignal) -> dict:
         ticker = str(getattr(signal, "ticker", "UNKNOWN") or "UNKNOWN")
@@ -265,7 +453,8 @@ class Scanner:
             "recent_ohlcv": recent_ohlcv,
             "liquidity_zones": metadata.get("liquidity_zones", []),
             "liquidity_zone_label": metadata.get("liquidity_zone_label", "N/A"),
-            "regime_context": metadata.get("regime_context", ""),
+            "regime_context": metadata.get("regime_context", "") or metadata.get("h1_reason", ""),
+            "h1_analysis": metadata.get("h1_analysis", {}),
         }
     
     def _scan_ticker(self, ticker: str) -> Optional[TechnicalSignal]:
@@ -302,6 +491,16 @@ class Scanner:
             vol_ratio = current_volume / max(1, avg_volume_current)
             trend_dir = "Bull" if sma_fast.iloc[-1] > sma_slow.iloc[-1] else "Bear"
             
+            high = df["High"]
+            low = df["Low"]
+            prev_close = close.shift(1)
+            true_range = pd.concat(
+                [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+                axis=1,
+            ).max(axis=1)
+            atr = float(true_range.rolling(window=14, min_periods=1).mean().iloc[-1] or 0.0)
+            stop_distance = atr * float(getattr(config, "ATR_STOP_MULTIPLIER", 1.5) or 1.5)
+            
             # Bollinger Bands (mean reversion signals for ranging markets)
             bb = volatility.BollingerBands(close=close, window=20, window_dev=2)
             bb_high = bb.bollinger_hband()
@@ -318,52 +517,163 @@ class Scanner:
             macd_cross_bear = (macd_line.iloc[-1] < macd_signal.iloc[-1] and
                                macd_line.iloc[-2] >= macd_signal.iloc[-2])
             
-            # === RSI Overbought/Oversold (standard 70/30 thresholds) ===
-            if current_rsi > 70:
-                signal_type = "RSI_OVERBOUGHT"
-                strength = min(1.0, (current_rsi - 70) / 20.0)
-            elif current_rsi < 30:
-                signal_type = "RSI_OVERSOLD"
-                strength = min(1.0, (70 - current_rsi) / 20.0)
+            # ================================================================
+            # FIBONACCI RETRACEMENT LEVELS
+            # ================================================================
+            # Find the recent swing high and swing low (last 50 candles)
+            # Fib levels tell us where price is likely to bounce (support/resistance)
+            lookback = min(50, len(close))
+            recent_high = float(high.iloc[-lookback:].max())
+            recent_low = float(low.iloc[-lookback:].min())
+            fib_range = recent_high - recent_low
             
-            # === Bollinger Band Bounce (mean reversion in range) ===
-            elif bb_pct < 0.05:  # Touching lower band
-                signal_type = "BB_OVERSOLD"
-                strength = min(1.0, (0.10 - bb_pct) / 0.10 + 0.4)
-            elif bb_pct > 0.95:  # Touching upper band
-                signal_type = "BB_OVERBOUGHT"
-                strength = min(1.0, (bb_pct - 0.90) / 0.10 + 0.4)
+            # Key Fibonacci levels
+            fib_236 = recent_high - (fib_range * 0.236)  # Shallow pullback
+            fib_382 = recent_high - (fib_range * 0.382)  # Standard pullback
+            fib_500 = recent_high - (fib_range * 0.500)  # Deep pullback
+            fib_618 = recent_high - (fib_range * 0.618)  # Golden ratio pullback
             
-            # === MACD Crossover (momentum shift) ===
-            elif macd_cross_bull and trend_dir == "Bull":
-                signal_type = "MACD_CROSS_BULL"
-                strength = 0.75
-            elif macd_cross_bear and trend_dir == "Bear":
-                signal_type = "MACD_CROSS_BEAR"
-                strength = 0.75
+            # Determine if price is near a Fibonacci level (within 0.5 ATR)
+            fib_tolerance = atr * 0.5
+            near_fib_support = (
+                abs(price - fib_382) < fib_tolerance or
+                abs(price - fib_500) < fib_tolerance or
+                abs(price - fib_618) < fib_tolerance
+            )
+            near_fib_resistance = (
+                abs(price - fib_236) < fib_tolerance or
+                abs(price - fib_382) < fib_tolerance or
+                abs(price - fib_500) < fib_tolerance
+            )
             
-            # === SMA Cross (trend reversal) ===
-            elif sma_fast.iloc[-1] > sma_slow.iloc[-1] and sma_fast.iloc[-2] <= sma_slow.iloc[-2]:
-                signal_type = "SMA_CROSS_BULL"
-                strength = 0.8
-            elif sma_fast.iloc[-1] < sma_slow.iloc[-1] and sma_fast.iloc[-2] >= sma_slow.iloc[-2]:
-                signal_type = "SMA_CROSS_BEAR"
-                strength = 0.8
+            # Price position relative to Fibonacci (0=at low, 1=at high)
+            fib_position = (price - recent_low) / max(fib_range, 0.01)
             
-            # === Volume Spike (breakout) ===
-            elif vol_ratio > 1.8:  # Lowered from 2.5
-                signal_type = "VOLUME_SPIKE"
-                strength = min(1.0, vol_ratio / 3.0)
+            # ================================================================
+            # MOMENTUM TREND-FOLLOWING STRATEGY
+            # ================================================================
+            # Simple, proven logic:
+            # 1. Check 5-MINUTE trend direction FIRST (bigger picture)
+            # 2. Determine trend from 9 EMA vs 21 EMA (short-term momentum)
+            # 3. Confirm with RSI (not overbought/oversold in trade direction)
+            # 4. Require price momentum (recent candles confirming direction)
+            # ================================================================
             
-            # === Trend following (relaxed volume requirement for range markets) ===
-            elif current_rsi > 55 and trend_dir == "Bull" and current_rsi > sma_fast.iloc[-1] / price * 50:
-                signal_type = "TREND_BULL"
-                strength = 0.6
-            elif current_rsi < 45 and trend_dir == "Bear":
-                signal_type = "TREND_BEAR"
-                strength = 0.6
+            # === 5-MINUTE TREND FILTER (the bigger picture) ===
+            # Only BUY if 5-min trend is bullish. Only SELL if 5-min trend is bearish.
+            htf_bullish = False
+            htf_bearish = False
+            try:
+                df_5m = self._fetch_market_data(ticker, interval="5m")
+                if df_5m is not None and len(df_5m) >= 20:
+                    close_5m = df_5m["Close"]
+                    ema9_5m = close_5m.ewm(span=9, adjust=False).mean()
+                    ema21_5m = close_5m.ewm(span=21, adjust=False).mean()
+                    htf_bullish = float(ema9_5m.iloc[-1]) > float(ema21_5m.iloc[-1])
+                    htf_bearish = float(ema9_5m.iloc[-1]) < float(ema21_5m.iloc[-1])
+            except Exception:
+                # If 5m data unavailable, allow trade (don't block)
+                htf_bullish = True
+                htf_bearish = True
+
+            # EMA for trend detection (1-minute)
+            ema9 = close.ewm(span=9, adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
+            
+            # Price action: last 5 candles direction
+            recent_closes = close.iloc[-5:].tolist()
+            rises = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] > recent_closes[i-1])
+            falls = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] < recent_closes[i-1])
+            
+            # Trend state
+            ema_bullish = ema9.iloc[-1] > ema21.iloc[-1]
+            ema_bearish = ema9.iloc[-1] < ema21.iloc[-1]
+            price_above_ema9 = price > ema9.iloc[-1]
+            price_below_ema9 = price < ema9.iloc[-1]
+            
+            # MACD for momentum confirmation
+            macd = trend.MACD(close=close)
+            macd_hist = macd.macd_diff()
+            macd_positive = macd_hist.iloc[-1] > 0
+            macd_negative = macd_hist.iloc[-1] < 0
+            macd_increasing = macd_hist.iloc[-1] > macd_hist.iloc[-2] if len(macd_hist) > 1 else False
+            macd_decreasing = macd_hist.iloc[-1] < macd_hist.iloc[-2] if len(macd_hist) > 1 else False
+            
+            # Bollinger Bands for volatility context
+            bb = volatility.BollingerBands(close=close, window=20, window_dev=2)
+            bb_high = bb.bollinger_hband()
+            bb_low = bb.bollinger_lband()
+            
+            # === BUY CONDITIONS ===
+            # Trend is up + momentum + RSI safe zone + 5-MIN AGREES
+            if (ema_bullish 
+                and price_above_ema9 
+                and rises >= 3
+                and macd_positive 
+                and macd_increasing
+                and current_rsi < 65
+                and current_rsi > 40
+                and htf_bullish  # 5-minute trend must be bullish too
+            ):
+                signal_type = "MOMENTUM_BUY"
+                fib_bonus = 0.15 if (near_fib_support or fib_position < 0.60) else 0.0
+                strength = min(1.0, 0.7 + (rises / 8.0) + fib_bonus)
+            
+            # === SELL CONDITIONS ===
+            # Trend is down + momentum + RSI safe zone + 5-MIN AGREES
+            elif (ema_bearish 
+                  and price_below_ema9 
+                  and falls >= 3
+                  and macd_negative 
+                  and macd_decreasing
+                  and current_rsi > 35
+                  and current_rsi < 60
+                  and htf_bearish  # 5-minute trend must be bearish too
+            ):
+                signal_type = "MOMENTUM_SELL"
+                fib_bonus = 0.15 if (near_fib_resistance or fib_position > 0.40) else 0.0
+                strength = min(1.0, 0.7 + (falls / 8.0) + fib_bonus)
+            
+            # === BREAKOUT BUY (strong move with volume) ===
+            elif (price > bb_high.iloc[-1] 
+                  and vol_ratio > 1.5 
+                  and rises >= 3
+                  and current_rsi > 55
+                  and current_rsi < 80
+            ):
+                signal_type = "BREAKOUT_BUY"
+                strength = min(1.0, 0.7 + vol_ratio / 10.0)
+            
+            # === BREAKOUT SELL (strong move with volume) ===
+            elif (price < bb_low.iloc[-1] 
+                  and vol_ratio > 1.5 
+                  and falls >= 3
+                  and current_rsi < 45
+                  and current_rsi > 20
+            ):
+                signal_type = "BREAKOUT_SELL"
+                strength = min(1.0, 0.7 + vol_ratio / 10.0)
             
             if signal_type:
+                # Direction is embedded in signal name — no ambiguity
+                if "BUY" in signal_type:
+                    action = "BUY"
+                elif "SELL" in signal_type:
+                    action = "SELL"
+                else:
+                    action = "WAIT"
+                
+                # Skip H1 confirmation — it lags and causes wrong-direction trades
+                # Instead, use signal stability (same direction 2 cycles = confirmed)
+                stable, stability_count = self._signal_history_is_stable(ticker, action)
+                if not stable:
+                    if self.status_callback:
+                        self.status_callback(
+                            str(ticker),
+                            f"confirming {action}: {stability_count}/{self.signal_stability_cycles} cycles"
+                        )
+                    return None
+                
                 return TechnicalSignal(
                     ticker=ticker,
                     signal_type=signal_type,
@@ -373,16 +683,28 @@ class Scanner:
                         "sma_fast": sma_fast.iloc[-1],
                         "sma_slow": sma_slow.iloc[-1],
                         "volume_ratio": vol_ratio,
+                        "atr": atr,
+                        "stop_loss": round(price - stop_distance, 2) if action == "BUY" else round(price + stop_distance, 2),
+                        "take_profit": round(price + (stop_distance * 2.5), 2) if action == "BUY" else round(price - (stop_distance * 2.5), 2),
+                        "ema9": round(float(ema9.iloc[-1]), 2),
+                        "ema21": round(float(ema21.iloc[-1]), 2),
+                        "macd_hist": round(float(macd_hist.iloc[-1]), 4),
+                        "rises": rises,
+                        "falls": falls,
+                        "stability_count": stability_count,
+                        "stability_required": self.signal_stability_cycles,
+                        "direction": action,
                     }
                 )
             
-            # Emit live indicator status even when no signal fires
+            # No signal — emit status
             if self.status_callback:
+                dir_label = "↑ BULL" if ema_bullish else "↓ BEAR" if ema_bearish else "— FLAT"
                 self.status_callback(
                     str(ticker),
-                    f"RSI {current_rsi:.0f} | {trend_dir} | ${price:,.2f} | Vol {vol_ratio:.1f}x"
+                    f"RSI {current_rsi:.0f} | {dir_label} | ${price:,.2f} | Vol {vol_ratio:.1f}x | R{rises}/F{falls}"
                 )
-            
+            self._clear_signal_history(ticker)
             return None
         
         except Exception as e:
@@ -442,8 +764,28 @@ class Scanner:
             except ValueError:
                 interval_minutes = 60
         count = max(80, count // max(1, interval_minutes))
+        if interval != "1m":
+            count = max(80, 240 // interval_minutes)
         
-        # ---- SMART HYBRID: use unified data feed (MT5 → Yahoo → cache) ----
+        # ---- SMART HYBRID: use unified data feed (MT5 → Yahoo → cache). ----
+        # Higher timeframes use yfinance/MT5 multi-timeframe bars instead of
+        # 1-minute bars, so the 1H dropdown filter is real directional context.
+        if interval != "1m":
+            bars = data_feed.get_bars_multi(ticker, interval=interval, count=count)
+            if bars:
+                df = pd.DataFrame(bars)
+                df["time"] = pd.to_datetime(df["timestamp"])
+                df = df.rename(columns={
+                    "open": "Open", "high": "High", "low": "Low",
+                    "close": "Close", "volume": "Volume",
+                })
+                df = df.set_index("time")[["Open", "High", "Low", "Close", "Volume"]]
+                self.market_data_cache[cache_key] = df.copy()
+                self.last_close_cache[market_ticker] = float(df["Close"].dropna().iloc[-1])
+                return df
+            logger.debug("[SCANNER] Multi-timeframe feed empty, trying legacy fallback for %s @ %s", ticker, interval)
+            return self._fallback_market_data(ticker, market_ticker, period, interval, cache_key)
+        
         # Crypto: Yahoo Finance is the only path
         if is_crypto_ticker(ticker):
             yf_bars = data_feed.get_bars(ticker, count=count, use_cache=True)
@@ -544,11 +886,13 @@ class Scanner:
                 "MGC1!": "GC=F", "MGC": "GC=F",
             }
             yf_sym = yf_map.get(ticker, yf_map.get(market_ticker, ticker))
+            yf_interval = "1h" if interval == "1h" else "1m"
+            yf_period = "3mo" if yf_interval == "1h" else "1d"
             
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as ex:
                 future = ex.submit(
-                    yf.download, yf_sym, period="1d", interval="1m",
+                    yf.download, yf_sym, period=yf_period, interval=yf_interval,
                     progress=False, threads=False
                 )
                 raw = future.result(timeout=25)

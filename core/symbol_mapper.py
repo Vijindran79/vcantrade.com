@@ -63,6 +63,8 @@ _ROOTS = {
     "CL": ("Crude Oil", "CRUDE", "NYMEX:CL1!", "CL=F"),
     "MGC": ("Micro Gold", "MICRO_GOLD", "COMEX:MGC1!", "MGC=F"),
     "GC": ("Gold", "GOLD", "COMEX:GC1!", "GC=F"),
+    "XAU": ("Gold", "GOLD", "COMEX:MGC1!", "GC=F"),
+    "XAUUSD": ("Gold", "GOLD", "COMEX:MGC1!", "GC=F"),
     "SIL": ("Micro Silver", "MICRO_SILVER", "COMEX:SIL1!", "SIL=F"),
     "SI": ("Silver", "SILVER", "COMEX:SI1!", "SI=F"),
 }
@@ -129,6 +131,8 @@ _TEXT_HINTS = (
     (("CRUDE", "OIL"), "CL"),
     (("MICRO", "GOLD"), "MGC"),
     (("GOLD"), "GC"),
+    (("XAU", "USD"), "XAUUSD"),
+    (("XAU"), "XAU"),
 )
 
 
@@ -188,6 +192,10 @@ def normalize_yfinance_symbol(raw_symbol: str | None) -> str:
 
     if re.fullmatch(r"[A-Z]{1,4}=F\d+", upper):
         return re.sub(r"\d+$", "", upper)
+    if upper in {"MGC=F", "MGCF"} or compact == "MGCF":
+        return "GC=F"
+    if compact in {"XAUUSD", "XAU", "GOLD"}:
+        return "GC=F"
 
     crypto_match = re.fullmatch(r"(BTC|ETH|SOL|XRP|DOGE|ADA|BNB|LTC|BCH|DOT|AVAX|LINK)(?:USD|USDT)?", compact)
     if crypto_match:

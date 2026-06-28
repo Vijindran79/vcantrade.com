@@ -151,9 +151,9 @@ def _validate_vision_model(model_name: str) -> Tuple[bool, str]:
 
 
 PREDATOR_SYSTEM_INSTRUCTION = (
-    "System instruction: You are an elite trader in April 2026. "
-    "If the 1m and 5m charts are Bullish, you MUST signal BUY. "
-    "Do not mention 2021 data."
+    "You are an elite futures scalper. Your ONLY job is to determine trade direction "
+    "from the price action in the recent candles. Rising prices = BUY. Falling prices = SELL. "
+    "Choppy/flat prices = WAIT. Trust the candles, not indicators alone."
 )
 
 
@@ -214,7 +214,7 @@ def call_local_brain(
     This is the core "brain" function that runs locally.
     """
     url = "http://localhost:11434/api/generate"
-    chosen_model = "qwen:latest"
+    chosen_model = str(model or getattr(config, "OLLAMA_MODEL", "qwen3.5:4b") or "qwen3.5:4b")
     
     # Simple headers for local connection
     headers = {"Content-Type": "application/json"}
@@ -224,6 +224,12 @@ def call_local_brain(
         "prompt": prompt,
         "stream": False,
     }
+    
+    # Qwen3.5 and similar models use "thinking" mode by default which consumes
+    # output tokens internally and returns empty response text. Disable it for
+    # fast, direct JSON answers in trading decisions.
+    if "qwen3" in chosen_model.lower():
+        payload["think"] = False
     
     try:
         request_timeout = max(10, int(timeout or config.LLM_TIMEOUT))
@@ -753,8 +759,16 @@ class OllamaSwarmConsensus:
             reason=decision.get("reasoning", "No reason provided."),
         )
         
+        default_brief = SwarmAgentBrief(
+            agent="CEO",
+            conviction="HIGH" if action != SignalAction.HOLD else "LOW",
+            brief=output.reason[:1500] if output.reason else "No analysis available.",
+        )
         transcript = DebateTranscript(
             asset=market_data.asset,
+            technical_sniper=default_brief,
+            macro_analyst=default_brief,
+            risk_manager=default_brief,
             ceo_verdict=f"{verdict} {market_data.asset}",
             ceo_full_statement=output.reason,
         )
@@ -770,25 +784,55 @@ class OllamaSwarmConsensus:
         atr = package.get("atr", 0.0)
         signal_type = package.get("signal_type", "UNKNOWN")
         
+        # Build a compact, example-driven prompt that qwen:latest can reliably follow
         prompt = f"""{PREDATOR_SYSTEM_INSTRUCTION}
 
-Analyze this trading opportunity and return a JSON verdict.
+{asset} closes: {candles_json}
+RSI={rsi}
 
-Asset: {asset}
-Signal: {signal_type} | Proposed: {proposed_action}
-RSI: {rsi} | ATR: {atr}
-Regime: {regime_context}
-Recent candles: {candles_json}
-
-RULES:
-- If CHOPPY regime or RSI near 50, return WAIT
-- Only BUY in bullish regime with RSI < 70
-- Only SELL in bearish regime with RSI > 30
-
-Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under 100 chars"}}
+Rising closes = BUY. Falling closes = SELL. Flat = WAIT.
+Reply with ONLY JSON like: {{"signal":"BUY","confidence":80,"reason":"prices rising"}}
 """
-        # Directly invoke qwen:latest via our persistent connection
-        result = call_local_brain(prompt, model="qwen:latest", timeout=15)
+        # --- PRICE ACTION OVERRIDE ---
+        # qwen:latest is unreliable at reading candle data. Use simple math
+        # to determine actual price direction from the candles, then override
+        # the model if it contradicts clear price action.
+        candles = package.get("recent_ohlcv", [])
+        pa_signal = "WAIT"
+        if candles and len(candles) >= 3:
+            closes = []
+            for c in candles[-5:]:  # last 5 candles
+                if isinstance(c, dict):
+                    closes.append(float(c.get("close", c.get("Close", 0)) or 0))
+                elif isinstance(c, (list, tuple)) and len(c) >= 4:
+                    closes.append(float(c[3]))  # OHLC[3] = close
+            if len(closes) >= 3:
+                # Count consecutive rises/falls
+                rises = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i-1])
+                falls = sum(1 for i in range(1, len(closes)) if closes[i] < closes[i-1])
+                total_moves = len(closes) - 1
+                if total_moves > 0:
+                    if rises / total_moves >= 0.7:  # 70%+ candles rising
+                        pa_signal = "BUY"
+                    elif falls / total_moves >= 0.7:  # 70%+ candles falling
+                        pa_signal = "SELL"
+        # Directly invoke the configured local Ollama model.
+        result = call_local_brain(prompt, model=self.model, timeout=15)
+        
+        # If parse failed (error key present), try to extract signal from raw text
+        if "error" in result and "raw" in result:
+            raw_text = str(result.get("raw", ""))
+            # Try regex extraction from malformed JSON
+            sig_match = re.search(r'"signal"\s*:\s*"(BUY|SELL|WAIT)"', raw_text, re.IGNORECASE)
+            conf_match = re.search(r'"confidence"\s*:\s*(\d+)', raw_text)
+            reason_match = re.search(r'"reason"\s*:\s*"([^"]+)"', raw_text)
+            if sig_match:
+                result = {
+                    "signal": sig_match.group(1).upper(),
+                    "confidence": int(conf_match.group(1)) if conf_match else 70,
+                    "reason": reason_match.group(1) if reason_match else "Extracted from raw",
+                }
+                logger.info("[BRAIN] Recovered signal from malformed JSON: %s", result.get("signal"))
         
         signal = str(result.get("signal", "WAIT") or "WAIT").upper()
         if "BUY" in signal:
@@ -797,27 +841,44 @@ Return JSON: {{"signal":"BUY or SELL or WAIT","confidence":0-100,"reason":"under
             signal = "SELL"
         else:
             signal = "WAIT"
+
+        # --- PRICE ACTION OVERRIDE: if model contradicts clear candle direction, use candles ---
+        if pa_signal != "WAIT":
+            if signal == "BUY" and pa_signal == "SELL":
+                logger.warning("[BRAIN] OVERRIDE: Model said BUY but candles are falling → SELL")
+                signal = "SELL"
+            elif signal == "SELL" and pa_signal == "BUY":
+                logger.warning("[BRAIN] OVERRIDE: Model said SELL but candles are rising → BUY")
+                signal = "BUY"
+            elif signal == "WAIT" and pa_signal in {"BUY", "SELL"}:
+                logger.info("[BRAIN] OVERRIDE: Model said WAIT but candles show clear %s direction", pa_signal)
+                signal = pa_signal
             
-        confidence = int(result.get("confidence", 70) or 70)
+        confidence = 70
+        try:
+            confidence = int(result.get("confidence", 70) or 70)
+        except (ValueError, TypeError):
+            confidence = 70
+        confidence = max(0, min(100, confidence))
         reason = str(result.get("reason", "Local brain verdict.") or "Local brain verdict.").strip()
         
         verdict = f"[SIGNAL] {signal}"
         
         logger.info(
-            "[BRAIN] Direct decision for %s: %s (confidence=%d%%, reason=%s)",
-            asset, signal, confidence, reason
+            "[BRAIN] Direct decision for %s: %s (confidence=%d%%, reason=%s, model=%s)",
+            asset, signal, confidence, reason, self.model
         )
         
         return {
             "verdict": verdict,
             "reasoning": reason[:500],
-            "model": "qwen:latest",
+            "model": self.model,
             "brain_used": "LOCAL_OLLAMA",
             "fallback_mode": False,
             "confidence": confidence,
             "consensus": "SINGLE_NODE",
             "votes": {signal: 1},
-            "models_used": ["qwen:latest"],
+            "models_used": [self.model],
         }
     
     def _build_fallback_brain_prompt(self, proposed_action: str, package: dict[str, Any]) -> str:

@@ -154,6 +154,34 @@ class BrowserAgent:
         except Exception as e:
             logger.error(f"Failed to get current URL: {e}")
             return ""
+    
+    async def get_current_price(self, ticker: str) -> float:
+        """Return the latest known price for the active ticker."""
+        try:
+            from core.data_feed import data_feed
+            bars = data_feed.get_bars(str(ticker), count=5)
+            if bars:
+                return float(bars[-1].get("close") or 0.0)
+        except Exception as e:
+            logger.debug("[BROWSER] Price fetch failed: %s", e)
+        try:
+            if self.page:
+                price_text = await self.page.evaluate("""() => {
+                    const nodes = Array.from(document.querySelectorAll('div, span, button, a'));
+                    for (const node of nodes) {
+                        const text = (node.textContent || '').replace(/,/g, '').trim();
+                        if (/^\\d+(\\.\\d+)?$/.test(text) && text.length > 0 && text.length < 24) {
+                            const value = parseFloat(text);
+                            if (value > 0) return value;
+                        }
+                    }
+                    return 0;
+                }""")
+                if price_text and price_text > 0:
+                    return float(price_text)
+        except Exception as e:
+            logger.debug("[BROWSER] DOM price fetch failed: %s", e)
+        return 0.0
 
     async def start(self):
         """Connect to existing Chrome via CDP."""
@@ -164,37 +192,46 @@ class BrowserAgent:
 
         for attempt in range(1, MAX_CDP_RETRIES + 1):
             try:
-                # Use simple CDP browser (bypasses Playwright timeout issues)
-                from core.simple_cdp_browser import SimpleCDPBrowser
-                
+                # Use simple CDP browser when available, otherwise fall back to Playwright CDP.
                 cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222")
-                logger.info("[CDP] Connecting via simple CDP to %s", cdp_url)
+                logger.info("[CDP] Connecting to %s", cdp_url)
                 
-                self.simple_browser = SimpleCDPBrowser(cdp_url)
-                if await self.simple_browser.connect():
-                    self.is_running = True
-                    logger.info("[OK] Connected to Chrome tab: %s", self.simple_browser.tab_url[:80])
-                    
-                    # DON'T call connect_over_cdp() - it times out!
-                    # Instead, start Playwright but DON'T connect to browser
-                    # We'll use simple_browser for all CDP communication
-                    self.playwright = await async_playwright().start()
-                    
-                    # Create a minimal dummy browser for compatibility
-                    # (some code may check if self.browser exists)
+                self.playwright = await async_playwright().start()
+                self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url, timeout=getattr(config, "CDP_CONNECT_TIMEOUT_MS", 240000))
+                contexts = self.browser.contexts or []
+                if not contexts:
+                    await self.browser.close()
+                    await self.playwright.stop()
                     self.browser = None
-                    self.context = None
-                    
-                    # Store the tab URL so RPA executor can use it
-                    self.page = None  # We don't have a Playwright page
-                    self._tab_url = self.simple_browser.tab_url
-                    
-                    logger.info("[CDP] Simple CDP connection successful - skipping Playwright CDP")
-                    logger.info("[CDP] All CDP communication will use simple_cdp_browser")
-                    
-                    return True
-                else:
-                    raise RuntimeError("Simple CDP connection failed")
+                    self.playwright = None
+                    raise RuntimeError("No browser contexts found after CDP connect")
+                selected = None
+                for ctx in reversed(contexts):
+                    for pg in ctx.pages or []:
+                        if "tradingview" in (pg.url or "").lower():
+                            selected = pg
+                            break
+                    if selected:
+                        break
+                if not selected and contexts[0].pages:
+                    selected = contexts[0].pages[0]
+                if not selected:
+                    await self.browser.close()
+                    await self.playwright.stop()
+                    self.browser = None
+                    self.playwright = None
+                    raise RuntimeError("No usable browser page found after CDP connect")
+                
+                self.context = contexts[0]
+                self.page = selected
+                self.simple_browser = None
+                self.is_running = True
+                self._tab_url = self.page.url
+                
+                logger.info("[OK] Connected to Chrome tab: %s", self._tab_url[:80])
+                logger.info("[CDP] Playwright CDP connection successful")
+                
+                return True
 
             except Exception as e:
                 err_text = str(e).lower()

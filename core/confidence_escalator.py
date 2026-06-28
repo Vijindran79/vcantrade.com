@@ -220,12 +220,13 @@ class ConfidenceEscalator:
                 self._transition_to(EscalatorState.VALIDATING, "Started validating SIM performance")
 
         elif self.state == EscalatorState.VALIDATING:
-            # Check if ready to strike (85% confidence)
-            if (self.metrics.bars_held_s1 >= self.metrics.bars_required and
-                self.metrics.sim_in_profit and
-                self.metrics.current_confidence >= 85.0):
-                self._transition_to(EscalatorState.READY_TO_STRIKE,
-                                   f"85% confidence: {self.metrics.bars_held_s1} bars, SIM profitable")
+                    # Check if ready to strike (70% base + chart pattern boost)
+                    base_conf = self.metrics.current_confidence
+                    if (self.metrics.bars_held_s1 >= self.metrics.bars_required and
+                        self.metrics.sim_in_profit and
+                        base_conf >= 70.0):
+                        self._transition_to(EscalatorState.READY_TO_STRIKE,
+                                           f"{base_conf:.0f}% confidence: {self.metrics.bars_held_s1} bars, SIM profitable")
 
         elif self.state == EscalatorState.READY_TO_STRIKE:
             # Waiting for execution signal

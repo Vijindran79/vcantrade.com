@@ -100,7 +100,8 @@ class CommandCenter(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._mode = "TEACHER"
+        # Start in the mode that matches config — don't default to TEACHER
+        self._mode = "TEACHER" if config.TEACHER_MODE else "AUTONOMOUS"
         self._killed = False
         self.positions = {}  # Live positions tracking
         saved_watchlist = settings_manager.get("session_watchlist", [])
@@ -130,7 +131,9 @@ class CommandCenter(QWidget):
         # EMIT WATCHLIST SIGNAL ON STARTUP so bot syncs tickers!
         if self.watchlist:
             self.watchlist_updated.emit(list(self.watchlist))
-        logger.info("Command Center initialized - Professional Trading Mode")
+        # EMIT MODE SIGNAL ON STARTUP so engine syncs to dashboard state!
+        self.mode_changed.emit(self._mode)
+        logger.info("Command Center initialized - Professional Trading Mode (%s)", self._mode)
 
     def _setup_window(self):
         self.setWindowTitle("VcaniTrade AI - Prop Trading Command Center")
@@ -298,9 +301,9 @@ class CommandCenter(QWidget):
 
         layout.addStretch()
 
-        self.mode_badge = QLabel("TEACHER MODE")
+        self.mode_badge = QLabel("AUTONOMOUS MODE" if self._mode == "AUTONOMOUS" else "TEACHER MODE")
         self.mode_badge.setStyleSheet(
-            f"color: {CYAN}; background: {BG_INPUT}; padding: 6px 14px; border-radius: 6px; "
+            f"color: {GREEN if self._mode == 'AUTONOMOUS' else CYAN}; background: {BG_INPUT}; padding: 6px 14px; border-radius: 6px; "
             f"font-size: 12px; font-weight: bold; font-family: 'Consolas';"
         )
         layout.addWidget(self.mode_badge)
@@ -778,10 +781,10 @@ class CommandCenter(QWidget):
 
         self.btn_teacher = QPushButton("[EMOJI] TEACHER (Approve Each)")
         self.btn_teacher.setCheckable(True)
-        self.btn_teacher.setChecked(True)
+        self.btn_teacher.setChecked(self._mode == "TEACHER")
         self.btn_teacher.setMinimumHeight(36)
         self.btn_teacher.setStyleSheet(f"""
-            QPushButton {{ background: {CYAN}; color: {BG_DARK}; border: none; border-radius: 6px;
+            QPushButton {{ background: {CYAN if self._mode == "TEACHER" else BG_INPUT}; color: {BG_DARK if self._mode == "TEACHER" else GRAY}; border: {'none' if self._mode == "TEACHER" else f'1px solid {BORDER}'}; border-radius: 6px;
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 8px; }}
         """)
         self.btn_teacher.clicked.connect(self._set_teacher_mode)
@@ -789,10 +792,10 @@ class CommandCenter(QWidget):
 
         self.btn_auto = QPushButton("[ROBOT] AUTONOMOUS (Auto)")
         self.btn_auto.setCheckable(True)
-        self.btn_auto.setChecked(False)
+        self.btn_auto.setChecked(self._mode == "AUTONOMOUS")
         self.btn_auto.setMinimumHeight(36)
         self.btn_auto.setStyleSheet(f"""
-            QPushButton {{ background: {BG_INPUT}; color: {GRAY}; border: 1px solid {BORDER}; border-radius: 6px;
+            QPushButton {{ background: {GREEN if self._mode == "AUTONOMOUS" else BG_INPUT}; color: {BG_DARK if self._mode == "AUTONOMOUS" else GRAY}; border: {'none' if self._mode == "AUTONOMOUS" else f'1px solid {BORDER}'}; border-radius: 6px;
                          font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 8px; }}
         """)
         self.btn_auto.clicked.connect(self._set_autonomous_mode)
@@ -1050,15 +1053,21 @@ class CommandCenter(QWidget):
         self.force_test_btn.clicked.connect(self._force_test_trade)
         test_row.addWidget(self.force_test_btn)
 
-        # Dry Run toggle
-        self.dry_run_btn = QPushButton("HAND OFF (Paper)")
+        # Dry Run toggle — matches config.DRY_RUN from .env
+        self.dry_run_btn = QPushButton("HAND OFF (Paper)" if config.DRY_RUN else "HAND ON (Real Money)")
         self.dry_run_btn.setMinimumHeight(32)
         self.dry_run_btn.setCheckable(True)
-        self.dry_run_btn.setChecked(True)
-        self.dry_run_btn.setStyleSheet(f"""
-            QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
-                         font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
-        """)
+        self.dry_run_btn.setChecked(config.DRY_RUN)
+        if config.DRY_RUN:
+            self.dry_run_btn.setStyleSheet(f"""
+                QPushButton {{ background: {GREEN}; color: {BG_DARK}; border: none; border-radius: 6px;
+                             font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            """)
+        else:
+            self.dry_run_btn.setStyleSheet(f"""
+                QPushButton {{ background: {RED}; color: {WHITE}; border: none; border-radius: 6px;
+                             font-size: 11px; font-weight: bold; font-family: 'Consolas'; padding: 6px 12px; }}
+            """)
         self.dry_run_btn.clicked.connect(self._toggle_dry_run)
         test_row.addWidget(self.dry_run_btn)
 
@@ -1089,8 +1098,10 @@ class CommandCenter(QWidget):
         self.log("[BOLT] FORCE HAND TEST: visible TradingView hand-move requested")
 
     def _toggle_dry_run(self):
-        """Toggle dry run mode — shown to user as plain English HAND ON / HAND OFF."""
+        """Toggle dry run mode — shown to user as plain English HAND ON / HAND OFF.
+        Actually sets config.DRY_RUN so the trade engine respects the toggle."""
         is_dry_run = self.dry_run_btn.isChecked()
+        config.DRY_RUN = is_dry_run
         if is_dry_run:
             self.dry_run_btn.setText("HAND OFF (Paper)")
             self.dry_run_btn.setStyleSheet(f"""

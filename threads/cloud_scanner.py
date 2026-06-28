@@ -56,9 +56,9 @@ class CloudScannerThread(QThread):
         ).upper()
         strength = float(getattr(signal, "strength", 0.0) or 0.0)
         metadata = getattr(signal, "metadata", {}) or {}
-        if "BUY" in signal_type or "BULLISH" in signal_type:
+        if "BUY" in signal_type or "BULL" in signal_type or "BULLISH" in signal_type:
             action = "BUY"
-        elif "SELL" in signal_type or "BEARISH" in signal_type:
+        elif "SELL" in signal_type or "BEAR" in signal_type or "BEARISH" in signal_type:
             action = "SELL"
         elif "OVERSOLD" in signal_type:
             action = "BUY"
@@ -82,6 +82,7 @@ class CloudScannerThread(QThread):
             "signal_type": signal_type,
             "confidence": max(0.0, min(1.0, strength)),
             "metadata": metadata,
+            "h1_bias": str(metadata.get("h1_bias", "UNKNOWN")),
         }
 
     def run(self):

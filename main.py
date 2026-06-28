@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from collections import Counter
 from typing import Optional, Dict, Any, Tuple, List
 
+import pandas as pd
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -38,6 +40,7 @@ from core.trade_monitor import TradeMonitor
 from core.scanner import Scanner
 from core.browser_agent import BrowserAgent
 from core.ghost_executor import GhostExecutor
+from core.headmaster_agent import HeadmasterSupervisor
 from core.hybrid_execution_gateway import HybridExecutionGateway
 from execution.rpa_executor import RPAExecutor
 from services.signal_dispatcher import SignalDispatcher
@@ -203,7 +206,7 @@ def evaluate_dynamic_ai_exit_conditions(
 
 def is_futures_ticker(ticker: str) -> bool:
     """Deterministic validation filter to identify futures and micro-futures index assets."""
-    canonical_futures_roots = ["MNQ", "MES", "CL", "GC", "NAS100", "US500", "Crude", "Gold"]
+    canonical_futures_roots = ["MNQ", "MES", "CL", "GC", "MGC", "XAU", "XAUUSD", "Gold", "GOLD", "NAS100", "US500", "Crude", "Gold"]
     clean_ticker = ticker.upper().replace("CME_MINI:", "").replace("NYMEX:", "").replace("COMEX:", "")
     
     # Evaluate if the ticker string matches any known futures root architecture
@@ -281,11 +284,13 @@ class VcaniTradeEngine:
         
         # Execution components
         self.rpa_executor = RPAExecutor()
+        self.rpa_executor._engine_ref = self  # Give RPA access to positions for flatten direction
         self._ghost_executor = GhostExecutor()
         self.trade_engine = TradeEngine()
         self.trade_executor = TradeExecutor()
         self.trade_monitor = TradeMonitor()
         self.scanner = Scanner()
+        self.headmaster = HeadmasterSupervisor()
         # Set engine lock reference for single-asset lock respect
         self.scanner.set_engine_lock(self.asset_lock)
         
@@ -353,7 +358,7 @@ class VcaniTradeEngine:
             self.signal_listener.signal_received.connect(self._on_external_signal_received)
             self.signal_listener.handshake_received.connect(self._on_bridge_handshake_received)
             self.signal_listener.listener_error.connect(self._on_listener_error)
-            self.data_scout_listener.data_received.connect(self._on_data_scout_received)
+            self.data_scout_listener.signal_received.connect(self._on_data_scout_received)
             self.data_scout_listener.scout_error.connect(self._on_data_scout_error)
             if hasattr(self.signal_dispatcher, "signal_received"):
                 self.signal_dispatcher.signal_received.connect(
@@ -483,16 +488,26 @@ class VcaniTradeEngine:
         action = payload.get("action", "SIGNAL")
         signal_type = payload.get("signal_type", "SIGNAL")
         confidence = float(payload.get("confidence", 0.0) or 0.0)
-        self._log_dashboard(f"[TARGET] {ticker}: {signal_type} -> {action} ({confidence:.0%})")
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        h1_bias = str(metadata.get("h1_bias") or payload.get("h1_bias") or "UNKNOWN").upper()
+        message = f"{ticker} {signal_type} -> {action} ({confidence:.0%}) | 1H {h1_bias}"
+        self._log_dashboard(f"[TARGET] {message}")
         try:
-            self.ai_narrator.add_activity("[TARGET]", f"{ticker} {signal_type} -> {action}")
+            self.ai_narrator.add_activity("[TARGET]", message)
+            if bool(getattr(config, "ENABLE_TECHNICAL_NARRATION", False)):
+                _speak_alert(f"{action} setup on {ticker}. One hour direction {h1_bias}. Waiting for brain confirmation.", min_interval_seconds=5.0)
         except Exception:
             pass
 
     def _on_brain_signal_detected(self, payload: dict):
         ticker = payload.get("ticker", "UNKNOWN")
         action = payload.get("action", "WAIT")
-        reason = payload.get("reason", "")
+        reason = str(payload.get("reason", "") or "").strip()[:140]
+        h1_analysis = payload.get("h1_analysis", {}) if isinstance(payload.get("h1_analysis", {}), dict) else {}
+        h1_bias = str(h1_analysis.get("bias") or "UNKNOWN").upper()
+        h1_adx = h1_analysis.get("adx", 0)
+        h1_ema = str(h1_analysis.get("ema_alignment") or "MIXED")
+        h1_text = f"1H dropdown {h1_bias}, ADX {h1_adx}, {h1_ema}"
         self._log_dashboard(f"[BRAIN] {ticker}: {action} | {reason}")
         try:
             verdict = f"[SIGNAL] {action}"
@@ -504,7 +519,13 @@ class VcaniTradeEngine:
                 fallback_mode=bool(payload.get("fallback_mode", False)),
                 brain_used=str(payload.get("brain_used", "LOCAL_BRAIN")),
             )
-            _speak_alert(f"Brain verdict. {action} {ticker}. {reason}")
+            if action in {"BUY", "SELL"}:
+                _speak_alert(f"{action} {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
+            elif action == "WAIT" and bool(getattr(config, "ENABLE_WAIT_NARRATION", False)):
+                _speak_alert(f"Wait on {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
+            if self.current_mode == "AUTONOMOUS" and action in {"BUY", "SELL"}:
+                logger.info("[AUTO] Dispatching autonomous execution for %s %s", action, ticker)
+                QTimer.singleShot(0, lambda: self.process_validated_execution_path(payload))
         except Exception:
             pass
 
@@ -514,12 +535,67 @@ class VcaniTradeEngine:
         action = str(payload.get("action") or payload.get("signal") or "WAIT").strip().upper()
         reason = str(payload.get("reason") or payload.get("reasoning") or "Bridge signal").strip()
         if action not in {"BUY", "SELL"} or not ticker or ticker == "UNKNOWN":
+            logger.warning("[AUTO] Ignored non-executable signal: %s %s", action, ticker)
             self._log_dashboard(f"[BRIDGE] Ignored non-executable signal: {action} {ticker}")
+            return
+
+        # === DUPLICATE POSITION GUARD ===
+        # Don't open another trade if we already have a position open on this ticker.
+        # This prevents the 200+ duplicate trades per session problem.
+        existing_positions = [p for p in self.positions if p.get("asset") == ticker]
+        if existing_positions:
+            logger.info("[GUARD] Already in position on %s (%d open) — skipping %s signal",
+                       ticker, len(existing_positions), action)
+            return
+
+        # === COOLDOWN GUARD ===
+        # Don't re-enter within 120 seconds of closing a position on the same ticker.
+        # Gives the market time to settle after exit before re-entering.
+        cooldown_key = f"_last_close_time_{ticker}"
+        import time as _time
+        last_close = getattr(self, cooldown_key, 0)
+        if (_time.time() - last_close) < 120:
+            logger.info("[GUARD] Cooldown active for %s — %d seconds since last close",
+                       ticker, int(_time.time() - last_close))
+            return
+
+        # === CONFIDENCE FILTER ===
+        # Only take trades with confidence >= 0.65 (65%). Low confidence = chop.
+        confidence = float(payload.get("confidence") or payload.get("confidence_score") or 0.0)
+        if confidence < 0.65:
+            logger.info("[GUARD] Confidence too low for %s: %.1f%% (need 65%%) — skipping",
+                       ticker, confidence * 100)
+            return
+
+        # === CHART MATCH GUARD (BULLETPROOF) ===
+        # ONLY trade the configured symbol. If signal is for anything else, BLOCK.
+        # This prevents wrong-symbol trades when chart is switched.
+        allowed_symbols = config.ACTIVE_SYMBOLS
+        if ticker not in allowed_symbols:
+            logger.warning("[GUARD] Signal for %s but only %s allowed — BLOCKED",
+                          ticker, allowed_symbols)
+            return
+
+        # Also verify the TradingView chart matches before clicking
+        try:
+            import pygetwindow as gw
+            tv_windows = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
+            if tv_windows:
+                chart_title = tv_windows[0].title.upper()
+                ticker_clean = ticker.replace("1!", "").replace("=F", "")
+                if ticker_clean not in chart_title and ticker not in chart_title:
+                    logger.warning("[GUARD] Chart shows different symbol (title: %s) — BLOCKED %s %s",
+                                  tv_windows[0].title[:50], action, ticker)
+                    return
+        except Exception:
+            # If we can't check, BLOCK for safety on prop firm
+            logger.warning("[GUARD] Cannot verify chart symbol — BLOCKED %s %s for safety", action, ticker)
             return
 
         entry = float(payload.get("entry_price") or payload.get("price") or self._fetch_current_price(ticker) or 0.0)
         stop_loss = float(payload.get("stop_loss") or payload.get("sl") or 0.0)
         take_profit = float(payload.get("take_profit") or payload.get("tp") or 0.0)
+        logger.info("[EXEC] Prepared %s %s entry=%.2f sl=%.2f tp=%.2f", action, ticker, entry, stop_loss, take_profit)
         self._log_dashboard(f"[ROUTE] {self.current_mode}: {action} {ticker} | {reason[:140]}")
 
         try:
@@ -558,6 +634,10 @@ class VcaniTradeEngine:
         try:
             self.browser_agent = BrowserAgent(headless=False)
             self.rpa_executor.set_browser_agent(self.browser_agent)
+            if self.browser_agent.start_background():
+                logger.info("[BROWSER] Browser agent connected and background loop started")
+            else:
+                logger.warning("[BROWSER] Browser agent background start failed")
             logger.info("[BROWSER] Browser agent initialized")
         except Exception as e:
             logger.warning("[BROWSER] Browser agent init failed: %s", e)
@@ -598,14 +678,22 @@ class VcaniTradeEngine:
         """Start periodic scanner using QTimer."""
         self.scanner_timer = QTimer()
         self.scanner_timer.timeout.connect(self.execute_market_scan_sequence)
-        self.scanner_timer.start(60000)
+        interval_ms = int(float(config.SCAN_INTERVAL) * 1000)
+        self.scanner_timer.start(interval_ms)
         self._scanner_timer = self.scanner_timer  # Backward-compatible alias.
+        
+        # FAST EXIT MONITOR: Check open positions every 3 seconds for instant profit-taking
+        self._exit_timer = QTimer()
+        self._exit_timer.timeout.connect(self._run_position_exit_scan)
+        self._exit_timer.start(3000)  # 3 seconds
+        
         logger.info("[RESTORE] Market scanning matrix loop aggressively restarted.")
+        logger.info("[EXITS] Fast exit monitor armed: checking every 5 seconds")
         try:
             self.ai_narrator.notify_scan_start(len(self.current_watchlist))
         except Exception:
             pass
-        self._log_dashboard(f"[SCAN] Scanner armed: {len(self.current_watchlist)} markets, 60s structural cycle")
+        self._log_dashboard(f"[SCAN] Scanner armed: {len(self.current_watchlist)} markets, {config.SCAN_INTERVAL:.0f}s structural cycle")
 
     def execute_market_scan_sequence(self):
         """QTimer entrypoint for continuous multi-timeframe market sweeps."""
@@ -621,10 +709,12 @@ class VcaniTradeEngine:
             signals = self.scanner.scan()
             logger.info("[SCAN] Cycle completed with %d technical signal(s)", len(signals or []))
             if not signals:
+                self._run_position_exit_scan()
                 self._log_dashboard("[SCAN] Cycle complete: no technical trigger yet")
                 return
 
             self._log_dashboard(f"[TARGET] Found {len(signals)} technical trigger(s); background brain thread evaluating")
+            self._run_position_exit_scan()
             for signal in signals:
                 self._on_technical_signal_detected({
                     "ticker": getattr(signal, "ticker", "UNKNOWN"),
@@ -649,7 +739,19 @@ class VcaniTradeEngine:
         logger.info("[ENGINE] VcaniTrade Engine STOPPED")
     
     def execute_trade(self, ticker: str, action: str, entry: float, sl: float, tp: float) -> TradeResult:
-        """Execute a trade with single-asset lock enforcement."""
+        """Execute a trade with single-asset lock enforcement.
+        RULE: Only 1 position allowed at a time. Never stack."""
+        
+        # SAFETY: If positions list somehow has stale entries, don't block new trades forever.
+        # Each position should be auto-cleaned by close_position(). If a position has been
+        # "open" for more than 30 minutes without an exit, it's likely stale/phantom.
+        import time as _time
+        for pos in list(self.positions):
+            opened_at = pos.get("opened_at", 0)
+            if opened_at and (_time.time() - opened_at) > 1800:  # 30 min stale check
+                logger.warning("[STALE] Removing stale phantom position: %s (opened %ds ago)",
+                              pos.get("asset"), int(_time.time() - opened_at))
+                self.positions.remove(pos)
         
         # 0. Enforce native timezone-aware asset class permission gates cleanly
         if not getattr(self, 'can_trade', True):
@@ -714,6 +816,33 @@ class VcaniTradeEngine:
             
             if success:
                 logger.info("[EXEC] Trade executed: %s %s @ %.2f", action, ticker, entry)
+                import time as _t
+                self.positions.append(
+                    {
+                        "asset": ticker,
+                        "action": action,
+                        "entry_price": entry,
+                        "stop_loss": sl,
+                        "take_profit": tp,
+                        "opened_at": _t.time(),
+                    }
+                )
+                # WAKE THE HEADMASTER — new position to supervise
+                try:
+                    self.headmaster.on_position_opened(
+                        ticker=ticker,
+                        action=action,
+                        entry_price=entry,
+                        indicators={
+                            "RSI": self.trade_engine.last_indicators.get("rsi", 50),
+                            "ema9": self.trade_engine.last_indicators.get("ema9", 0),
+                            "ema21": self.trade_engine.last_indicators.get("ema21", 0),
+                            "macd_hist": self.trade_engine.last_indicators.get("macd_hist", 0),
+                        }
+                    )
+                except Exception as hm_err:
+                    logger.debug("[HEADMASTER] Init error (non-critical): %s", hm_err)
+                
                 return TradeResult(
                     status="EXECUTED",
                     ticker=ticker,
@@ -739,6 +868,187 @@ class VcaniTradeEngine:
                 reason=str(e)
             )
     
+    def _build_market_data_point(self, ticker: str, df) -> Optional[MarketDataPoint]:
+        """Build a compact MarketDataPoint from OHLCV for exit scanning."""
+        try:
+            from ta import momentum, trend
+
+            close = df["Close"].dropna()
+            high = df["High"].dropna()
+            low = df["Low"].dropna()
+            volume = df["Volume"].fillna(0)
+            if len(close) < 20 or len(high) < 20 or len(low) < 20:
+                return None
+
+            prev_close = close.shift(1)
+            true_range = pd.concat(
+                [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+                axis=1,
+            ).max(axis=1)
+            atr = float(true_range.rolling(window=14, min_periods=1).mean().iloc[-1] or 0.0)
+            ema9 = float(close.ewm(span=9, adjust=False).mean().iloc[-1] or 0.0)
+            ema21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1] or 0.0)
+            rsi = float(momentum.RSIIndicator(close=close, window=14).rsi().iloc[-1] or 50.0)
+            macd = trend.MACD(close=close)
+            macd_hist = float(macd.macd_diff().iloc[-1] or 0.0)
+            macd_hist_prev = float(macd.macd_diff().iloc[-2] or 0.0)
+            current_price = float(close.iloc[-1])
+            body = current_price - float(df["Open"].iloc[-1])
+            body_pct = body / max(abs(current_price), 1e-9) * 100.0
+
+            return MarketDataPoint(
+                asset=ticker,
+                price=current_price,
+                volume=float(volume.iloc[-1] or 0.0),
+                indicators={
+                    "RSI": rsi,
+                    "ATR": atr,
+                    "EMA9": ema9,
+                    "EMA21": ema21,
+                    "MACD_HIST": macd_hist,
+                    "MACD_HIST_PREV": macd_hist_prev,
+                    "CANDLE_BODY": body,
+                    "CANDLE_BODY_PCT": body_pct,
+                    "CANDLE_OPEN": float(df["Open"].iloc[-1] or 0.0),
+                    "CANDLE_CLOSE": current_price,
+                    "PREV_CANDLE_OPEN": float(df["Open"].iloc[-2] or 0.0) if len(df) > 1 else 0.0,
+                    "PREV_CANDLE_CLOSE": float(close.iloc[-2] or 0.0) if len(close) > 1 else 0.0,
+                },
+            )
+        except Exception as e:
+            logger.debug("[EXIT] Failed to build market data point for %s: %s", ticker, e)
+            return None
+
+    def _evaluate_position_exit(self, position: dict, market_data: MarketDataPoint) -> Tuple[bool, str]:
+        """INTELLIGENT EXIT: Trailing stop + reversal detection + liquidity targets.
+        Does NOT auto-click flatten (user closes on TradingView).
+        Instead logs the EXIT signal clearly so user can act immediately."""
+        action = str(position.get("action", "")).upper()
+        entry = float(position.get("entry_price", market_data.price) or market_data.price)
+        price = float(market_data.price or 0.0)
+        if price <= 0:
+            return False, ""
+
+        rsi = float(market_data.indicators.get("RSI", 50.0) or 50.0)
+        atr = float(market_data.indicators.get("ATR", 0.0) or 0.0)
+        ema9 = float(market_data.indicators.get("EMA9", 0.0) or 0.0)
+        ema21 = float(market_data.indicators.get("EMA21", 0.0) or 0.0)
+        macd_hist = float(market_data.indicators.get("MACD_HIST", 0.0) or 0.0)
+        macd_hist_prev = float(market_data.indicators.get("MACD_HIST_PREV", 0.0) or 0.0)
+        pnl_points = price - entry if action == "BUY" else entry - price
+        pnl_atr = pnl_points / max(atr, 1e-9)
+
+        # --- STOP LOSS: 2x ATR (hard protection) ---
+        if pnl_atr <= -2.0:
+            return True, f"STOP LOSS: {pnl_atr:.1f} ATR ({pnl_points:.0f} pts)"
+
+        # --- Track peak profit ---
+        max_pnl_key = f"_max_pnl_{position.get('asset', '')}_{entry}"
+        prev_max_pts = getattr(self, max_pnl_key, 0.0)
+        if pnl_points > prev_max_pts:
+            setattr(self, max_pnl_key, pnl_points)
+            prev_max_pts = pnl_points
+        prev_max_atr = prev_max_pts / max(atr, 1e-9)
+
+        # --- TRAILING STOP: Once up 1 ATR, keep at least 50% of peak ---
+        if prev_max_atr >= 1.0:
+            trail_floor = prev_max_atr * 0.50
+            if pnl_atr < trail_floor:
+                return True, f"TRAILING STOP: peak +{prev_max_atr:.1f} ATR, now +{pnl_atr:.1f} ATR — take profit NOW"
+
+        # --- TARGET: 2.5x ATR (nearest typical liquidity zone) ---
+        if pnl_atr >= 2.5:
+            return True, f"TARGET REACHED: +{pnl_atr:.1f} ATR ({pnl_points:.0f} pts) — liquidity zone hit"
+
+        # --- REVERSAL CANDLE: color flip at 0.5+ ATR profit ---
+        candle_open = float(market_data.indicators.get("CANDLE_OPEN", 0.0) or 0.0)
+        candle_close = float(market_data.indicators.get("CANDLE_CLOSE", price) or price)
+        prev_candle_open = float(market_data.indicators.get("PREV_CANDLE_OPEN", 0.0) or 0.0)
+        prev_candle_close = float(market_data.indicators.get("PREV_CANDLE_CLOSE", 0.0) or 0.0)
+        if candle_open > 0 and prev_candle_open > 0 and pnl_atr >= 0.5:
+            current_red = candle_close < candle_open
+            prev_green = prev_candle_close > prev_candle_open
+            current_green = candle_close > candle_open
+            prev_red = prev_candle_close < prev_candle_open
+            if action == "BUY" and current_red and prev_green:
+                return True, f"REVERSAL CANDLE at +{pnl_atr:.1f} ATR — close NOW"
+            if action == "SELL" and current_green and prev_red:
+                return True, f"REVERSAL CANDLE at +{pnl_atr:.1f} ATR — close NOW"
+
+        # --- MOMENTUM FLIP at 0.8+ ATR profit ---
+        if pnl_atr >= 0.8:
+            if action == "BUY" and macd_hist < 0 <= macd_hist_prev:
+                return True, f"MACD FLIPPED at +{pnl_atr:.1f} ATR — momentum dying"
+            if action == "SELL" and macd_hist > 0 >= macd_hist_prev:
+                return True, f"MACD FLIPPED at +{pnl_atr:.1f} ATR — momentum dying"
+
+        # --- RSI EXTREME with profit ---
+        if action == "BUY" and rsi >= 78 and pnl_atr > 0.5:
+            return True, f"RSI {rsi:.0f} exhausted at +{pnl_atr:.1f} ATR"
+        if action == "SELL" and rsi <= 22 and pnl_atr > 0.5:
+            return True, f"RSI {rsi:.0f} exhausted at +{pnl_atr:.1f} ATR"
+
+        return False, ""
+
+    def _run_position_exit_scan(self):
+        """Scan open positions for quick exit/stop guidance every 5 seconds.
+        Also runs the Headmaster Supervisor for advanced exit decisions."""
+        if not self.positions:
+            return
+
+        for position in list(self.positions):
+            ticker = position.get("asset")
+            if not ticker:
+                continue
+            try:
+                df = self.scanner._fetch_market_data(ticker)
+                if df is None or df.empty:
+                    continue
+                market_data = self._build_market_data_point(ticker, df)
+                if market_data is None:
+                    continue
+
+                # === HEADMASTER SUPERVISOR CHECK ===
+                # Headmaster monitors but does NOT auto-flatten on paper trading
+                # (clicking opposite direction opens new positions instead of closing)
+                # It ALERTS the user to close manually.
+                self.headmaster.evaluate(ticker, market_data.price, market_data.indicators)
+                if self.headmaster.should_close:
+                    reason = self.headmaster.consume_close_command()
+                    logger.warning("[HEADMASTER] EXIT SIGNAL %s: %s", ticker, reason)
+                    self._log_dashboard(f"[HEADMASTER] CLOSE {ticker} NOW! {reason}")
+                    try:
+                        _speak_alert(f"Headmaster says close {ticker} now. {reason}", min_interval_seconds=3.0)
+                    except Exception:
+                        pass
+                    continue
+
+                # === STANDARD EXIT LOGIC ===
+                should_exit, reason = self._evaluate_position_exit(position, market_data)
+                if should_exit:
+                    action = position.get("action")
+                    entry = position.get("entry_price", 0.0)
+                    price = market_data.price
+                    message = (
+                        f"[EXIT] {ticker} {action} EXIT NOW: {reason} | "
+                        f"entry={entry:.2f} current={price:.2f}"
+                    )
+                    self._log_dashboard(message)
+                    try:
+                        _speak_alert(f"Exit {action} {ticker} now. {reason}", min_interval_seconds=3.0)
+                    except Exception:
+                        pass
+                    # Only auto-flatten for STOP LOSS (losing money).
+                    # For profit exits, ALERT the user — they close manually.
+                    if self.current_mode == "AUTONOMOUS" and "STOP LOSS" in reason:
+                        QTimer.singleShot(0, lambda p=position, r=reason: self.close_position(p.get("asset", ticker), r))
+                    elif self.current_mode == "AUTONOMOUS":
+                        # Profit exit — just log loudly, user closes manually
+                        logger.info("[TAKE PROFIT SIGNAL] %s %s — CLOSE NOW! Reason: %s", action, ticker, reason)
+                        self._log_dashboard(f"[TAKE PROFIT] CLOSE {ticker} NOW! {reason}")
+            except Exception as e:
+                logger.warning("[EXIT] Error checking position %s: %s", ticker, e)
+
     def check_dynamic_exits(self):
         """Check all open positions for dynamic AI exit conditions."""
         for position in list(self.positions):
@@ -775,6 +1085,41 @@ class VcaniTradeEngine:
             except Exception as e:
                 logger.warning("[EXIT] Error checking dynamic exit for %s: %s", ticker, e)
     
+    def _headmaster_kill_order(self, ticker: str, reason: str):
+        """HEADMASTER KILL ORDER: Bypass all filters, flatten immediately, reset everything.
+        This is the 'Thank You Handshake Protocol' — take profit and move on."""
+        
+        # STEP 1: Direct FLATTEN click — no secondary checks
+        try:
+            self.rpa_executor.flatten_position(ticker)
+            logger.info("[HEADMASTER] FLATTEN click sent for %s", ticker)
+        except Exception as e:
+            logger.error("[HEADMASTER] Flatten click failed: %s — trying close_position fallback", e)
+        
+        # STEP 2: Thank You log
+        logger.info("[HEADMASTER] Dynamic U-Turn Exit executed! Taken the profit! Thank you so much!")
+        self._log_dashboard(f"[HEADMASTER] ✓ Profit secured on {ticker}! Thank you! Reason: {reason[:80]}")
+        
+        # STEP 3: Force reset ALL locks unconditionally
+        try:
+            # Remove from positions list
+            for i, pos in enumerate(list(self.positions)):
+                if pos.get("asset") == ticker:
+                    self.positions.pop(i)
+                    break
+            # Force reset asset lock
+            self.asset_lock.force_reset()
+            # Set cooldown
+            import time as _time
+            setattr(self, f"_last_close_time_{ticker}", _time.time())
+            # Put headmaster to sleep
+            self.headmaster.on_position_closed()
+        except Exception as e:
+            logger.error("[HEADMASTER] Lock reset error: %s", e)
+        
+        # STEP 4: Rearm scanner immediately — look for next opportunity
+        logger.info("[HEADMASTER] Scanner rearmed. Hunting for next entry...")
+
     def close_position(self, ticker: str, reason: str = ""):
         """Close a position and release the asset lock.
 
@@ -804,6 +1149,15 @@ class VcaniTradeEngine:
             else:
                 self.trade_executor.close_position(ticker)
             
+            # Remove from local position list once close request has been issued.
+            try:
+                for i, position in enumerate(list(self.positions)):
+                    if position.get("asset") == ticker:
+                        self.positions.pop(i)
+                        break
+            except Exception:
+                pass
+            
             # Lock already force-reset above — this is a belt-and-suspenders release.
             try:
                 self.asset_lock.release()
@@ -811,6 +1165,16 @@ class VcaniTradeEngine:
                 pass
             
             logger.info("[CLOSE] Position closed: %s | Reason: %s", ticker, reason)
+            
+            # Put headmaster back to sleep
+            try:
+                self.headmaster.on_position_closed()
+            except Exception:
+                pass
+            
+            # Set cooldown timestamp so we don't re-enter immediately
+            import time as _time
+            setattr(self, f"_last_close_time_{ticker}", _time.time())
             
         except Exception as e:
             logger.error("[CLOSE] Error closing position %s: %s", ticker, e)
@@ -839,12 +1203,7 @@ class VcaniTradeEngine:
     def _fetch_current_price(self, ticker: str) -> float:
         """Fetch current price for a ticker."""
         try:
-            if config.get_active_mode() == "TRADINGVIEW" and self.browser_agent:
-                # Use browser agent to fetch price
-                return self.browser_agent.get_current_price(ticker)
-            else:
-                # Use MT5 or yfinance
-                return self.scanner._fetch_market_data(ticker)["Close"].iloc[-1]
+            return self.scanner._fetch_market_data(ticker)["Close"].iloc[-1]
         except Exception:
             return 0.0
 

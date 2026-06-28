@@ -130,14 +130,15 @@ def _speak_alert(message: str, min_interval_seconds: float = 3.0):
 
     global _last_spoken_alert_at
     now = time.monotonic()
-    if now - _last_spoken_alert_at < min_interval_seconds:
+    interval = max(min_interval_seconds, float(getattr(config, "NARRATION_MIN_INTERVAL_SECONDS", min_interval_seconds) or min_interval_seconds))
+    if now - _last_spoken_alert_at < max(0.1, interval):
         return
     _last_spoken_alert_at = now
 
     text = re.sub(r"[^A-Za-z0-9 .,:;%$\\-]", " ", str(message or "")).strip()
     if not text:
         return
-    text = text[:180]
+    text = text[:220]
 
     def _runner():
         try:
@@ -146,25 +147,30 @@ def _speak_alert(message: str, min_interval_seconds: float = 3.0):
             env = os.environ.copy()
             env["VCAN_SPEAK_TEXT"] = text
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.run(
+            completed = subprocess.run(
                 [
-                    "powershell",
+                    "powershell.exe",
                     "-NoProfile",
+                    "-NonInteractive",
                     "-Command",
                     (
                         "Add-Type -AssemblyName System.Speech; "
                         "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
                         "$s.Rate = 1; "
+                        "$s.Volume = 100; "
+                        "try { $voices = $s.GetVoices(); if ($voices.Count -gt 0) { $s.SelectVoice($voices.Item(0).Id) } } catch {}; "
                         "$s.Speak($env:VCAN_SPEAK_TEXT)"
                     ),
                 ],
                 env=env,
                 capture_output=True,
-                timeout=6,
+                timeout=8,
                 creationflags=flags,
             )
-        except Exception:
-            pass
+            if completed.returncode != 0:
+                logger.debug("[VOICE] PowerShell speech failed: %s", completed.stderr.decode("utf-8", errors="ignore")[:200])
+        except Exception as exc:
+            logger.debug("[VOICE] Speech synthesis failed: %s", exc)
 
     threading.Thread(target=_runner, daemon=True).start()
 

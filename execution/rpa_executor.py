@@ -12,6 +12,10 @@ import pyperclip
 import config
 from core.human_behavior import human
 
+# Disable PyAutoGUI fail-safe (corner trigger) — the bot needs to click
+# anywhere on screen including near edges where TradingView buttons may be.
+pyautogui.FAILSAFE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -134,6 +138,9 @@ class RPAExecutor:
         try:
             logger.info(f"[HY3-HARDEN] Initializing isolated RPA strike path for asset: {ticker} | Action: {action}")
 
+            # Derive target_key from action for button lookup
+            target_key = "buy_button" if action == "BUY" else "sell_button"
+
             # Engage single-counter target lock to freeze background threads
             if hasattr(browser_agent, 'set_target_lock'):
                 browser_agent.set_target_lock(ticker)
@@ -178,17 +185,19 @@ class RPAExecutor:
                 pyautogui.press('escape')
                 time.sleep(0.2)
 
-                # 4. Click the Buy or Sell button directly on the current chart
-                clicked = self._click_buy_sell_button(browser_agent, action)
+                # 4. Click the Buy or Sell button directly on the current chart.
+                clicked = self._click_via_controlled_page(target_key, ticker)
                 if not clicked:
-                    logger.warning("[HY3] Could not find %s button via CDP, retrying with coordinates", action)
+                    clicked = self._click_buy_sell_button(browser_agent, action)
+                if not clicked:
+                    logger.warning("[HY3] Could not find %s button via HTML/CDP, retrying with coordinates", action)
                     # Fallback: click at known TradingView Buy/Sell button locations
                     screen_w, screen_h = pyautogui.size()
                     if action == "BUY":
                         # Buy button is typically at bottom-right of the order panel
-                        pyautogui.click(screen_w - 120, screen_h - 180)
+                        self._human_mouse_move_and_click(screen_w - 120, screen_h - 180)
                     else:
-                        pyautogui.click(screen_w - 120, screen_h - 140)
+                        self._human_mouse_move_and_click(screen_w - 120, screen_h - 140)
                     time.sleep(0.3)
 
                 # 5. Defensive targeted entry for Stop Loss parameter field
@@ -219,6 +228,11 @@ class RPAExecutor:
                 browser_agent.pause_cdp_listener = False
 
             logger.info(f"[HY3-SUCCESS] Bracket order fields validated and committed for ticker: {ticker}")
+            # Dismiss any TradingView popups/dialogs that appeared after order
+            time.sleep(0.3)
+            pyautogui.press('escape')
+            time.sleep(0.2)
+            pyautogui.press('escape')
             return True
         except Exception as e:
             logger.error(f"[HY3-FAILURE] Severe crash inside hardened execution field macro: {str(e)}")
@@ -1018,6 +1032,13 @@ class RPAExecutor:
             except Exception:
                 pass
 
+    def _human_mouse_move_and_click(self, x: int, y: int) -> None:
+        """Move the physical cursor with a human-like Bezier path and click."""
+        duration = random.uniform(0.45, 0.9) if self.human_latency_enabled else 0.1
+        pyautogui.moveTo(int(x), int(y), duration=duration, tween=pyautogui.easeOutQuad)
+        time.sleep(random.uniform(0.08, 0.25) if self.human_latency_enabled else 0.03)
+        pyautogui.click()
+
     def _click_buy_sell_button(self, browser_agent, action: str) -> bool:
         """Find and click the Buy or Sell button on TradingView using CDP + pyautogui."""
         try:
@@ -1050,7 +1071,7 @@ class RPAExecutor:
                 if coords:
                     cx, cy = int(coords['x']), int(coords['y'])
                     logger.info("[HY3] Found '%s' button at (%d, %d): %s", action, cx, cy, coords.get('text', ''))
-                    pyautogui.click(cx, cy)
+                    self._human_mouse_move_and_click(cx, cy)
                     time.sleep(0.3)
                     return True
             finally:
@@ -2280,36 +2301,94 @@ class RPAExecutor:
             return False
 
     def flatten_position(self, ticker_hint: str = "") -> bool:
-        """Best-effort TradingView position flatten used by profit protection."""
-        surface = str(getattr(config, "ACTIVE_EXECUTION_SURFACE", "")).upper().strip()
-        if surface == "TRADINGVIEW":
-            logger.info("[CHAIN-LOCK] Pre-flatten TV account verification for %s", ticker_hint or "active chart")
-            if not self._micro_verify_account():
-                logger.error("[ALARM] FLATTEN ABORTED: TV account chain-lock failed for %s", ticker_hint)
+        """Close position on TradingView. Tries JS close button first, then coordinates."""
+        
+        logger.info("[FLATTEN] Attempting to close position for %s", ticker_hint or "active chart")
+
+        # METHOD 1: Playwright JS — search for Close/Flatten button in DOM
+        if self._click_close_via_controlled_page(ticker_hint):
+            logger.info("[FLATTEN] SUCCESS: Playwright found and clicked Close for %s", ticker_hint)
+            time.sleep(0.3)
+            pyautogui.press('escape')
+            return True
+
+        # METHOD 2: Click the X button on the position line on the chart
+        # TradingView shows a small X next to the P&L when you hover the position line
+        window = self._get_browser_window(ticker_hint)
+        if window:
+            try:
+                window.activate()
+                time.sleep(0.2)
+                
+                page = getattr(self, "_controlled_page", None)
+                if page and not page.is_closed():
+                    closed = self._run_async(self._js_click_position_close(page))
+                    if closed:
+                        logger.info("[FLATTEN] SUCCESS: Clicked position X button for %s", ticker_hint)
+                        time.sleep(0.3)
+                        pyautogui.press('escape')
+                        return True
+            except Exception:
+                pass
+
+        # METHOD 3: Fallback — click the configured flatten coordinate
+        if window:
+            try:
+                target_x, target_y = config.FALLBACK_COORDS.get("flatten_button", (960, 620))
+                pyautogui.moveTo(target_x, target_y, duration=0.1)
+                pyautogui.click()
+                time.sleep(0.5)
+                pyautogui.press('enter')  # Confirm if dialog appears
+                time.sleep(0.2)
+                pyautogui.press('escape')
+                logger.info("[FLATTEN] Method 3: Coordinate click at (%d, %d) for %s", target_x, target_y, ticker_hint)
+                return True
+            except Exception as e:
+                logger.error("[FLATTEN] All methods failed for %s: %s", ticker_hint, e)
                 return False
 
-        if self._click_close_via_controlled_page(ticker_hint):
-            return True
+        logger.error("[FLATTEN] Could not find TradingView window for %s", ticker_hint)
+        return False
 
-        window = self._get_browser_window(ticker_hint)
-        if not window:
-            logger.error("[FLATTEN] Could not find TradingView window for %s", ticker_hint)
-            return False
-        try:
-            window.activate()
-            time.sleep(0.2)
-        except Exception:
-            pass
-
-        try:
-            target_x, target_y = config.FALLBACK_COORDS.get("flatten_button", (960, 620))
-            pyautogui.moveTo(target_x, target_y, duration=0.1)
-            pyautogui.click()
-            logger.info("[FLATTEN] Clicked configured flatten button for %s at (%d, %d)", ticker_hint, target_x, target_y)
-            return True
-        except Exception as e:
-            logger.error("[FLATTEN] Flatten click failed for %s: %s", ticker_hint, e)
-            return False
+    async def _js_click_position_close(self, page):
+        """Find the position close button (X) on TradingView chart."""
+        return await page.evaluate("""() => {
+            // Look for the position's close X button or "Close" text
+            const selectors = [
+                '[data-name="close-position"]',
+                '[data-name="closePosition"]', 
+                'button[aria-label*="Close"]',
+                'button[aria-label*="close"]',
+                '[class*="closeButton"]',
+                '[class*="close-button"]',
+                '[class*="position"]  [class*="close"]',
+            ];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 3 && rect.height > 3) {
+                        el.click();
+                        el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                        return true;
+                    }
+                }
+            }
+            
+            // Fallback: find any small X near position-related elements
+            const allButtons = document.querySelectorAll('button, [role="button"], svg');
+            for (const btn of allButtons) {
+                const rect = btn.getBoundingClientRect();
+                if (rect.width >= 8 && rect.width <= 30 && rect.height >= 8 && rect.height <= 30) {
+                    const parent = btn.closest('[class*="position"], [class*="trade"], [class*="order"]');
+                    if (parent) {
+                        btn.click();
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }""")
 
     def _tradingview_strike_sequence(self, target_key, ticker):
         """The 'Lion Strike' adapted for TradingView: find blue Buy or red Sell button and click it."""
@@ -2966,12 +3045,16 @@ class RPAExecutor:
     def set_browser_agent(self, browser_agent):
         """Attach the browser agent so active RPA strikes can pause CDP polling."""
         self._browser_agent = browser_agent
+        page = getattr(browser_agent, "page", None)
+        loop = getattr(browser_agent, "loop", None)
+        if page:
+            self.set_controlled_page(page, loop)
 
     def _run_async(self, coro, browser_agent=None):
         """Run an async coroutine on the persistent browser event loop."""
         import asyncio
         # 1. Use provided or internal browser_agent's loop handler (Reliable)
-        agent = browser_agent or getattr(self, "browser_agent", None)
+        agent = browser_agent or getattr(self, "_browser_agent", None)
         if agent and hasattr(agent, "run_in_loop"):
             return agent.run_in_loop(coro)
 
