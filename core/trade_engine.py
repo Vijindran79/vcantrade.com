@@ -25,6 +25,20 @@ from core.institutional_suite import suite
 
 logger = logging.getLogger(__name__)
 
+# Hawk-class ladder scale-out engine
+try:
+    from core.ladder_exit import LadderExitManager
+    _LADDER_AVAILABLE = True
+except ImportError:
+    _LADDER_AVAILABLE = False
+
+# Hawk-class circuit breaker
+try:
+    from core.risk_governor import RiskGovernor
+    _GOVERNOR_AVAILABLE = True
+except ImportError:
+    _GOVERNOR_AVAILABLE = False
+
 
 class TradeEngine:
     """Core trading engine with safety controls and trade ledger"""
@@ -56,6 +70,10 @@ class TradeEngine:
         self.profit_lock = ProfitLock()
         self.walk_away = WalkAwayProtocol()
         self.atr_stops = LooseATRStops()
+
+        # Hawk-class ladder + governor
+        self.ladder = LadderExitManager() if _LADDER_AVAILABLE else None
+        self.governor = RiskGovernor() if _GOVERNOR_AVAILABLE else None
 
         # Initialize SQLite ledger
         self._init_ledger()
@@ -268,6 +286,18 @@ class TradeEngine:
 
             is_long = trade.action == SignalAction.BUY
 
+            # --- HAWK LADDER: staged scale-out ---
+            if self.ladder and trade.stop_loss:
+                _lsig = self.ladder.evaluate(trade.asset, current_price, None, False)
+                if _lsig.action == "CLOSE_FULL":
+                    self._close_trade_at_price(trade, current_price, "LADDER:" + _lsig.reason)
+                    closed_ids.append(trade.id)
+                    continue
+                elif _lsig.action == "CLOSE_PARTIAL":
+                    self.ladder.record_partial_close(trade.asset, _lsig.close_pct)
+                    if _lsig.new_stop:
+                        trade.stop_loss = _lsig.new_stop
+
             # Optional time-based exit
             max_hold = int(getattr(config, "MAX_TRADE_HOLD_SECONDS", 0) or 0)
             if max_hold > 0 and trade.timestamp:
@@ -376,6 +406,15 @@ class TradeEngine:
         if self.target_lock_active and trade.asset == self.locked_asset:
             self.resume_scanners()
 
+        # Hawk circuit breaker: record result
+        if self.governor and trade.pnl is not None:
+            _pp = (trade.pnl / trade.entry_price * 100) if trade.entry_price > 0 else 0.0
+            self.governor.record_trade_result(trade.pnl >= 0, _pp)
+
+        # Hawk ladder: clear
+        if self.ladder:
+            self.ladder.clear_trade(trade.asset)
+
     def _execute_buy(self, signal: LLMAnalysisOutput) -> TradeRecord:
         """Execute buy trade with confidence-based position sizing"""
         # HAWK LOCK ENGAGEMENT
@@ -400,6 +439,10 @@ class TradeEngine:
         # Save to ledger
         self._save_trade(trade)
         self.open_trades.append(trade)
+
+        # Hawk ladder: register
+        if self.ladder and trade.stop_loss:
+            self.ladder.register_trade(trade.asset, "BUY", trade.entry_price, trade.stop_loss, 1.0)
 
         # Execute via RPA if not dry run
         if not config.DRY_RUN:
@@ -463,6 +506,10 @@ class TradeEngine:
 
         self._save_trade(trade)
         self.open_trades.append(trade)
+
+        # Hawk ladder: register
+        if self.ladder and trade.stop_loss:
+            self.ladder.register_trade(trade.asset, "SELL", trade.entry_price, trade.stop_loss, 1.0)
 
         # Execute via RPA if not dry run
         if not config.DRY_RUN:
@@ -530,6 +577,15 @@ class TradeEngine:
                 self._update_trade(trade)
 
                 logger.info("CLOSED: %s | PnL: $%.2f", trade.asset, trade.pnl or 0)
+
+                # Hawk circuit breaker: record result
+                if self.governor and trade.pnl is not None:
+                    _pp = (trade.pnl / trade.entry_price * 100) if trade.entry_price > 0 else 0.0
+                    self.governor.record_trade_result(trade.pnl >= 0, _pp)
+
+                # Hawk ladder: clear
+                if self.ladder:
+                    self.ladder.clear_trade(trade.asset)
 
                 # Check if hit stop loss - start cooldown
                 if trade.pnl and trade.pnl < 0 and trade.stop_loss:

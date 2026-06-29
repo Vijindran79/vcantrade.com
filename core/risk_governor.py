@@ -94,6 +94,78 @@ class RiskUnit:
         return total_corr / max(1, count)
 
 
+class CircuitBreaker:
+    """Hawk-class protection against tilting spirals and drawdown cascades."""
+
+    def __init__(self, cooldown_after_losses=2, cooldown_minutes=30, max_daily_losses=3,
+                 max_consecutive_losses=3, reduced_size_multiplier=0.25,
+                 daily_dd_limit_pct=1.5, weekly_dd_limit_pct=3.0):
+        self.cooldown_after_losses = cooldown_after_losses
+        self.cooldown_minutes = cooldown_minutes
+        self.max_daily_losses = max_daily_losses
+        self.max_consecutive_losses = max_consecutive_losses
+        self.reduced_size_multiplier = reduced_size_multiplier
+        self.daily_dd_limit_pct = daily_dd_limit_pct
+        self.weekly_dd_limit_pct = weekly_dd_limit_pct
+        self.consecutive_losses = 0
+        self.daily_loss_count = 0
+        self.weekly_loss_count = 0
+        self.cooldown_until = None
+        self.daily_halt = False
+        self.weekly_halt = False
+        self.size_reduced = False
+        self.daily_pnl_pct = 0.0
+        self.weekly_pnl_pct = 0.0
+        logger.info("[CIRCUIT] CircuitBreaker initialised")
+
+    def record_trade_result(self, won, pnl_pct=0.0):
+        self.daily_pnl_pct += pnl_pct
+        self.weekly_pnl_pct += pnl_pct
+        if won:
+            self.consecutive_losses = 0
+            if self.size_reduced:
+                self.size_reduced = False
+                logger.info("[CIRCUIT] Winner restored - size back to 1.0x")
+        else:
+            self.consecutive_losses += 1
+            self.daily_loss_count += 1
+            self.weekly_loss_count += 1
+            if self.consecutive_losses >= self.max_consecutive_losses:
+                self.size_reduced = True
+            if self.consecutive_losses >= self.cooldown_after_losses:
+                self.cooldown_until = datetime.now() + timedelta(minutes=self.cooldown_minutes)
+            if self.daily_loss_count >= self.max_daily_losses:
+                self.daily_halt = True
+        if self.daily_pnl_pct <= -self.daily_dd_limit_pct:
+            self.daily_halt = True
+        if self.weekly_pnl_pct <= -self.weekly_dd_limit_pct:
+            self.weekly_halt = True
+
+    def can_trade(self):
+        now = datetime.now()
+        if self.weekly_halt:
+            return False, "Weekly halt"
+        if self.daily_halt:
+            return False, "Daily halt"
+        if self.cooldown_until and now < self.cooldown_until:
+            r = (self.cooldown_until - now).total_seconds() / 60
+            return False, f"Cooldown: {r:.0f} min remaining"
+        return True, "OK"
+
+    def get_size_multiplier(self):
+        return self.reduced_size_multiplier if self.size_reduced else 1.0
+
+    def reset_daily(self):
+        self.daily_loss_count = 0
+        self.daily_halt = False
+        self.daily_pnl_pct = 0.0
+
+    def reset_weekly(self):
+        self.weekly_loss_count = 0
+        self.weekly_halt = False
+        self.weekly_pnl_pct = 0.0
+
+
 class RiskGovernor:
     """
     Institutional Governor & Risk Architect.
@@ -111,6 +183,7 @@ class RiskGovernor:
         max_exposure_per_unit_pct: float = 5.0,
         max_total_exposure_pct: float = 15.0,
         correlation_threshold: float = 0.85,
+        enable_circuit_breaker: bool = True,
     ):
         """
         Initialize Risk Governor.
@@ -129,6 +202,9 @@ class RiskGovernor:
         self.risk_units: List[RiskUnit] = []
         self.position_history: List[Dict] = []
         self.correlation_cache: Dict[str, float] = DEFAULT_CORRELATION_MATRIX.copy()
+        
+        # Circuit breaker for hawk-class protection
+        self.circuit_breaker = CircuitBreaker() if enable_circuit_breaker else None
         
         # Statistics
         self.total_signals_processed = 0
@@ -170,6 +246,16 @@ class RiskGovernor:
                 "reason": "HOLD signal, no action needed",
                 "risk_unit_id": None
             }
+        
+        # ---- CIRCUIT BREAKER GATE ----
+        if self.circuit_breaker:
+            allowed, reason = self.circuit_breaker.can_trade()
+            if not allowed:
+                self.total_signals_rejected += 1
+                return {"verdict": "REJECT", "reason": f"Circuit breaker: {reason}", "risk_unit_id": None, "circuit_breaker": True}
+            if self.circuit_breaker.get_size_multiplier() < 1.0:
+                new_exposure_pct *= self.circuit_breaker.get_size_multiplier()
+                new_signal["exposure_pct"] = new_exposure_pct
         
         # Check total exposure limit
         total_exposure = self._calculate_total_exposure(existing_positions)

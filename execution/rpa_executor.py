@@ -127,6 +127,82 @@ class RPAExecutor:
             action = action.rsplit(".", 1)[-1]
         return action
 
+    def _navigate_and_verify_chart(self, browser_agent, ticker: str) -> bool:
+        """HAWK GUARD: Navigate TradingView to the correct symbol and verify.
+
+        Uses Control+O (symbol search) via Playwright page, types the
+        TradingView symbol, then verifies the chart header matches.
+        Returns False if navigation fails — caller MUST refuse to trade.
+        """
+        try:
+            page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
+            tv_symbol = self._map_ticker_to_tv(ticker)
+
+            if not page:
+                # Fallback: pyautogui keyboard navigation
+                simple_browser = getattr(browser_agent, 'simple_browser', None)
+                if not (simple_browser and getattr(simple_browser, 'websocket', None)):
+                    logger.warning("[HAWK-NAV] No page or CDP available")
+                    return False
+                logger.info("[HAWK-NAV] Using pyautogui fallback for %s", tv_symbol)
+                return self._navigate_via_pyautogui(tv_symbol)
+
+            # Check if already on correct chart
+            if self._verify_chart_landmark(page, ticker):
+                logger.info("[HAWK-NAV] Chart already on %s", ticker)
+                return True
+
+            logger.info("[HAWK-NAV] Navigating to %s (TV: %s)", ticker, tv_symbol)
+
+            async def _do_nav():
+                await page.bring_to_front()
+                await asyncio.sleep(0.2)
+                await page.keyboard.press("Control+o")
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Control+a")
+                await asyncio.sleep(0.1)
+                await page.keyboard.type(tv_symbol, delay=30)
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(2.0)
+
+            self._run_async(_do_nav(), browser_agent)
+
+            # Verify chart switched
+            for _ in range(6):
+                if self._verify_chart_landmark(page, ticker):
+                    logger.info("[HAWK-NAV] Chart confirmed on %s", ticker)
+                    return True
+                time.sleep(0.5)
+
+            logger.warning("[HAWK-NAV] Could not confirm %s after 3s", ticker)
+            return False
+        except Exception as e:
+            logger.error("[HAWK-NAV] Error for %s: %s", ticker, e)
+            return False
+
+    def _navigate_via_pyautogui(self, tv_symbol: str) -> bool:
+        """Fallback navigation via pyautogui when no Playwright page exists."""
+        try:
+            import pygetwindow as gw
+            tv_windows = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
+            if tv_windows:
+                tv_windows[0].activate()
+                time.sleep(0.5)
+            pyautogui.hotkey('ctrl', 'o')
+            time.sleep(0.5)
+            pyautogui.hotkey('ctrl', 'a')
+            time.sleep(0.1)
+            pyautogui.write(tv_symbol, interval=0.04)
+            time.sleep(0.5)
+            pyautogui.press('enter')
+            time.sleep(2.0)
+            logger.info("[HAWK-NAV] PyAutoGUI nav to %s done", tv_symbol)
+            return True
+        except Exception as e:
+            logger.warning("[HAWK-NAV] PyAutoGUI failed: %s", e)
+            return False
+
     def execute_protected_tradingview_bracket(self, browser_agent, ticker: str, action: str, entry_price: float, sl: float, tp: float) -> bool:
         """Executes an unbreakable bracket order on TradingView.
 
@@ -150,35 +226,18 @@ class RPAExecutor:
                 browser_agent.pause_cdp_listener = True
                 time.sleep(0.05)
 
-                # 2. SKIP NAVIGATION — user has watchlist set up
-                # (Previously typed ticker into search box — user found this annoying)
-                logger.info("[HY3-SIMPLE] Skipping symbol navigation (user has watchlist set up)")
-                
-                # 2.5 VALIDATE: Click ticker in watchlist to ensure correct chart is loaded
-                # NOTE: browser_agent.page is None after simple CDP changes
-                # Use simple_browser (WebSocket CDP) or pyautogui instead
-                if browser_agent and hasattr(browser_agent, 'simple_browser') and browser_agent.simple_browser:
-                    try:
-                        display_ticker = ticker.replace("1!", "").replace("=F", "")
-                        logger.info(f"[WATCHLIST-VALIDATE] Using simple CDP to validate {ticker}")
-                        # Simple CDP doesn't have watchlist click yet, so we use pyautogui
-                        # to click on the watchlist area (left side of TradingView)
-                        import pygetwindow as gw
-                        tv_windows = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
-                        if tv_windows:
-                            window = tv_windows[0]
-                            # Click in watchlist area (left side of TV)
-                            pyautogui.click(window.left + 100, window.top + 200)
-                            time.sleep(0.5)
-                            # Type the ticker to search
-                            pyautogui.write(display_ticker, interval=0.05)
-                            time.sleep(0.5)
-                            pyautogui.press('enter')
-                            time.sleep(1.0)
-                            logger.info(f"[WATCHLIST-VALIDATE] Navigated to {display_ticker}")
-                    except Exception as e:
-                        logger.warning(f"[WATCHLIST-VALIDATE] Failed to validate ticker: {e}")
-                
+                # 2. HAWK NAVIGATION GUARD: navigate to correct chart BEFORE clicking.
+                # Never click Buy/Sell on the wrong chart (prevents "bought NQ
+                # when signal was for Gold" bug).
+                nav_ok = self._navigate_and_verify_chart(browser_agent, ticker)
+                if not nav_ok:
+                    logger.error(
+                        "[HY3-NUKE] REFUSING %s: could not confirm chart is on %s",
+                        action, ticker,
+                    )
+                    browser_agent.pause_cdp_listener = False
+                    return False
+
                 # 3. Force close any stuck UI dialogue remnants
                 pyautogui.press('escape')
                 time.sleep(0.2)
@@ -1871,8 +1930,13 @@ class RPAExecutor:
             tv_symbol = self._map_ticker_to_tv(trade.asset)
             landmark_ok = self._verify_chart_landmark(page, tv_symbol)
             if not landmark_ok:
-                logger.error("[ALARM] TRADE ABORTED: Chart landmark mismatch for %s (expected %s)", trade.asset, tv_symbol)
-                return False
+                logger.warning("[HAWK-NAV] Chart mismatch for %s - navigating...", trade.asset)
+                _ba = getattr(self, "_browser_agent", None)
+                if _ba and self._navigate_and_verify_chart(_ba, trade.asset):
+                    logger.info("[HAWK-NAV] Navigated to %s", trade.asset)
+                else:
+                    logger.error("[ALARM] Could not navigate to %s - ABORTING", trade.asset)
+                    return False
 
             # Execute the click
             action = self._normalize_action(trade.action)
@@ -2093,9 +2157,18 @@ class RPAExecutor:
             
         try:
             if ticker and not self._verify_chart_landmark(page, ticker):
-                logger.warning("[CONTROLLED-PAGE] Refusing HTML click because chart landmark does not match %s", ticker)
-                return False
-            self._set_tradingview_order_quantity(page, float(getattr(config, "INITIAL_ENTRY_BULLETS", 1)))
+                logger.warning("[CONTROLLED-PAGE] Chart mismatch for %s — navigating...", ticker)
+                browser_agent = getattr(self, "_browser_agent", None)
+                if browser_agent and self._navigate_and_verify_chart(browser_agent, ticker):
+                    logger.info("[CONTROLLED-PAGE] Navigated to %s", ticker)
+                    # Re-fetch the page after navigation — browser_agent.page may have changed
+                    page = getattr(self, "_controlled_page", None) or getattr(browser_agent, "page", None)
+                    if not page or page.is_closed():
+                        return False
+                else:
+                    logger.warning("[CONTROLLED-PAGE] Could not navigate to %s — refusing click", ticker)
+                    return False
+                self._set_tradingview_order_quantity(page, float(getattr(config, "INITIAL_ENTRY_BULLETS", 1)))
 
             async def _do_click():
                 if target_key == "buy_button":
@@ -2182,8 +2255,16 @@ class RPAExecutor:
             return False
         try:
             if ticker and not self._verify_chart_landmark(page, ticker):
-                logger.warning("[CONTROLLED-PAGE] Refusing close because chart landmark does not match %s", ticker)
-                return False
+                logger.warning("[CONTROLLED-PAGE] Close chart mismatch for %s — navigating...", ticker)
+                browser_agent = getattr(self, "_browser_agent", None)
+                if browser_agent and self._navigate_and_verify_chart(browser_agent, ticker):
+                    logger.info("[CONTROLLED-PAGE] Navigated to %s for close", ticker)
+                    page = getattr(self, "_controlled_page", None) or getattr(browser_agent, "page", None)
+                    if not page or page.is_closed():
+                        return False
+                else:
+                    logger.warning("[CONTROLLED-PAGE] Could not navigate to %s — refusing close", ticker)
+                    return False
 
             async def _do_close():
                 selectors = [

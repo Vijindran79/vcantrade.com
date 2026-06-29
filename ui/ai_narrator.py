@@ -992,7 +992,10 @@ class AINarratorOverlayClassWindow(GlassmorphicPanel):
         confidence=0.0,
         status: str = "",
     ):
-        """Update the large live confidence strip."""
+        """Update the large live confidence strip.
+        HAWK MODE: When confidence >= 84%, the ENTIRE small screen blinks
+        neon green (BUY) or neon red (SELL) so the user knows instantly
+        that a qualified hawk signal has arrived."""
         if not bool(getattr(config, "CONFIDENCE_OVERLAY_ENABLED", True)):
             self.confidence_meter_frame.setVisible(False)
             return
@@ -1029,6 +1032,14 @@ class AINarratorOverlayClassWindow(GlassmorphicPanel):
             f"QFrame {{ background: rgba(12,18,30,230); border: 1px solid {border}; border-radius: 8px; }}"
         )
         self.confidence_meter_frame.setVisible(True)
+
+        # === HAWK BLINK: Confidence >= 84% triggers full-screen border flash ===
+        hawk_threshold = float(getattr(config, "HAWK_BLINK_CONFIDENCE", 84.0) or 84.0)
+        if score >= hawk_threshold and action_label in ("BUY", "SELL"):
+            alert_kind = "sell" if action_label == "SELL" else "buy"
+            self.trigger_signal_alert(duration_ms=6000, kind=alert_kind)
+            logger.info("[HAWK-BLINK] Confidence %.0f%% >= %s — small screen BLINKING for %s %s",
+                        score, hawk_threshold, action_label, ticker_label)
 
     def set_daily_bullets(self, used: int, limit: int = 30):
         """Update the Lion HUD trade-cap counter."""
@@ -1305,7 +1316,10 @@ class AINarratorOverlayClassWindow(GlassmorphicPanel):
         hold_ms: int = 3000,
         fallback_mode: bool = False,
         brain_used: str = "OPENROUTER",
+        confidence: float = 0.0,
     ):
+        """Flash the brain verdict and update the confidence meter.
+        HAWK MODE: When confidence >= 84%, the entire small screen blinks."""
         clean_verdict = str(verdict or "[SIGNAL] WAIT").strip().upper()
         action = clean_verdict.replace("[SIGNAL]", "").strip() or "WAIT"
         reasoning_text = (reasoning or "OpenRouter approved the trade.").strip()
@@ -1317,6 +1331,9 @@ class AINarratorOverlayClassWindow(GlassmorphicPanel):
         self.add_activity("[BOLT]", f"Brain verdict: {action} {ticker}")
         if reasoning_text:
             self.add_activity("[EMOJI]", reasoning_text[:180])
+        # HAWK BLINK: Update confidence meter — triggers border blink at >= 84%
+        if action in ("BUY", "SELL") and confidence > 0:
+            self.update_confidence_meter(ticker, action, confidence, status="brain verdict locked")
         QApplication.processEvents()
         loop = QEventLoop()
         QTimer.singleShot(max(1, int(hold_ms)), loop.quit)

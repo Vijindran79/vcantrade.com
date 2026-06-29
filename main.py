@@ -494,6 +494,9 @@ class VcaniTradeEngine:
         self._log_dashboard(f"[TARGET] {message}")
         try:
             self.ai_narrator.add_activity("[TARGET]", message)
+            # HAWK BLINK: Update confidence meter on technical signals too
+            if action in ("BUY", "SELL") and confidence > 0:
+                self.ai_narrator.update_confidence_meter(ticker, action, confidence, status="technical trigger")
             if bool(getattr(config, "ENABLE_TECHNICAL_NARRATION", False)):
                 _speak_alert(f"{action} setup on {ticker}. One hour direction {h1_bias}. Waiting for brain confirmation.", min_interval_seconds=5.0)
         except Exception:
@@ -518,6 +521,7 @@ class VcaniTradeEngine:
                 hold_ms=1200,
                 fallback_mode=bool(payload.get("fallback_mode", False)),
                 brain_used=str(payload.get("brain_used", "LOCAL_BRAIN")),
+                confidence=float(payload.get("confidence", 0.0) or 0.0),
             )
             if action in {"BUY", "SELL"}:
                 _speak_alert(f"{action} {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
@@ -599,7 +603,10 @@ class VcaniTradeEngine:
         self._log_dashboard(f"[ROUTE] {self.current_mode}: {action} {ticker} | {reason[:140]}")
 
         try:
-            self.ai_narrator.flash_brain_verdict(ticker, f"[SIGNAL] {action}", reason, hold_ms=900)
+            self.ai_narrator.flash_brain_verdict(
+                ticker, f"[SIGNAL] {action}", reason, hold_ms=900,
+                confidence=confidence,
+            )
         except Exception:
             pass
 
@@ -620,14 +627,18 @@ class VcaniTradeEngine:
         self._log_dashboard("[PANIC] Engine paused and asset lock released")
     
     def _normalize_watchlist(self, raw_list):
-        """Normalize watchlist and filter muted tickers."""
+        """Normalize watchlist and filter muted tickers.
+        HAWK MODE: Never inject BTCUSD as fallback — only scan what the user configured."""
         muted = getattr(config, "MUTED_TICKERS", set())
         normalized = []
         for ticker in raw_list:
             t = str(ticker or "").strip()
             if t and t not in muted:
                 normalized.append(t)
-        return normalized or ["BTCUSD"]
+        if not normalized:
+            # Use config defaults instead of hardcoding BTCUSD
+            normalized = list(getattr(config, "ACTIVE_SYMBOLS", []) or [])
+        return normalized
     
     def _init_browser_agent(self):
         """Initialize browser agent for TradingView RPA."""
@@ -990,6 +1001,41 @@ class VcaniTradeEngine:
 
         return False, ""
 
+    def _check_u_turn_exit(self, position: dict) -> tuple:
+        """HAWK U-TURN: Detect when price reverses from peak profit and exit."""
+        ticker = position.get("asset")
+        if not ticker:
+            return False, ""
+        try:
+            df = self.scanner._fetch_market_data(ticker)
+            if df is None or df.empty:
+                return False, ""
+            current_price = float(df["Close"].iloc[-1])
+            entry_price = float(position.get("entry_price", 0) or 0)
+            if entry_price <= 0:
+                return False, ""
+            action = position.get("action", "BUY")
+            is_long = str(action).upper() in ("BUY", "LONG")
+            if is_long:
+                profit = current_price - entry_price
+            else:
+                profit = entry_price - current_price
+            peak_key = f"_peak_profit_{ticker}"
+            current_peak = getattr(self, peak_key, 0.0)
+            if profit > current_peak:
+                setattr(self, peak_key, profit)
+                current_peak = profit
+            if current_peak > 0:
+                pullback_pct = (current_peak - profit) / current_peak
+                if pullback_pct > 0.40 and profit > 0:
+                    return True, f"U-TURN: Peak {current_peak:.2f}, now {profit:.2f} ({pullback_pct*100:.0f}% pullback)"
+                if profit < 0 and current_peak > 0:
+                    return True, f"U-TURN: Was +{current_peak:.2f}, now {profit:.2f} - protect capital"
+            return False, ""
+        except Exception as e:
+            logger.debug("[U-TURN] Error checking %s: %s", ticker, e)
+            return False, ""
+
     def _run_position_exit_scan(self):
         """Scan open positions for quick exit/stop guidance every 5 seconds.
         Also runs the Headmaster Supervisor for advanced exit decisions."""
@@ -1000,6 +1046,18 @@ class VcaniTradeEngine:
             ticker = position.get("asset")
             if not ticker:
                 continue
+
+            # HAWK U-TURN CHECK
+            try:
+                _should_exit, _exit_reason = self._check_u_turn_exit(position)
+                if _should_exit:
+                    self._log_dashboard(f"[U-TURN] CLOSE {ticker} NOW! {_exit_reason}")
+                    _speak_alert(f"U-turn on {ticker}. Taking profit.", min_interval_seconds=3.0)
+                    QTimer.singleShot(0, lambda p=position, r=_exit_reason: self.close_position(p.get("asset", ticker), r))
+                    continue
+            except Exception:
+                pass
+
             try:
                 df = self.scanner._fetch_market_data(ticker)
                 if df is None or df.empty:
@@ -1154,6 +1212,9 @@ class VcaniTradeEngine:
                 for i, position in enumerate(list(self.positions)):
                     if position.get("asset") == ticker:
                         self.positions.pop(i)
+                        _pk = f"_peak_profit_{ticker}"
+                        if hasattr(self, _pk):
+                            delattr(self, _pk)
                         break
             except Exception:
                 pass

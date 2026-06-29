@@ -28,23 +28,26 @@ logger = logging.getLogger(__name__)
 
 
 # Tunable parameters (PRACTICAL defaults — get trades flowing)
-PERSISTENCE_MINUTES = 0.0          # DISABLED: Let signals fire immediately once brain confirms.
+PERSISTENCE_MINUTES = 1.0          # DISABLED: Let signals fire immediately once brain confirms.
                                    # The confluence filters (TF alignment, EMA, RSI) already
                                    # provide enough protection. Persistence timer was causing
                                    # 85-100% signals to expire before they could execute.
 CONFLUENCE_TFS = ["5m", "15m"]     # Higher TFs checked if available
-MIN_CONFLUENCE_AGREEMENT = 0       # 0 = TF check is informational, doesn't block
+MIN_CONFLUENCE_AGREEMENT = 1       # 0 = TF check is informational, doesn't block
                                    # Set to 1+ to require higher-TF agreement
-VOLUME_MULTIPLIER = 1.0            # RELAXED: was 1.2, now 1.0 (allow more trades)
+VOLUME_MULTIPLIER = 1.2            # RELAXED: was 1.2, now 1.0 (allow more trades)
 VOLUME_REQUIRE_DATA = False        # Always skip volume check if data is missing
 SKIP_TF_IF_MISSING = True          # If 5m/15m data is unavailable, skip that check
-RSI_OVERSOLD = 15                  # RELAXED: was 30, now 15 (only block extreme)
-RSI_OVERBOUGHT = 85                # RELAXED: was 70, now 85 (only block extreme)
+RSI_OVERSOLD = 30                  # RELAXED: was 30, now 15 (only block extreme)
+RSI_OVERBOUGHT = 70                # RELAXED: was 70, now 85 (only block extreme)
 TREND_EMA_PERIOD = 50              # EMA for trend filter
 BB_PERIOD = 20                     # Bollinger Band period
 
 # Multi-timeframe fallback: if signal strength >= 75%, allow even without TF agreement
-MTF_STRENGTH_FALLBACK = 0.75     # 75% threshold for bypassing TF check
+MTF_STRENGTH_FALLBACK = 0.90
+
+# HAWK GATE: minimum confluence factors
+MIN_CONFLUENCE_FACTORS = 5     # 75% threshold for bypassing TF check
 
 
 class ConfluenceEngine:
@@ -67,7 +70,8 @@ class ConfluenceEngine:
         # }}
         self._state: Dict[str, Dict] = {}
         # Re-fire cooldown (don't fire same direction twice in N seconds)
-        self.cooldown_seconds = 60  # 1 cycle (was 5 minutes — too strict)
+        self.cooldown_seconds = 120  # HAWK: raised from 60s
+        self.min_confidence_floor = 0.82  # HAWK GATE  # 1 cycle (was 5 minutes — too strict)
 
     def evaluate(
         self,
@@ -115,6 +119,14 @@ class ConfluenceEngine:
                 and (now - state["last_fired"]) < self.cooldown_seconds
             ):
                 return False, f"cooldown: {action} fired {int(now - state['last_fired'])}s ago", confidence
+
+            # ---- HAWK CONFIDENCE FLOOR: reject anything below 82% ----
+            if confidence < self.min_confidence_floor:
+                return (
+                    False,
+                    f"hawk gate: confidence {confidence*100:.0f}% < {self.min_confidence_floor*100:.0f}% floor",
+                    confidence,
+                )
 
             # ---- SWITCH: if action flips, reset state ----
             if state["pending_action"] != action:
@@ -188,6 +200,30 @@ class ConfluenceEngine:
                 return False, f"RSI {rsi_1m:.1f} extreme overbought (no BUY)", confidence
             if action == "SELL" and rsi_1m < RSI_OVERSOLD:
                 return False, f"RSI {rsi_1m:.1f} extreme oversold (no SELL)", confidence
+
+            # ---- HAWK GATE: minimum independent confluence factors ----
+            factor_count = 0
+            if tf_agrees_count > 0:
+                factor_count += 1
+            if vol_ratio >= VOLUME_MULTIPLIER:
+                factor_count += 1
+            if ema_50 > 0:
+                factor_count += 1
+            if action == "BUY" and rsi_1m <= RSI_OVERBOUGHT:
+                factor_count += 1
+            elif action == "SELL" and rsi_1m >= RSI_OVERSOLD:
+                factor_count += 1
+            if held_for >= (PERSISTENCE_MINUTES * 60):
+                factor_count += 1
+
+            if factor_count < MIN_CONFLUENCE_FACTORS:
+                return (
+                    False,
+                    f"hawk gate: only {factor_count}/{MIN_CONFLUENCE_FACTORS} confluence factors "
+                    f"(TF={tf_agrees_count}, vol={vol_ratio:.2f}x, RSI={rsi_1m:.0f}, "
+                    f"held={int(held_for)}s)",
+                    confidence,
+                )
 
             # ---- ALL CONDITIONS MET ----
             # Boost confidence for confluence

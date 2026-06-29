@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ===== LION MODE CONFIGURATION =====
-MAX_DAILY_TRADES = 30          # Hard cap to prevent overtrading
+MAX_DAILY_TRADES = 5           # HAWK MODE: was 30, lowered to 5 for sniper selectivity
 RE_ENTRY_LOCKOUT_MINUTES = 5   # Cooldown after a trade closes
 TRAILING_STOP_CANDLE_MIN = 3   # Use 3-min candles for smoother stops
 RSI_VETO_THRESHOLD = 85        # Abort if RSI > 85 (Buy) or < 20 (Sell) — relaxed for Frenzy Strike
@@ -23,13 +23,20 @@ USE_VISION = False  # qwen:latest is text-only — no image input
 FAST_VISION_ENABLED = False
 VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
 MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream")
-MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.60"))  # Lowered for faster execution
+MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.82"))  # HAWK MODE: was 0.60, raised for 90% WR
 SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() == "true"
 
 # ===== TARGET-LOCKED SCANNING =====
 # The bot will scan ONLY these symbols. No weekday/holiday checks.
 # If only one symbol, the scanner locks onto it and executes directly.
-ACTIVE_SYMBOLS = ["BTC-USD"]
+# HAWK MODE: Load watchlist from trading_settings.json if it exists
+import json as _json
+try:
+    with open("trading_settings.json", "r", encoding="utf-8") as _f:
+        _settings = _json.load(_f)
+    ACTIVE_SYMBOLS = _settings.get("session_watchlist", ["MNQ1!", "MES1!", "MGC1!", "MCL1!"])
+except Exception:
+    ACTIVE_SYMBOLS = ["MNQ1!", "MES1!", "MGC1!", "MCL1!"]
 WATCHLIST = list(ACTIVE_SYMBOLS)
 CLOUD_TICKERS = list(ACTIVE_SYMBOLS)
 ACTIVE_WATCHLIST = list(ACTIVE_SYMBOLS)
@@ -74,7 +81,7 @@ except (TypeError, ValueError):
 DAILY_LOSS_LIMIT = MAX_DAILY_LOSS
 DAILY_LOSS_KILL = MAX_DAILY_LOSS
 # MAX_TRADES_PER_DAY: Maximum number of trades allowed per day
-MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "20"))
+MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "5"))  # HAWK MODE: was 20, lowered for selectivity
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "3"))
 COOLDOWN_AFTER_STOP = int(os.getenv("COOLDOWN_AFTER_STOP", "300"))
 KILL_SWITCH = False
@@ -303,10 +310,11 @@ SYMBOL_FUZZY_TERMS = {
 }
 
 # ===== ACTIVE WATCHLIST =====
-ACTIVE_WATCHLIST = ["BTC-USD"]
+# Already loaded from trading_settings.json above — keep in sync
+ACTIVE_WATCHLIST = list(ACTIVE_SYMBOLS)
 
 # ===== MULTI-ASSET HUNTER =====
-MULTI_ASSET_TICKERS = ["BTC-USD"]
+MULTI_ASSET_TICKERS = list(ACTIVE_SYMBOLS)
 MULTI_ASSET_CYCLE_SECONDS = int(os.getenv("MULTI_ASSET_CYCLE_SECONDS", "15"))
 
 # ===== EXECUTION MODE SWITCH =====
@@ -395,6 +403,7 @@ HUD_GLASS_ENABLED = os.getenv("HUD_GLASS_ENABLED", "True").lower() == "true"
 AI_OVERLAY_START_PINNED = os.getenv("AI_OVERLAY_START_PINNED", "False").lower() == "true"
 CONFIDENCE_OVERLAY_ENABLED = os.getenv("CONFIDENCE_OVERLAY_ENABLED", "True").lower() == "true"
 VISUAL_ALERT_MIN_CONFIDENCE = float(os.getenv("VISUAL_ALERT_MIN_CONFIDENCE", "0.60"))
+HAWK_BLINK_CONFIDENCE = float(os.getenv("HAWK_BLINK_CONFIDENCE", "84.0"))  # Small screen blinks at >= 84%
 ALERT_FLASH_DURATION_MS = int(os.getenv("ALERT_FLASH_DURATION_MS", "4500"))
 SCAN_ACTIVITY_THROTTLE_SECONDS = float(os.getenv("SCAN_ACTIVITY_THROTTLE_SECONDS", "8.0"))
 ENABLE_AUDIO_NARRATION = os.getenv("ENABLE_AUDIO_NARRATION", "True").lower() == "true"
