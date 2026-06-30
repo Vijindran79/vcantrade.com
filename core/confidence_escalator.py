@@ -6,7 +6,7 @@ Strategy: Two-stage validation
 - TradingView or MetaTrader 5 handles the final execution route
 
 Phase 1 (PROBING):  50% confidence -> track simulated/paper probe
-Phase 2 (STRIKE):   85% confidence -> allow TradingView/MT5 real strike
+Phase 2 (STRIKE):   90% confidence -> allow TradingView/MT5 real strike
 
 Kill Switch: If SIM fails or S1 breaks, REAL trade is NEVER placed.
 """
@@ -24,7 +24,7 @@ class EscalatorState(Enum):
     IDLE = "IDLE"
     PROBING = "PROBING"      # SIM trade active, monitoring
     VALIDATING = "VALIDATING"  # Checking if SIM confirms the move
-    READY_TO_STRIKE = "READY_TO_STRIKE"  # 85% confidence reached
+    READY_TO_STRIKE = "READY_TO_STRIKE"  # 90% confidence reached
     STRIKING = "STRIKING"    # REAL trade being placed
     COMPLETE = "COMPLETE"    # Trade cycle complete
     FAILED = "FAILED"        # SIM failed or S1 broken
@@ -51,7 +51,7 @@ class ConfidenceMetrics:
             conf = 50.0
         # Phase 2: Price holding S1
         if self.bars_held_s1 >= self.bars_required:
-            conf = max(conf, 70.0)
+            conf = max(conf, 90.0)
         # Phase 3: SIM in profit
         if self.sim_in_profit:
             conf = max(conf, 80.0)
@@ -103,7 +103,7 @@ class ConfidenceEscalator:
     Flow:
     IDLE -> PROBING (50% conf, BUY_SIM)
          -> VALIDATING (monitoring SIM)
-         -> READY_TO_STRIKE (85% conf)
+         -> READY_TO_STRIKE (90% conf)
          -> STRIKING (BUY_REAL)
          -> COMPLETE
 
@@ -224,7 +224,7 @@ class ConfidenceEscalator:
                     base_conf = self.metrics.current_confidence
                     if (self.metrics.bars_held_s1 >= self.metrics.bars_required and
                         self.metrics.sim_in_profit and
-                        base_conf >= 70.0):
+                        base_conf >= 90.0):
                         self._transition_to(EscalatorState.READY_TO_STRIKE,
                                            f"{base_conf:.0f}% confidence: {self.metrics.bars_held_s1} bars, SIM profitable")
 

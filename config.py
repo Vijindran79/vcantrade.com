@@ -23,7 +23,7 @@ USE_VISION = False  # qwen:latest is text-only — no image input
 FAST_VISION_ENABLED = False
 VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
 MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream")
-MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.82"))  # HAWK MODE: was 0.60, raised for 90% WR
+MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.90"))  # HAWK MODE: was 0.60, raised for 90% WR
 SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() == "true"
 
 # ===== TARGET-LOCKED SCANNING =====
@@ -42,9 +42,9 @@ CLOUD_TICKERS = list(ACTIVE_SYMBOLS)
 ACTIVE_WATCHLIST = list(ACTIVE_SYMBOLS)
 
 # Confidence-Based Take Profit Targets
-TP_LOW_CONFIDENCE = 50.0       # Quick profit target when AI confidence < 85%  ($50)
-TP_HIGH_CONFIDENCE_MIN = 150.0 # Minimum target when AI confidence >= 85% ($150)
-TP_HIGH_CONFIDENCE_MAX = 200.0 # Maximum target when AI confidence >= 85% ($200)
+TP_LOW_CONFIDENCE = 40.0       # Quick profit target when AI confidence < 85%  ($50)
+TP_HIGH_CONFIDENCE_MIN = 120.0 # Minimum target when AI confidence >= 85% ($150)
+TP_HIGH_CONFIDENCE_MAX = 160.0 # Maximum target when AI confidence >= 85% ($200)
 
 # Fast-trailing stop: lock break-even + trail after N dollars in profit
 # LEGACY: These fixed-dollar values are now overridden by ATR-based logic
@@ -383,9 +383,9 @@ LOCAL_LISTENER_HEALTH_HOST = os.getenv("LOCAL_LISTENER_HEALTH_HOST", "127.0.0.1"
 PUBLIC_SIGNAL_URL = os.getenv("PUBLIC_SIGNAL_URL", "")
 SIGNAL_API_KEY = os.getenv("SIGNAL_API_KEY", "")
 SIGNAL_API_HEADER = os.getenv("SIGNAL_API_HEADER", "X-VcanTrade-Key")
-SWARM_CONFIDENCE_THRESHOLD = float(os.getenv("SWARM_CONFIDENCE_THRESHOLD", "0.70"))
-SWARM_INCUBATION_FLOOR = float(os.getenv("SWARM_INCUBATION_FLOOR", "60.0"))
-SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "70.0"))
+SWARM_CONFIDENCE_THRESHOLD = float(os.getenv("SWARM_CONFIDENCE_THRESHOLD", "0.90"))
+SWARM_INCUBATION_FLOOR = float(os.getenv("SWARM_INCUBATION_FLOOR", "85.0"))
+SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD", "90.0"))
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_URL = os.getenv("CLOUD_SCANNER_URL", "")
@@ -403,7 +403,10 @@ HUD_GLASS_ENABLED = os.getenv("HUD_GLASS_ENABLED", "True").lower() == "true"
 AI_OVERLAY_START_PINNED = os.getenv("AI_OVERLAY_START_PINNED", "False").lower() == "true"
 CONFIDENCE_OVERLAY_ENABLED = os.getenv("CONFIDENCE_OVERLAY_ENABLED", "True").lower() == "true"
 VISUAL_ALERT_MIN_CONFIDENCE = float(os.getenv("VISUAL_ALERT_MIN_CONFIDENCE", "0.60"))
-HAWK_BLINK_CONFIDENCE = float(os.getenv("HAWK_BLINK_CONFIDENCE", "84.0"))  # Small screen blinks at >= 84%
+HAWK_BLINK_CONFIDENCE = float(os.getenv("HAWK_BLINK_CONFIDENCE", "90.0"))  # Small screen blinks at >= 84%
+HAWK_REVERSAL_EXIT_ENABLED = True
+HAWK_REVERSAL_EXIT_R = 0.3
+HAWK_PEAK_PROFIT_EXIT_PCT = 0.80
 ALERT_FLASH_DURATION_MS = int(os.getenv("ALERT_FLASH_DURATION_MS", "4500"))
 SCAN_ACTIVITY_THROTTLE_SECONDS = float(os.getenv("SCAN_ACTIVITY_THROTTLE_SECONDS", "8.0"))
 ENABLE_AUDIO_NARRATION = os.getenv("ENABLE_AUDIO_NARRATION", "True").lower() == "true"

@@ -44,7 +44,7 @@ class SettingsManager:
         "max_daily_loss": 500.0,  # $500 max loss per day
         
         # Trading mode
-        "auto_execute_threshold": 0.80,  # Auto-execute if confidence >= 0.80
+        "auto_execute_threshold": 0.90,  # Auto-execute if confidence >= 0.90
         
         # Prop firm settings
         "prop_firm_enabled": True,

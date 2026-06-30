@@ -71,7 +71,7 @@ class ConfluenceEngine:
         self._state: Dict[str, Dict] = {}
         # Re-fire cooldown (don't fire same direction twice in N seconds)
         self.cooldown_seconds = 120  # HAWK: raised from 60s
-        self.min_confidence_floor = 0.82  # HAWK GATE  # 1 cycle (was 5 minutes — too strict)
+        self.min_confidence_floor = 0.90  # HAWK GATE  # 1 cycle (was 5 minutes — too strict)
 
     def evaluate(
         self,

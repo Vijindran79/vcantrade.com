@@ -37,21 +37,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration defaults (overridable via config.py at runtime)
 # ---------------------------------------------------------------------------
-LADDER_TP1_R = 1.0          # first scale-out in R multiples
-LADDER_TP2_R = 2.0          # second scale-out
-LADDER_TP3_R = 3.0          # third scale-out
+LADDER_TP1_R = 0.5          # first scale-out in R multiples
+LADDER_TP2_R = 1.0          # second scale-out
+LADDER_TP3_R = 1.5          # third scale-out
 
-LADDER_TP1_CLOSE_PCT = 0.50  # close 50% of remaining position
-LADDER_TP2_CLOSE_PCT = 0.30  # close 30% of remaining position
-LADDER_TP3_CLOSE_PCT = 0.60  # close 60% of what remains
+LADDER_TP1_CLOSE_PCT = 0.60  # close 50% of remaining position
+LADDER_TP2_CLOSE_PCT = 0.50  # close 30% of remaining position
+LADDER_TP3_CLOSE_PCT = 0.80  # close 60% of what remains
 
 LADDER_TP1_STOP_OFFSET_R = 0.20  # move stop to entry + 0.2R after TP1
 LADDER_TP2_STOP_OFFSET_R = 1.0   # move stop to TP1 after TP2
 
-LADDER_TIME_STOP_BARS = 10       # bars before dead-money exit
+LADDER_TIME_STOP_BARS = 5       # bars before dead-money exit
 LADDER_TIME_STOP_MIN_R = 0.5     # must reach this R or exit
 
-LADDER_MOMENTUM_RSI_EXIT = 80    # book runner when RSI > 80 (long) / < 20 (short)
+LADDER_MOMENTUM_RSI_EXIT = 75    # book runner when RSI > 80 (long) / < 20 (short)
 
 
 # ---------------------------------------------------------------------------
