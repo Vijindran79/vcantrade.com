@@ -130,13 +130,26 @@ class RPAExecutor:
     def _navigate_and_verify_chart(self, browser_agent, ticker: str) -> bool:
         """HAWK GUARD: Navigate TradingView to the correct symbol and verify.
 
-        Uses Control+O (symbol search) via Playwright page, types the
-        TradingView symbol, then verifies the chart header matches.
-        Returns False if navigation fails — caller MUST refuse to trade.
+        CRITICAL: this is what prevents the bot from buying the wrong ticker
+        when the user has a different chart open. Without this, the bot would
+        just click Buy on whatever chart happens to be in front of it.
+
+        Strategy (in order):
+          1. Reuse the existing tab via page.goto(?symbol=...) — atomic
+             navigation, cannot accidentally open a new tab, cannot lose
+             focus. This is the PRIMARY path.
+          2. If goto fails (e.g. network blip, page crashed), fall back to
+             the existing keyboard Ctrl+O sequence.
+          3. After either navigation, run _verify_chart_landmark to confirm
+             the chart header actually shows the requested symbol. If the
+             landmark cannot be confirmed, REFUSE to click.
+
+        Returns True only if the chart is confirmed to be on `ticker`.
         """
         try:
             page = getattr(browser_agent, 'page', None) or getattr(browser_agent, '_page', None)
             tv_symbol = self._map_ticker_to_tv(ticker)
+            logger.info("[HAWK-NAV] Requested %s -> TV symbol %s", ticker, tv_symbol)
 
             if not page:
                 # Fallback: pyautogui keyboard navigation
@@ -147,35 +160,82 @@ class RPAExecutor:
                 logger.info("[HAWK-NAV] Using pyautogui fallback for %s", tv_symbol)
                 return self._navigate_via_pyautogui(tv_symbol)
 
-            # Check if already on correct chart
+            # If the chart is already showing the correct symbol, skip navigation.
             if self._verify_chart_landmark(page, ticker):
-                logger.info("[HAWK-NAV] Chart already on %s", ticker)
+                logger.info("[HAWK-NAV] Chart already on %s — no navigation needed", ticker)
                 return True
 
-            logger.info("[HAWK-NAV] Navigating to %s (TV: %s)", ticker, tv_symbol)
+            # ----- PRIMARY: atomic page.goto with ?symbol= -----
+            try:
+                import urllib.parse
+                quoted = urllib.parse.quote(tv_symbol, safe='')
+                url = f"https://www.tradingview.com/chart/?symbol={quoted}"
+                logger.info("[HAWK-NAV] PRIMARY goto: %s", url)
+                self._run_async(
+                    page.goto(url, wait_until="domcontentloaded", timeout=15000),
+                    browser_agent,
+                )
+                # Give the chart time to fully render
+                time.sleep(2.0)
+            except Exception as e:
+                logger.warning("[HAWK-NAV] PRIMARY goto failed (%s) — falling back to keyboard", e)
 
-            async def _do_nav():
-                await page.bring_to_front()
-                await asyncio.sleep(0.2)
-                await page.keyboard.press("Control+o")
-                await asyncio.sleep(0.5)
-                await page.keyboard.press("Control+a")
-                await asyncio.sleep(0.1)
-                await page.keyboard.type(tv_symbol, delay=30)
-                await asyncio.sleep(0.5)
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(2.0)
-
-            self._run_async(_do_nav(), browser_agent)
-
-            # Verify chart switched
-            for _ in range(6):
+            # Verify the goto actually landed on the right chart
+            for attempt in range(6):
                 if self._verify_chart_landmark(page, ticker):
-                    logger.info("[HAWK-NAV] Chart confirmed on %s", ticker)
+                    logger.info("[HAWK-NAV] Chart confirmed on %s (attempt %d)", ticker, attempt + 1)
                     return True
                 time.sleep(0.5)
 
-            logger.warning("[HAWK-NAV] Could not confirm %s after 3s", ticker)
+            # ----- FALLBACK: keyboard Ctrl+O (only if goto didn't verify) -----
+            logger.warning("[HAWK-NAV] goto did not verify — trying keyboard fallback for %s", tv_symbol)
+
+            async def _do_nav():
+                await page.bring_to_front()
+                await asyncio.sleep(0.3)
+                # Some TradingView layouts bind Ctrl+O to open file. We press
+                # Escape first to dismiss any popup, then use the symbol
+                # search via JS to be safe.
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.2)
+                # JS-based symbol switch (most reliable - no focus issues)
+                try:
+                    await page.evaluate(
+                        """(sym) => {
+                            // 1. URL navigation (atomic, no focus needed)
+                            const u = new URL(window.location.href);
+                            u.searchParams.set('symbol', sym);
+                            window.history.replaceState({}, '', u.toString());
+                            // 2. Trigger a reload to make TV re-read the symbol
+                            window.location.reload();
+                        }""",
+                        tv_symbol,
+                    )
+                except Exception as inner:
+                    logger.debug("[HAWK-NAV] JS symbol switch fallback: %s", inner)
+                    # Last-resort: keyboard
+                    await page.keyboard.press("Control+o")
+                    await asyncio.sleep(0.4)
+                    await page.keyboard.press("Control+a")
+                    await asyncio.sleep(0.1)
+                    await page.keyboard.type(sym, delay=30)
+                    await asyncio.sleep(0.4)
+                    await page.keyboard.press("Enter")
+                await asyncio.sleep(2.5)
+
+            try:
+                self._run_async(_do_nav(), browser_agent)
+            except Exception as kbd_err:
+                logger.error("[HAWK-NAV] Keyboard fallback failed: %s", kbd_err)
+
+            # Final verification
+            for attempt in range(8):
+                if self._verify_chart_landmark(page, ticker):
+                    logger.info("[HAWK-NAV] Chart confirmed after fallback on %s (attempt %d)", ticker, attempt + 1)
+                    return True
+                time.sleep(0.5)
+
+            logger.error("[HAWK-NAV] COULD NOT confirm %s after goto + keyboard fallback — REFUSING trade", ticker)
             return False
         except Exception as e:
             logger.error("[HAWK-NAV] Error for %s: %s", ticker, e)
