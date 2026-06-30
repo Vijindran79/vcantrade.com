@@ -1,7 +1,7 @@
 """
 VcaniTrade AI - Autonomous Browser Agent (Playwright)
 
-The bot's "eyes and hands" - opens browser, checks prices, 
+The bot's "eyes and hands" - opens browser, checks prices,
 and executes autonomous agentic work while Qwen analyzes.
 
 Features:
@@ -67,7 +67,7 @@ class BrowserAgent:
         if not self.loop or not self.loop.is_running():
             logger.error("[GLOBE] Cannot run coroutine: Loop is not active")
             return None
-        
+
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         try:
             return future.result(timeout=30)
@@ -84,12 +84,12 @@ class BrowserAgent:
         self._stop_event.clear()
         self.thread = threading.Thread(target=self._thread_entry, daemon=True, name="BrowserAgentLoop")
         self.thread.start()
-        
+
         # Wait for loop to be ready
         if not self._loop_ready.wait(timeout=10):
             logger.error("[GLOBE] Background loop failed to initialize in time")
             return False
-        
+
         # Now connect to the browser
         logger.info("[GLOBE] Background loop ready - connecting to browser...")
         success = self.run_in_loop(self.start())
@@ -100,7 +100,7 @@ class BrowserAgent:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self._loop_ready.set()
-        
+
         try:
             # Keep loop alive until stop event is set
             self.loop.run_until_complete(self._loop_heartbeat())
@@ -154,7 +154,7 @@ class BrowserAgent:
         except Exception as e:
             logger.error(f"Failed to get current URL: {e}")
             return ""
-    
+
     async def get_current_price(self, ticker: str) -> float:
         """Return the latest known price for the active ticker."""
         try:
@@ -195,7 +195,7 @@ class BrowserAgent:
                 # Use simple CDP browser when available, otherwise fall back to Playwright CDP.
                 cdp_url = getattr(config, "BROWSER_CDP_URL", "http://127.0.0.1:9222")
                 logger.info("[CDP] Connecting to %s", cdp_url)
-                
+
                 self.playwright = await async_playwright().start()
                 self.browser = await self.playwright.chromium.connect_over_cdp(cdp_url, timeout=getattr(config, "CDP_CONNECT_TIMEOUT_MS", 240000))
                 contexts = self.browser.contexts or []
@@ -221,16 +221,16 @@ class BrowserAgent:
                     self.browser = None
                     self.playwright = None
                     raise RuntimeError("No usable browser page found after CDP connect")
-                
+
                 self.context = contexts[0]
                 self.page = selected
                 self.simple_browser = None
                 self.is_running = True
                 self._tab_url = self.page.url
-                
+
                 logger.info("[OK] Connected to Chrome tab: %s", self._tab_url[:80])
                 logger.info("[CDP] Playwright CDP connection successful")
-                
+
                 return True
 
             except Exception as e:
@@ -240,4 +240,102 @@ class BrowserAgent:
                     continue
                 logger.error("[CDP] Failed to connect: %s", e)
                 if attempt >= MAX_CDP_RETRIES: return False
+        return False
+
+    # ------------------------------------------------------------------
+    # Public helpers expected by executor / hunter / rpa_executor (BUG A1-A5)
+    # ------------------------------------------------------------------
+    def navigate_to_chart(self, ticker: str) -> bool:
+        """Navigate the controlled page to the chart for `ticker`."""
+        if not ticker:
+            return False
+        coro = self._async_navigate_to_chart(str(ticker))
+        result = self.run_in_loop(coro)
+        return bool(result)
+
+    async def _async_navigate_to_chart(self, ticker: str) -> bool:
+        """Async worker for navigate_to_chart."""
+        with self.lock:
+            self._navigating = True
+        try:
+            if not self.page or self.page.is_closed():
+                logger.warning("[GLOBE] navigate_to_chart: no live page")
+                return False
+            url = f"https://www.tradingview.com/chart/?symbol={ticker}"
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            self._tab_url = self.page.url
+            self.target_locked_ticker = str(ticker)
+            logger.info("[GLOBE] Navigated to chart for %s", ticker)
+            return True
+        except Exception as e:
+            logger.error("[GLOBE] navigate_to_chart(%s) failed: %s", ticker, e)
+            return False
+        finally:
+            with self.lock:
+                self._navigating = False
+
+    def set_target_lock(self, ticker: str) -> None:
+        """Mark a ticker as the locked execution target."""
+        with self.lock:
+            self.target_locked = True
+            self.target_locked_ticker = str(ticker) if ticker else None
+            logger.debug("[GLOBE] Target lock set: %s", self.target_locked_ticker)
+
+    def clear_target_lock(self) -> None:
+        """Release the current target lock."""
+        with self.lock:
+            self.target_locked = False
+            self.target_locked_ticker = None
+            logger.debug("[GLOBE] Target lock cleared")
+
+    def record_error(self, error: Any = None) -> None:
+        """Increment the error counter; self-heal when threshold is crossed."""
+        with self.lock:
+            self.error_count = int(getattr(self, "error_count", 0) or 0) + 1
+            self.last_error = str(error) if error else None
+            if self.error_count >= self.error_threshold:
+                logger.warning(
+                    "[GLOBE] error_count=%d reached threshold=%d - self-heal triggered",
+                    self.error_count,
+                    self.error_threshold,
+                )
+                # Call internal method under lock to avoid dead-lock
+                self._trigger_self_heal_locked()
+
+    def _trigger_self_heal_locked(self) -> None:
+        """Reset internal counters (must be called with lock held)."""
+        self.error_count = 0
+
+    def _trigger_self_heal(self) -> None:
+        """Reset internal counters and request a browser restart."""
+        with self.lock:
+            self.error_count = 0
+            current_restarts = self.restart_count
+        new_restarts = current_restarts + 1
+        if new_restarts > self.max_restarts:
+            logger.error("[GLOBE] max_restarts=%d exceeded - manual intervention required", self.max_restarts)
+            return
+        with self.lock:
+            self.restart_count = new_restarts
+        try:
+            if self.loop and self.loop.is_running():
+                self.run_in_loop(self.close())
+                self.start_background()
+        except Exception as e:
+            logger.error("[GLOBE] self-heal restart failed: %s", e)
+
+    def self_heal_restart(self) -> bool:
+        """Public entry point for forced self-heal restart."""
+        self._trigger_self_heal()
+        return True
+
+    def is_browser_busy(self) -> bool:
+        """Return True if the browser is currently navigating / locked / erroring."""
+        with self.lock:
+            if self._navigating:
+                return True
+            if self.target_locked and self.target_locked_ticker:
+                return True
+            if int(getattr(self, "error_count", 0) or 0) > 0:
+                return True
         return False

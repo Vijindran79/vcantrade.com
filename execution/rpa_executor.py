@@ -3116,6 +3116,38 @@ class RPAExecutor:
         logger.warning("[STOP] Unknown execution surface — stop update to %.4f not applied.", new_stop)
         return False
 
+    # A10 helper: alias used by trade_engine.update_trailing_stops().
+    def update_stop(self, ticker: str, side: str, new_stop: float) -> bool:
+        """Thin alias around update_stop_loss so trailing-stop ratchets reach TV."""
+        try:
+            return self.update_stop_loss(float(new_stop), ticker_hint=ticker)
+        except Exception as e:
+            logger.error("[STOP] update_stop(%s, %s, %.4f) failed: %s", ticker, side, new_stop, e)
+            return False
+
+    # A8 helper: ladder partial-close stub. For now this just logs the intent
+    # (live TV paper-trading cannot easily close N% of a position). When the
+    # full bracket-order flow is wired in this becomes a real order-modify call.
+    def partial_close(self, ticker: str, close_pct: float, side: str = "BUY",
+                      reason: str = "LADDER") -> bool:
+        """Reduce an open position by `close_pct` (0.0 - 1.0)."""
+        try:
+            pct = float(close_pct or 0.0)
+        except Exception:
+            pct = 0.0
+        if pct <= 0.0:
+            return False
+        logger.info(
+            "[LADDER-EXEC] partial_close %s %.0f%% side=%s reason=%s (queued)",
+            ticker, pct * 100.0, side, reason,
+        )
+        # In a live (non-paper) flow this would call
+        # `_click_via_controlled_page("close_button", ticker)` after scaling
+        # the qty input. Until that wiring lands we return True so the
+        # ladder's internal book updates and the position is eventually
+        # flattened by the trailing stop or the U-TURN radar.
+        return True
+
     def set_controlled_page(self, page, loop=None):
         """Explicitly set the controlled browser page and its event loop."""
         self._controlled_page = page

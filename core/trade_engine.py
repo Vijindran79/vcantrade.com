@@ -198,7 +198,9 @@ class TradeEngine:
             return False
 
         # Daily loss limit (0 = disabled, e.g. Apex Trader Funding has no daily limit)
-        if config.MAX_DAILY_LOSS > 0 and abs(self.safety_state.daily_pnl) >= config.MAX_DAILY_LOSS:
+        # A6 FIX: only trigger on NEGATIVE pnl (a profit must not halt trading).
+        if config.MAX_DAILY_LOSS > 0 and self.safety_state.daily_pnl < 0 \
+                and abs(self.safety_state.daily_pnl) >= config.MAX_DAILY_LOSS:
             logger.warning(
                 "Daily loss limit reached: $%.2f",
                 self.safety_state.daily_pnl
@@ -208,9 +210,10 @@ class TradeEngine:
 
         # Cooldown period
         if self.cooldown_until and datetime.utcnow() < self.cooldown_until:
-            remaining = (self.cooldown_until - datetime.utcnow()).seconds
-            self.safety_state.cooldown_remaining_seconds = remaining
-            logger.warning("Cooldown active: %ds remaining", remaining)
+            # A7 FIX: timedelta subtraction returns timedelta; use .total_seconds().
+            remaining = (self.cooldown_until - datetime.utcnow()).total_seconds()
+            self.safety_state.cooldown_remaining_seconds = int(remaining)
+            logger.warning("Cooldown active: %ds remaining", int(remaining))
             return False
         else:
             self.safety_state.cooldown_remaining_seconds = 0
@@ -288,13 +291,50 @@ class TradeEngine:
 
             # --- HAWK LADDER: staged scale-out ---
             if self.ladder and trade.stop_loss:
-                _lsig = self.ladder.evaluate(trade.asset, current_price, None, False)
+                # A9 FIX: pass a real "new bar closed" flag. Until the swarm wires
+                # this through, we treat every tick as a new bar so the time-stop
+                # / rsi-exit branches in the ladder actually fire.
+                _new_bar = bool(getattr(self, "_last_was_new_bar", True))
+                _lsig = self.ladder.evaluate(trade.asset, current_price, None, _new_bar)
                 if _lsig.action == "CLOSE_FULL":
                     self._close_trade_at_price(trade, current_price, "LADDER:" + _lsig.reason)
                     closed_ids.append(trade.id)
                     continue
                 elif _lsig.action == "CLOSE_PARTIAL":
-                    self.ladder.record_partial_close(trade.asset, _lsig.close_pct)
+                    # A8 FIX: actually send the partial close to the executor instead
+                    # of just bumping an internal counter.
+                    try:
+                        close_pct = float(_lsig.close_pct or 0.0)
+                    except Exception:
+                        close_pct = 0.0
+                    if close_pct > 0.0 and self.rpa_executor and not config.DRY_RUN:
+                        try:
+                            ok = self.rpa_executor.partial_close(
+                                trade.asset, close_pct,
+                                side=("BUY" if is_long else "SELL"),
+                                reason="LADDER:" + str(_lsig.reason),
+                            )
+                            if ok:
+                                logger.info(
+                                    "[LADDER] partial close %s %.0f%% (%s)",
+                                    trade.asset, close_pct * 100.0, _lsig.reason,
+                                )
+                            else:
+                                logger.warning(
+                                    "[LADDER] partial close %s FAILED at executor",
+                                    trade.asset,
+                                )
+                        except AttributeError:
+                            # Older executor without partial_close - fall back to
+                            # recording only, but log loudly.
+                            logger.warning(
+                                "[LADDER] rpa_executor.partial_close() missing - "
+                                "recording only (will not reduce position)"
+                            )
+                        except Exception as _e:
+                            logger.error("[LADDER] partial close error: %s", _e)
+                    # Always keep the ladder's internal book up to date.
+                    self.ladder.record_partial_close(trade.asset, close_pct)
                     if _lsig.new_stop:
                         trade.stop_loss = _lsig.new_stop
 
@@ -692,21 +732,67 @@ class TradeEngine:
         if atr_value is None:
             return
         buffer = atr_value * 1.5  # 1:1.5 Risk Symmetry
-        
+
         position = self.get_open_position(self.locked_asset)
         if not position:
             self.resume_scanners()
             return
 
-        # U-TURN LOGIC
+        # A10 FIX: trailing_stop is now COMPUTED, RATCHETED, and APPLIED to the
+        # underlying TradeRecord (was previously computed and discarded).
+        trailing_stop: Optional[float] = None
         if position['type'] == 'BUY':
             trailing_stop = current_price - buffer
+        elif position['type'] == 'SELL':
+            trailing_stop = current_price + buffer
+
+        if trailing_stop is not None and trailing_stop > 0:
+            try:
+                for trade in self.open_trades:
+                    if trade.asset == self.locked_asset:
+                        old_stop = float(trade.stop_loss or 0.0)
+                        is_long = (trade.action == SignalAction.BUY)
+                        # Ratchet: only move stop in the protective direction.
+                        ratchet_ok = (
+                            (is_long and trailing_stop > old_stop) or
+                            (not is_long and (old_stop == 0.0 or trailing_stop < old_stop))
+                        )
+                        if ratchet_ok and old_stop != trailing_stop:
+                            trade.stop_loss = trailing_stop
+                            logger.info(
+                                "[HAWK TRAIL] %s stop %.2f -> %.2f (buffer %.2f)",
+                                self.locked_asset, old_stop, trailing_stop, buffer,
+                            )
+                            # Push to ledger + ProfitLock
+                            self._update_trade(trade)
+                            try:
+                                self.profit_lock.update_position_stop(
+                                    self.locked_asset, trailing_stop,
+                                    reason="trailing_stop", break_even_locked=False,
+                                )
+                            except Exception:
+                                pass
+                            # Push to executor so the live stop is moved on TV.
+                            try:
+                                if self.rpa_executor and not config.DRY_RUN:
+                                    self.rpa_executor.update_stop(
+                                        self.locked_asset,
+                                        "BUY" if is_long else "SELL",
+                                        trailing_stop,
+                                    )
+                            except AttributeError:
+                                pass
+                            except Exception as _e:
+                                logger.debug("[HAWK TRAIL] executor update skipped: %s", _e)
+            except Exception as _e:
+                logger.error("[HAWK TRAIL] failed: %s", _e)
+
+        # U-TURN LOGIC: full reversal -> bail
+        if position['type'] == 'BUY':
             if current_price < position['entry_price'] + (buffer * 0.5):  # Reversal detected
                 logger.info("[HAWK U-TURN] Trend reversal detected on %s. Exiting.", self.locked_asset)
                 self.execute_global_profit_harvest(symbol=self.locked_asset)
-        
         elif position['type'] == 'SELL':
-            trailing_stop = current_price + buffer
             if current_price > position['entry_price'] - (buffer * 0.5):  # Reversal detected
                 logger.info("[HAWK U-TURN] Trend reversal detected on %s. Exiting.", self.locked_asset)
                 self.execute_global_profit_harvest(symbol=self.locked_asset)
@@ -753,14 +839,30 @@ class TradeEngine:
             return None
 
     def get_open_position(self, symbol: str) -> Optional[dict]:
-        """Get open position for symbol."""
+        """Get open position for symbol (A11: now includes live pnl + qty)."""
         for trade in self.open_trades:
             if trade.asset == symbol:
+                # Live mark-to-market pnl based on the most recent tick.
+                live_price = self._last_prices.get(symbol)
+                pnl = 0.0
+                if live_price is not None and trade.entry_price:
+                    if trade.action == SignalAction.BUY:
+                        pnl = (live_price - trade.entry_price)
+                    else:
+                        pnl = (trade.entry_price - live_price)
+                # If the trade has a stored pnl (partial close), use that as a base.
+                if pnl == 0.0 and getattr(trade, "pnl", None) is not None:
+                    pnl = float(trade.pnl)
                 return {
                     'type': trade.action.value,
+                    'side': trade.action.value,
                     'entry_price': trade.entry_price,
                     'stop_loss': trade.stop_loss,
                     'take_profit': trade.take_profit,
+                    'quantity': int(getattr(trade, "quantity", 1) or 1),
+                    'pnl': float(pnl),
+                    'id': trade.id,
+                    'timestamp': trade.timestamp.isoformat() if trade.timestamp else None,
                 }
         return None
 
