@@ -543,6 +543,23 @@ class VcaniTradeEngine:
             self._log_dashboard(f"[BRIDGE] Ignored non-executable signal: {action} {ticker}")
             return
 
+        # === STALE POSITION CLEANUP (CRITICAL — must run BEFORE the duplicate guard) ===
+        # If a position has been "open" for more than 5 minutes without a confirmed close,
+        # it's almost certainly a phantom (TV click happened but fill was never confirmed, or
+        # the position closed on TV but our local tracker never got the close event).
+        # Without this, the duplicate-position guard below would block ALL future trades forever.
+        import time as _stale_time
+        _stale_threshold = 300  # 5 minutes — generous for slow TV fills, but no longer
+        for _pos in list(self.positions):
+            _opened = _pos.get("opened_at", 0)
+            if _opened and (_stale_time.time() - _opened) > _stale_threshold:
+                logger.warning("[STALE-CLEANUP] Removing phantom position: %s (opened %ds ago, no close event)",
+                              _pos.get("asset"), int(_stale_time.time() - _opened))
+                try:
+                    self.positions.remove(_pos)
+                except ValueError:
+                    pass
+
         # === DUPLICATE POSITION GUARD ===
         # Don't open another trade if we already have a position open on this ticker.
         # This prevents the 200+ duplicate trades per session problem.
@@ -700,6 +717,14 @@ class VcaniTradeEngine:
         self._exit_timer = QTimer()
         self._exit_timer.timeout.connect(self._run_position_exit_scan)
         self._exit_timer.start(3000)  # 3 seconds
+
+        # STALE POSITION JANITOR: Clear phantom positions every 30s so a stuck
+        # tracker can never block new entries forever (even if no signal arrives)
+        self._stale_janitor = QTimer()
+        self._stale_janitor.timeout.connect(self._janitor_clear_phantom_positions)
+        self._stale_janitor.start(30000)  # 30 seconds
+        # Run once at startup so any positions from a previous crashed session are cleared
+        QTimer.singleShot(2000, self._janitor_clear_phantom_positions)
         
         logger.info("[RESTORE] Market scanning matrix loop aggressively restarted.")
         logger.info("[EXITS] Fast exit monitor armed: checking every 5 seconds")
@@ -1270,6 +1295,34 @@ class VcaniTradeEngine:
             return self.scanner._fetch_market_data(ticker)["Close"].iloc[-1]
         except Exception:
             return 0.0
+
+    def _janitor_clear_phantom_positions(self):
+        """STALE POSITION JANITOR — runs every 30s.
+        A position that has been 'open' for more than 5 minutes without a confirmed
+        close event is almost certainly a phantom (TV click happened but fill was never
+        confirmed, or the position was closed on TV but our local tracker never got
+        the close event). Without this janitor, the duplicate-position guard would
+        block ALL future trades on that ticker forever.
+        """
+        import time as _jt
+        _threshold = 300  # 5 minutes
+        cleared = 0
+        for _pos in list(self.positions):
+            _opened = _pos.get("opened_at", 0)
+            if _opened and (_jt.time() - _opened) > _threshold:
+                logger.warning(
+                    "[STALE-JANITOR] Clearing phantom %s %s (opened %ds ago, no close event)",
+                    _pos.get("action"), _pos.get("asset"),
+                    int(_jt.time() - _opened),
+                )
+                try:
+                    self.positions.remove(_pos)
+                    cleared += 1
+                except ValueError:
+                    pass
+        if cleared:
+            logger.info("[STALE-JANITOR] Cleared %d phantom position(s) — execution gate restored", cleared)
+        return cleared
 
 # =========================================================================
 # MAIN ENTRY POINT
