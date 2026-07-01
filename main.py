@@ -564,10 +564,13 @@ class VcaniTradeEngine:
             return
 
         # === CONFIDENCE FILTER ===
-        # Only take trades with confidence >= 0.65 (65%). Low confidence = chop.
+        # Only take trades with confidence >= 0.50. The brain gates
+        # weak signals; the SOFT scanner tier produces ~0.55-0.65 confidence
+        # signals when the trend is clear, so we don't want to filter them out
+        # at the dispatcher too.
         confidence = float(payload.get("confidence") or payload.get("confidence_score") or 0.0)
-        if confidence < 0.65:
-            logger.info("[GUARD] Confidence too low for %s: %.1f%% (need 65%%) — skipping",
+        if confidence < 0.50:
+            logger.info("[GUARD] Confidence too low for %s: %.1f%% (need 50%%) — skipping",
                        ticker, confidence * 100)
             return
 

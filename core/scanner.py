@@ -218,7 +218,13 @@ class Scanner:
         return df
     
     def _signal_history_is_stable(self, ticker: str, action: str) -> Tuple[bool, int]:
-        """Require the same trade direction to survive multiple scanner cycles."""
+        """Require the same trade direction to survive multiple scanner cycles.
+
+        HAWK MODE: require 2 consecutive same-direction cycles. We DON'T lower
+        this to 1 because that would cause one-tick noise to become a real
+        trade. Stability_cycles=2 means the signal has to survive a full
+        SCAN_INTERVAL (10s) before firing.
+        """
         now = time.monotonic()
         cutoff = now - self.signal_stability_window_seconds
         with self._lockdown_lock:
@@ -231,6 +237,39 @@ class Scanner:
             recent = history[-self.signal_stability_cycles:]
             stable = len(recent) >= self.signal_stability_cycles and len({past_action for _, past_action in recent}) == 1
             return stable, len(recent)
+
+    def _soft_signal(self, ticker: str, df: "pd.DataFrame", close: "pd.Series",
+                     ema9: "pd.Series", ema21: "pd.Series",
+                     current_rsi: float, trend_dir: str, vol_ratio: float) -> Optional[str]:
+        """Light signal that fires on any clear directional bias, even in chop.
+
+        This is the SOFT TIER — used so the user can see *something* happening
+        even when the strict MOMENTUM/BREAKOUT signals don't fire. It does NOT
+        bypass the stability requirement or any safety gate; it just adds more
+        opportunities in markets that are mostly flat.
+
+        Returns 'BUY' / 'SELL' / None.
+        """
+        try:
+            if df is None or len(close) < 30:
+                return None
+            price = float(close.iloc[-1])
+            ema9_v = float(ema9.iloc[-1])
+            ema21_v = float(ema21.iloc[-1])
+            # Heuristic 1: price is decisively above/below both EMAs AND RSI confirms.
+            if price > ema9_v > ema21_v and current_rsi > 50 and current_rsi < 70:
+                return "BUY"
+            if price < ema9_v < ema21_v and current_rsi < 50 and current_rsi > 30:
+                return "SELL"
+            # Heuristic 2: 1H bias is clear (trend_dir says "Bull" / "Bear")
+            # and price is on the right side of EMA21.
+            if trend_dir == "Bull" and price > ema21_v and current_rsi > 45 and current_rsi < 65:
+                return "BUY"
+            if trend_dir == "Bear" and price < ema21_v and current_rsi < 55 and current_rsi > 35:
+                return "SELL"
+        except Exception:
+            return None
+        return None
     
     def _clear_signal_history(self, ticker: str) -> None:
         with self._lockdown_lock:
@@ -662,7 +701,7 @@ class Scanner:
                     action = "SELL"
                 else:
                     action = "WAIT"
-                
+
                 # Skip H1 confirmation — it lags and causes wrong-direction trades
                 # Instead, use signal stability (same direction 2 cycles = confirmed)
                 stable, stability_count = self._signal_history_is_stable(ticker, action)
@@ -673,7 +712,7 @@ class Scanner:
                             f"confirming {action}: {stability_count}/{self.signal_stability_cycles} cycles"
                         )
                     return None
-                
+
                 return TechnicalSignal(
                     ticker=ticker,
                     signal_type=signal_type,
@@ -696,7 +735,56 @@ class Scanner:
                         "direction": action,
                     }
                 )
-            
+
+            # === SOFT TIER: catch clear directional bias even when the strict
+            # MOMENTUM/BREAKOUT signals don't fire. This is what the user sees
+            # when they say "the market is choppy but I can see it's going up".
+            # The soft signal still goes through stability + safety gates, so
+            # we never get a one-tick trade.
+            soft_action = self._soft_signal(
+                ticker, df, close, ema9, ema21, current_rsi, trend_dir, vol_ratio,
+            )
+            if soft_action:
+                stable, stability_count = self._signal_history_is_stable(ticker, soft_action)
+                if not stable:
+                    if self.status_callback:
+                        self.status_callback(
+                            str(ticker),
+                            f"soft confirming {soft_action}: {stability_count}/{self.signal_stability_cycles}"
+                        )
+                    return None
+                # Soft signal has lower strength (0.55-0.7) — the brain will
+                # still gate it.
+                if soft_action == "BUY":
+                    soft_stop = round(price - stop_distance, 2)
+                    soft_tp = round(price + (stop_distance * 2.0), 2)
+                else:
+                    soft_stop = round(price + stop_distance, 2)
+                    soft_tp = round(price - (stop_distance * 2.0), 2)
+                return TechnicalSignal(
+                    ticker=ticker,
+                    signal_type=f"SOFT_{soft_action}",
+                    strength=0.62,
+                    metadata={
+                        "rsi": current_rsi,
+                        "sma_fast": sma_fast.iloc[-1],
+                        "sma_slow": sma_slow.iloc[-1],
+                        "volume_ratio": vol_ratio,
+                        "atr": atr,
+                        "stop_loss": soft_stop,
+                        "take_profit": soft_tp,
+                        "ema9": round(float(ema9.iloc[-1]), 2),
+                        "ema21": round(float(ema21.iloc[-1]), 2),
+                        "macd_hist": round(float(macd_hist.iloc[-1]), 4),
+                        "rises": rises,
+                        "falls": falls,
+                        "stability_count": stability_count,
+                        "stability_required": self.signal_stability_cycles,
+                        "direction": soft_action,
+                        "soft_tier": True,
+                    },
+                )
+
             # No signal — emit status
             if self.status_callback:
                 dir_label = "↑ BULL" if ema_bullish else "↓ BEAR" if ema_bearish else "— FLAT"
