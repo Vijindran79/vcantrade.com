@@ -605,21 +605,61 @@ class VcaniTradeEngine:
         # Clamp to a sane range so a typo in the settings file can't lock the bot out
         _conf_floor = max(0.50, min(_conf_floor, 0.99))
         confidence = float(payload.get("confidence") or payload.get("confidence_score") or 0.0)
-        if confidence < _conf_floor:
+        # === BRAIN OVERRIDE ===
+        # The scanner blends brain_conf at 0.35 weight plus technical, h1, stability, volume.
+        # When the brain returns a strong verdict (>= 0.80) but the technical/range blend
+        # dilutes it below the HAWK floor, we still want to honor the brain's call.
+        # Use the MAX of (combined confidence, raw brain confidence) for the floor check.
+        # This is the "two doctors agree" rule: if EITHER the combined math OR the brain
+        # clears the bar, the trade is allowed. Brain confidence is typically delivered
+        # in payload["metadata"]["brain_confidence"] (0-1) or payload["brain_confidence"].
+        _meta = payload.get("metadata") or {}
+        if not isinstance(_meta, dict):
+            _meta = {}
+        # === Brain confidence is delivered in 3 possible locations ===
+        # 1) payload["raw_decision"]["confidence"] — scanner wraps the brain verdict here (0-100)
+        # 2) payload["metadata"]["brain_confidence"] — future-proof for swarm payloads
+        # 3) payload["brain_confidence"] / payload["brain_conf"] — direct field
+        _raw_decision = payload.get("raw_decision") or {}
+        if not isinstance(_raw_decision, dict):
+            _raw_decision = {}
+        _brain_conf_raw = (
+            _raw_decision.get("confidence")
+            or _meta.get("brain_confidence")
+            or payload.get("brain_confidence")
+            or _meta.get("brain_conf")
+            or payload.get("brain_conf")
+            or 0.0
+        )
+        try:
+            _brain_conf_raw = float(_brain_conf_raw)
+            _brain_conf = _brain_conf_raw / (100.0 if _brain_conf_raw > 1.0 else 1.0)
+        except (TypeError, ValueError):
+            _brain_conf = 0.0
+        _brain_conf = max(0.0, min(_brain_conf, 1.0))
+        # Effective confidence: max of combined and brain, biased toward brain when it's strong.
+        _effective_conf = max(confidence, _brain_conf) if _brain_conf >= 0.80 else confidence
+        if _effective_conf < _conf_floor:
             logger.info(
-                "[GUARD] Confidence too low for %s: %.1f%% (need %.0f%% HAWK floor) — skipping %s",
-                ticker, confidence * 100, _conf_floor * 100, action,
+                "[GUARD] Confidence too low for %s: %.1f%% combined / %.1f%% brain (need %.0f%% HAWK floor) — skipping %s",
+                ticker, confidence * 100, _brain_conf * 100, _conf_floor * 100, action,
             )
             try:
                 self.ai_narrator.add_activity(
-                    "[FILTER]", f"{ticker} {action} rejected: {confidence*100:.0f}% < {_conf_floor*100:.0f}% floor",
+                    "[FILTER]", f"{ticker} {action} rejected: combined {confidence*100:.0f}% / brain {_brain_conf*100:.0f}% < {_conf_floor*100:.0f}% floor",
                 )
             except Exception:
                 pass
             return
+        # If the brain override kicked in, log it so we can audit.
+        if _brain_conf >= 0.80 and _brain_conf > confidence:
+            logger.info(
+                "[BRAIN-OVERRIDE] %s %s passed via brain confidence: combined=%.1f%% brain=%.1f%% ≥ %.0f%% floor",
+                action, ticker, confidence * 100, _brain_conf * 100, _conf_floor * 100,
+            )
         logger.info(
             "[GUARD] Confidence OK for %s %s: %.1f%% ≥ %.0f%% HAWK floor",
-            action, ticker, confidence * 100, _conf_floor * 100,
+            action, ticker, _effective_conf * 100, _conf_floor * 100,
         )
 
         # === CHART MATCH GUARD (BULLETPROOF) ===
