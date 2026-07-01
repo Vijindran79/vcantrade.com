@@ -586,16 +586,41 @@ class VcaniTradeEngine:
                        ticker, int(_time.time() - last_close))
             return
 
-        # === CONFIDENCE FILTER ===
-        # Only take trades with confidence >= 0.50. The brain gates
-        # weak signals; the SOFT scanner tier produces ~0.55-0.65 confidence
-        # signals when the trend is clear, so we don't want to filter them out
-        # at the dispatcher too.
+        # === CONFIDENCE FILTER (HAWK MODE — sniper selectivity) ===
+        # Only take trades when confidence is at or above the high-conviction floor.
+        # Default is 85% (0.85) — matches the user's "wait for 85%+ only" rule.
+        # The floor is taken from trading_settings.json: min_confidence_to_trade,
+        # falling back to config.MIN_CONFIDENCE_THRESHOLD (0.90), with 0.85 as
+        # the absolute minimum. SOFT signals (~0.62) get REJECTED here on purpose.
+        try:
+            import json as _conf_json
+            with open("trading_settings.json", "r", encoding="utf-8") as _conf_f:
+                _conf_settings = _conf_json.load(_conf_f)
+        except Exception:
+            _conf_settings = {}
+        _conf_floor = float(_conf_settings.get(
+            "min_confidence_to_trade",
+            float(getattr(config, "MIN_CONFIDENCE_THRESHOLD", 0.90))
+        ))
+        # Clamp to a sane range so a typo in the settings file can't lock the bot out
+        _conf_floor = max(0.50, min(_conf_floor, 0.99))
         confidence = float(payload.get("confidence") or payload.get("confidence_score") or 0.0)
-        if confidence < 0.50:
-            logger.info("[GUARD] Confidence too low for %s: %.1f%% (need 50%%) — skipping",
-                       ticker, confidence * 100)
+        if confidence < _conf_floor:
+            logger.info(
+                "[GUARD] Confidence too low for %s: %.1f%% (need %.0f%% HAWK floor) — skipping %s",
+                ticker, confidence * 100, _conf_floor * 100, action,
+            )
+            try:
+                self.ai_narrator.add_activity(
+                    "[FILTER]", f"{ticker} {action} rejected: {confidence*100:.0f}% < {_conf_floor*100:.0f}% floor",
+                )
+            except Exception:
+                pass
             return
+        logger.info(
+            "[GUARD] Confidence OK for %s %s: %.1f%% ≥ %.0f%% HAWK floor",
+            action, ticker, confidence * 100, _conf_floor * 100,
+        )
 
         # === CHART MATCH GUARD (BULLETPROOF) ===
         # ONLY trade the configured symbol. If signal is for anything else, BLOCK.
