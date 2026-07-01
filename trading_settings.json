@@ -1,7 +1,8 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "MNQ1!"
+    "MNQ1!",
+    "MGC1!"
   ],
   "scan_interval_seconds": 2.5,
   "scan_interval_min": 1.0,
