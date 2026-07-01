@@ -389,7 +389,16 @@ SWARM_HIGH_PRIORITY_THRESHOLD = float(os.getenv("SWARM_HIGH_PRIORITY_THRESHOLD",
 
 # ===== CLOUD SCANNER =====
 CLOUD_SCANNER_URL = os.getenv("CLOUD_SCANNER_URL", "")
-SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "10"))
+
+# HAWK-FAST MODE: with 1-2 tickers in the watchlist, we can scan much faster
+# without overloading the data feed. Default 2.5s — override via env var
+# SCAN_INTERVAL or via trading_settings.json (dashboard).
+SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "2.5"))
+# Minimum allowed interval (hard floor — protects the data feed)
+SCAN_INTERVAL_MIN = float(os.getenv("SCAN_INTERVAL_MIN", "1.0"))
+# Maximum allowed interval
+SCAN_INTERVAL_MAX = float(os.getenv("SCAN_INTERVAL_MAX", "60.0"))
+
 HIGHER_TIMEFRAME_CACHE_SECONDS = float(os.getenv("HIGHER_TIMEFRAME_CACHE_SECONDS", "300"))
 
 # ===== SLIPPAGE PROTECTION =====

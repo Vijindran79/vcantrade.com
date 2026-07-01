@@ -1,11 +1,11 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "MNQ1!",
-    "MES1!",
-    "MGC1!",
-    "MCL1!"
+    "MNQ1!"
   ],
+  "scan_interval_seconds": 2.5,
+  "scan_interval_min": 1.0,
+  "scan_interval_max": 60.0,
   "investment_amount": 1000.0,
   "lot_size": 1.0,
   "max_lots": 1.0,

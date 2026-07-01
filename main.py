@@ -806,12 +806,34 @@ class VcaniTradeEngine:
         logger.info("[ENGINE] VcaniTrade Engine STARTED")
     
     def _start_scanner_timer(self):
-        """Start periodic scanner using QTimer."""
+        """Start periodic scanner using QTimer.
+        Reads interval from trading_settings.json first, then config.SCAN_INTERVAL.
+        Clamped to [SCAN_INTERVAL_MIN, SCAN_INTERVAL_MAX] to protect the data feed."""
+        try:
+            _settings = self.settings.get_all() if hasattr(self, "settings") else {}
+            if not _settings:
+                import json as _json
+                with open("trading_settings.json", "r", encoding="utf-8") as _f:
+                    _settings = _json.load(_f)
+            _interval = float(_settings.get("scan_interval_seconds", config.SCAN_INTERVAL))
+            _min = float(_settings.get("scan_interval_min", config.SCAN_INTERVAL_MIN))
+            _max = float(_settings.get("scan_interval_max", config.SCAN_INTERVAL_MAX))
+        except Exception:
+            _interval = float(config.SCAN_INTERVAL)
+            _min = float(config.SCAN_INTERVAL_MIN)
+            _max = float(config.SCAN_INTERVAL_MAX)
+        _interval = max(_min, min(_interval, _max))
+        interval_ms = int(_interval * 1000)
         self.scanner_timer = QTimer()
         self.scanner_timer.timeout.connect(self.execute_market_scan_sequence)
-        interval_ms = int(float(config.SCAN_INTERVAL) * 1000)
         self.scanner_timer.start(interval_ms)
-        self._scanner_timer = self.scanner_timer  # Backward-compatible alias.
+        self._scanner_timer = self.scanner_timer
+        self._current_scan_interval_seconds = _interval
+        logger.info("[SCAN] Timer armed: %.2fs cycle (%.0fms) — %d ticker(s)", _interval, interval_ms, len(self.current_watchlist or []))
+        try:
+            self.ai_narrator.add_activity("[SCAN]", f"Timer armed: {_interval:.2f}s cycle on {len(self.current_watchlist or [])} ticker(s)")
+        except Exception:
+            pass
         
         # FAST EXIT MONITOR: Check open positions every 3 seconds for instant profit-taking
         self._exit_timer = QTimer()
@@ -832,7 +854,37 @@ class VcaniTradeEngine:
             self.ai_narrator.notify_scan_start(len(self.current_watchlist))
         except Exception:
             pass
-        self._log_dashboard(f"[SCAN] Scanner armed: {len(self.current_watchlist)} markets, {config.SCAN_INTERVAL:.0f}s structural cycle")
+        self._log_dashboard(f"[SCAN] Scanner armed: {len(self.current_watchlist)} market(s), {_interval:.2f}s structural cycle")
+        self._log_dashboard(f"[SCAN] Set scan_interval_seconds in trading_settings.json (range {_min:.1f}-{_max:.1f}s) to change at runtime.")
+
+    def update_scan_interval(self, new_seconds: float = None) -> float:
+        """Reload the scan interval from trading_settings.json and rearm the QTimer.
+        Returns the new effective interval in seconds. Pass new_seconds to override
+        without touching the settings file."""
+        try:
+            import json as _json
+            with open("trading_settings.json", "r", encoding="utf-8") as _f:
+                _settings = _json.load(_f)
+        except Exception:
+            _settings = {}
+        if new_seconds is None:
+            new_seconds = float(_settings.get("scan_interval_seconds", config.SCAN_INTERVAL))
+        _min = float(_settings.get("scan_interval_min", config.SCAN_INTERVAL_MIN))
+        _max = float(_settings.get("scan_interval_max", config.SCAN_INTERVAL_MAX))
+        new_seconds = max(_min, min(float(new_seconds), _max))
+        if getattr(self, "scanner_timer", None) is not None:
+            try:
+                self.scanner_timer.stop()
+                self.scanner_timer.start(int(new_seconds * 1000))
+            except Exception as exc:
+                logger.warning("[SCAN] Failed to rearm scanner timer: %s", exc)
+        self._current_scan_interval_seconds = new_seconds
+        logger.info("[SCAN] Interval updated to %.2fs (watchlist=%d)", new_seconds, len(self.current_watchlist or []))
+        try:
+            self.ai_narrator.add_activity("[SCAN]", f"Interval updated to {new_seconds:.2f}s on {len(self.current_watchlist or [])} ticker(s)")
+        except Exception:
+            pass
+        return new_seconds
 
     def execute_market_scan_sequence(self):
         """QTimer entrypoint for continuous multi-timeframe market sweeps."""
