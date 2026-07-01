@@ -293,6 +293,12 @@ class VcaniTradeEngine:
         self.headmaster = HeadmasterSupervisor()
         # Set engine lock reference for single-asset lock respect
         self.scanner.set_engine_lock(self.asset_lock)
+
+        # === VELEZ REFLEX BRIDGE ===
+        # Inject the async flatten / state-reset / scanner-rearm callables into
+        # the headmaster so its 500ms native thread can fire the full handshake
+        # without ever talking to Ollama.
+        self._wire_velez_bridge()
         
         # Browser agent
         self.browser_agent = None
@@ -645,7 +651,101 @@ class VcaniTradeEngine:
         except Exception:
             pass
         self._log_dashboard("[PANIC] Engine paused and asset lock released")
-    
+
+    # ====================================================================
+    # VELEZ REFLEX BRIDGE — decouples the exit engine from Ollama
+    # ====================================================================
+
+    def _wire_velez_bridge(self):
+        """Inject async flatten / state-reset / scanner-rearm callables into the
+        headmaster so its 500ms native thread can fire the full handshake
+        without ever calling Ollama. The 4-step handshake sequence:
+
+          STEP 1: async Playwright flatten click via rpa_executor.flatten_position
+          STEP 2: clear internal asset execution tracking + single-asset locks
+          STEP 3: print the required console status sequence
+          STEP 4: open filters + rearm scanner for next opportunity
+        """
+        def _async_flatten(ticker: str, reason: str):
+            """Async-friendly flatten click. Runs rpa_executor in a worker thread
+            so the headmaster's 500ms native loop is never blocked."""
+            def _do_flatten():
+                try:
+                    if config.get_active_mode() == "TRADINGVIEW":
+                        self.rpa_executor.flatten_position(ticker)
+                    else:
+                        self.trade_executor.close_position(ticker)
+                except Exception as exc:
+                    logger.error("[VELEZ-REFLEX] async flatten failed: %s", exc)
+            threading.Thread(target=_do_flatten, name="VelezFlatten", daemon=True).start()
+
+        def _state_reset(ticker: str):
+            """Unconditional reset: remove from positions, clear locks, set cooldown,
+            put headmaster back to hibernation. Mirrors close_position() but skips
+            the flatten click (already fired by _async_flatten)."""
+            try:
+                for i, pos in enumerate(list(self.positions)):
+                    if pos.get("asset") == ticker:
+                        self.positions.pop(i)
+                        _pk = f"_peak_profit_{ticker}"
+                        if hasattr(self, _pk):
+                            delattr(self, _pk)
+                        break
+            except Exception:
+                pass
+            try:
+                self.asset_lock.force_reset()
+            except Exception:
+                pass
+            try:
+                setattr(self, f"_last_close_time_{ticker}", time.time())
+            except Exception:
+                pass
+            try:
+                self.headmaster.on_position_closed()
+            except Exception:
+                pass
+
+        def _scanner_rearm():
+            """Open filters + command scanner to look for the next opportunity."""
+            try:
+                if hasattr(self, "_stale_janitor"):
+                    QTimer.singleShot(0, self._janitor_clear_phantom_positions)
+            except Exception:
+                pass
+            try:
+                if self.is_running:
+                    QTimer.singleShot(0, self._run_scanner_cycle)
+            except Exception:
+                pass
+            try:
+                self.scanner._clear_signal_history_all() if hasattr(self.scanner, "_clear_signal_history_all") else None
+            except Exception:
+                pass
+
+        self.headmaster.set_execution_bridge(
+            flatten_callable=_async_flatten,
+            state_reset_callable=_state_reset,
+            scanner_rearm_callable=_scanner_rearm,
+        )
+        logger.info("[VELEZ-REFLEX] Bridge injected: async flatten + state reset + scanner rearm wired")
+
+    def velez_feed_candle(self, ticker: str, o: float, h: float, l: float, c: float, v: float = 0.0, ts: float = None):
+        """Public hook so the Chrome CDP websocket agent can push a freshly
+        scraped 2-minute candle into the headmaster's in-memory deque without
+        ever crossing the Ollama boundary. Safe to call from any thread."""
+        if not getattr(self, "headmaster", None):
+            return
+        if not self.headmaster._active:
+            return
+        if ts is None:
+            ts = time.time()
+        with self.headmaster._lock:
+            self.headmaster._candle_deque.append({
+                "o": float(o), "h": float(h), "l": float(l),
+                "c": float(c), "v": float(v), "ts": float(ts),
+            })
+
     def _normalize_watchlist(self, raw_list):
         """Normalize watchlist and filter muted tickers.
         HAWK MODE: Never inject BTCUSD as fallback — only scan what the user configured."""

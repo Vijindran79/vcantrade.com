@@ -274,7 +274,19 @@ class Scanner:
     def _clear_signal_history(self, ticker: str) -> None:
         with self._lockdown_lock:
             self.signal_history.pop(ticker, None)
-    
+
+    def _clear_signal_history_all(self) -> None:
+        """VELEZ REFLEX — clear ALL signal history (used by the handshake rearm
+        step to ensure the next opportunity wave starts with a fresh 2-cycle
+        stability counter). Also resets scanner-side cooldown flags."""
+        try:
+            with self._lockdown_lock:
+                if hasattr(self, "signal_history") and isinstance(self.signal_history, dict):
+                    self.signal_history.clear()
+            logger.info("[SCANNER] Velez rearm: all signal history cleared for next wave")
+        except Exception as exc:
+            logger.warning("[SCANNER] _clear_signal_history_all failed: %s", exc)
+
     def _is_locked_for_different_ticker(self, ticker: str) -> bool:
         """Check if engine is locked for a different ticker."""
         if self._engine_lock is None:
