@@ -630,12 +630,35 @@ class Scanner:
             # EMA for trend detection (1-minute)
             ema9 = close.ewm(span=9, adjust=False).mean()
             ema21 = close.ewm(span=21, adjust=False).mean()
-            
+            # === HAWK 20/200 EMA FILTER ===
+            # 20 EMA = short-term trend. 200 EMA = long-term trend.
+            # User rule: do NOT buy unless price is ABOVE the 20 EMA on the 2-min chart.
+            # We extend the same discipline to SELL (price must be BELOW both EMAs)
+            # and add a 200 EMA alignment for long-term trend confirmation.
+            ema20 = close.ewm(span=20, adjust=False).mean()
+            ema200 = close.ewm(span=200, adjust=False).mean()
+            ema20_value = float(ema20.iloc[-1]) if len(ema20) > 0 else 0.0
+            ema200_value = float(ema200.iloc[-1]) if len(ema200) > 0 else 0.0
+            # Allow 20 EMA filter to be toggled off via settings if needed
+            try:
+                import json as _ema_json
+                with open("trading_settings.json", "r", encoding="utf-8") as _ema_f:
+                    _ema_settings = _ema_json.load(_ema_f)
+            except Exception:
+                _ema_settings = {}
+            _ema20_filter_enabled = bool(_ema_settings.get("require_price_above_20ema_for_buy", True))
+            _ema200_filter_enabled = bool(_ema_settings.get("require_price_above_200ema_for_buy", True))
+            # Live filter state
+            price_above_ema20 = price > ema20_value if ema20_value > 0 else True
+            price_below_ema20 = price < ema20_value if ema20_value > 0 else True
+            price_above_ema200 = price > ema200_value if ema200_value > 0 else True
+            price_below_ema200 = price < ema200_value if ema200_value > 0 else True
+
             # Price action: last 5 candles direction
             recent_closes = close.iloc[-5:].tolist()
             rises = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] > recent_closes[i-1])
             falls = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] < recent_closes[i-1])
-            
+
             # Trend state
             ema_bullish = ema9.iloc[-1] > ema21.iloc[-1]
             ema_bearish = ema9.iloc[-1] < ema21.iloc[-1]
@@ -656,51 +679,69 @@ class Scanner:
             bb_low = bb.bollinger_lband()
             
             # === BUY CONDITIONS ===
-            # Trend is up + momentum + RSI safe zone + 5-MIN AGREES
-            if (ema_bullish 
-                and price_above_ema9 
+            # Trend is up + momentum + RSI safe zone + 5-MIN AGREES +
+            # HAWK 20/200 EMA FILTER: price MUST be above 20 EMA (and 200 EMA if enabled)
+            if (ema_bullish
+                and price_above_ema9
                 and rises >= 3
-                and macd_positive 
+                and macd_positive
                 and macd_increasing
                 and current_rsi < 65
                 and current_rsi > 40
                 and htf_bullish  # 5-minute trend must be bullish too
+                and (price_above_ema20 or not _ema20_filter_enabled)  # HAWK 20 EMA gate
+                and (price_above_ema200 or not _ema200_filter_enabled)  # HAWK 200 EMA gate
             ):
                 signal_type = "MOMENTUM_BUY"
                 fib_bonus = 0.15 if (near_fib_support or fib_position < 0.60) else 0.0
                 strength = min(1.0, 0.7 + (rises / 8.0) + fib_bonus)
-            
+                # Log the EMA filter status for transparency
+                if ema20_value > 0 and not price_above_ema20:
+                    logger.info("[HAWK-FILTER] BUY blocked: price %.2f ≤ 20 EMA %.2f", price, ema20_value)
+
             # === SELL CONDITIONS ===
-            # Trend is down + momentum + RSI safe zone + 5-MIN AGREES
-            elif (ema_bearish 
-                  and price_below_ema9 
+            # Trend is down + momentum + RSI safe zone + 5-MIN AGREES +
+            # HAWK 20/200 EMA FILTER: price MUST be below 20 EMA (and 200 EMA if enabled)
+            elif (ema_bearish
+                  and price_below_ema9
                   and falls >= 3
-                  and macd_negative 
+                  and macd_negative
                   and macd_decreasing
                   and current_rsi > 35
                   and current_rsi < 60
                   and htf_bearish  # 5-minute trend must be bearish too
+                  and (price_below_ema20 or not _ema20_filter_enabled)  # HAWK 20 EMA gate
+                  and (price_below_ema200 or not _ema200_filter_enabled)  # HAWK 200 EMA gate
             ):
                 signal_type = "MOMENTUM_SELL"
                 fib_bonus = 0.15 if (near_fib_resistance or fib_position > 0.40) else 0.0
                 strength = min(1.0, 0.7 + (falls / 8.0) + fib_bonus)
-            
+                # Log the EMA filter status for transparency
+                if ema20_value > 0 and not price_below_ema20:
+                    logger.info("[HAWK-FILTER] SELL blocked: price %.2f ≥ 20 EMA %.2f", price, ema20_value)
+
             # === BREAKOUT BUY (strong move with volume) ===
-            elif (price > bb_high.iloc[-1] 
-                  and vol_ratio > 1.5 
+            # Also gated by HAWK 20/200 EMA — breakouts only valid in trend direction
+            elif (price > bb_high.iloc[-1]
+                  and vol_ratio > 1.5
                   and rises >= 3
                   and current_rsi > 55
                   and current_rsi < 80
+                  and (price_above_ema20 or not _ema20_filter_enabled)
+                  and (price_above_ema200 or not _ema200_filter_enabled)
             ):
                 signal_type = "BREAKOUT_BUY"
                 strength = min(1.0, 0.7 + vol_ratio / 10.0)
-            
+
             # === BREAKOUT SELL (strong move with volume) ===
-            elif (price < bb_low.iloc[-1] 
-                  and vol_ratio > 1.5 
+            # Also gated by HAWK 20/200 EMA — breakouts only valid in trend direction
+            elif (price < bb_low.iloc[-1]
+                  and vol_ratio > 1.5
                   and falls >= 3
                   and current_rsi < 45
                   and current_rsi > 20
+                  and (price_below_ema20 or not _ema20_filter_enabled)
+                  and (price_below_ema200 or not _ema200_filter_enabled)
             ):
                 signal_type = "BREAKOUT_SELL"
                 strength = min(1.0, 0.7 + vol_ratio / 10.0)
@@ -800,9 +841,16 @@ class Scanner:
             # No signal — emit status
             if self.status_callback:
                 dir_label = "↑ BULL" if ema_bullish else "↓ BEAR" if ema_bearish else "— FLAT"
+                # HAWK EMA filter state badge — so the user can see at a glance
+                # whether price is on the right side of 20/200 EMA
+                ema_badge = ""
+                if _ema20_filter_enabled and ema20_value > 0:
+                    ema_badge += f" | 20EMA:{'↑' if price_above_ema20 else '↓'} {ema20_value:.0f}"
+                if _ema200_filter_enabled and ema200_value > 0:
+                    ema_badge += f" | 200EMA:{'↑' if price_above_ema200 else '↓'} {ema200_value:.0f}"
                 self.status_callback(
                     str(ticker),
-                    f"RSI {current_rsi:.0f} | {dir_label} | ${price:,.2f} | Vol {vol_ratio:.1f}x | R{rises}/F{falls}"
+                    f"RSI {current_rsi:.0f} | {dir_label} | ${price:,.2f} | Vol {vol_ratio:.1f}x | R{rises}/F{falls}{ema_badge}"
                 )
             self._clear_signal_history(ticker)
             return None

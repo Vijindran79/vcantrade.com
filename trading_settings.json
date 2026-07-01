@@ -7,6 +7,8 @@
   "scan_interval_min": 1.0,
   "scan_interval_max": 60.0,
   "min_confidence_to_trade": 0.85,
+  "require_price_above_20ema_for_buy": true,
+  "require_price_above_200ema_for_buy": true,
   "investment_amount": 1000.0,
   "lot_size": 1.0,
   "max_lots": 1.0,
