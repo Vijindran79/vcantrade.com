@@ -238,8 +238,8 @@ class SlippageGuard:
         max_slippage_pct: float = None,
         max_spread_pct: float = None,
     ):
-        self.max_slippage_pct = max_slippage_pct or config.MAX_SLIPPAGE_PERCENT
-        self.max_spread_pct = max_spread_pct or config.MAX_SPREAD_PERCENT
+        self.max_slippage_pct = max_slippage_pct or getattr(config, "MAX_SLIPPAGE_PERCENT", 0.5)
+        self.max_spread_pct = max_spread_pct or getattr(config, "MAX_SPREAD_PERCENT", 0.3)
         self.checks_performed = 0
         self.rejections = 0
 

@@ -555,18 +555,28 @@ class ProfitLock:
         return actions
 
     def _lock_all_stops_to_breakeven(self):
-        """Move all position stops to breakeven + buffer."""
-        breakeven_level = self._calculate_breakeven_level()
+        """Move all position stops to their entry price + buffer (position-level breakeven)."""
+        buffer_pct = self.breakeven_buffer_pct / 100.0
         
         for pos in self.open_positions:
             if not pos["stop_locked"]:
+                entry = float(pos.get("entry_price", 0.0) or 0.0)
+                side = str(pos.get("side", "BUY") or "BUY").upper()
+                if entry <= 0:
+                    continue
+                # Position-level breakeven: entry + buffer
+                if side == "SELL":
+                    breakeven_level = entry - (entry * buffer_pct)
+                else:
+                    breakeven_level = entry + (entry * buffer_pct)
+                
                 old_stop = pos["current_stop"]
                 pos["current_stop"] = breakeven_level
                 pos["stop_locked"] = True
                 
                 logger.info(
                     f"[LOCK] Stop locked for {pos['asset']}: "
-                    f"${old_stop:.2f} -> ${breakeven_level:.2f}"
+                    f"${old_stop:.2f} -> ${breakeven_level:.2f} (entry ${entry:.2f})"
                 )
         
         self.stops_adjusted = True

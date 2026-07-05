@@ -324,10 +324,18 @@ class LadderExitManager:
         return state.entry_price - (state.risk_per_unit * r_multiple)
 
     def record_partial_close(self, symbol: str, closed_qty: float):
-        """Update remaining quantity after a partial close fills."""
+        """Update remaining quantity after a partial close fills.
+
+        closed_qty is a fraction (e.g. 0.60 = 60% of REMAINING position).
+        """
         state = self._states.get(symbol)
         if state:
-            state.remaining_quantity = max(0.0, state.remaining_quantity - closed_qty)
+            # Treat closed_qty as a fraction of remaining, not absolute
+            if closed_qty <= 1.0:
+                state.remaining_quantity = max(0.0, state.remaining_quantity * (1.0 - closed_qty))
+            else:
+                # Legacy: absolute quantity
+                state.remaining_quantity = max(0.0, state.remaining_quantity - closed_qty)
 
     def get_all_states(self) -> Dict[str, Dict]:
         """Return summary of all tracked ladders (for dashboard)."""

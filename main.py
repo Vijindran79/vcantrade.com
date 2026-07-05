@@ -42,6 +42,10 @@ from core.browser_agent import BrowserAgent
 from core.ghost_executor import GhostExecutor
 from core.headmaster_agent import HeadmasterSupervisor
 from core.hybrid_execution_gateway import HybridExecutionGateway
+from core.ladder_exit import ladder_exit_manager
+from core.pnl_tracker import pnl_tracker, reversal_detector, adaptive_risk
+from core.liquidity_engine import LiquidityEngine
+from core.reversal_engine import reversal_engine
 from execution.rpa_executor import RPAExecutor
 from services.signal_dispatcher import SignalDispatcher
 from threads.cloud_scanner import CloudScannerThread
@@ -91,16 +95,24 @@ class AutomatedSignalBridge(QObject):
 
 
 # =========================================================================
-# SINGLE-ASSET TARGET LOCK (ZERO OVERLAP)
+# MULTI-ASSET CONCURRENCY LOCK
 # =========================================================================
 
+# Maximum number of positions that can be open simultaneously.
+# Override in trading_settings.json: {"max_concurrent_positions": 3}
+_MAX_CONCURRENT = 3
+try:
+    with open("trading_settings.json", "r", encoding="utf-8") as _f:
+        _MAX_CONCURRENT = int(json.load(_f).get("max_concurrent_positions", 3))
+except Exception:
+    pass
+
+
 class SingleAssetLock:
-    """Thread-safe single-asset target lock.
-    
-    DISABLED: The user wants to trade multiple symbols simultaneously.
-    This lock was causing REJECTED_LOCK for every symbol whenever one
-    trade was open. Now it always returns True (lock acquired) and
-    never blocks.
+    """Thread-safe multi-asset concurrency lock.
+
+    Allows up to MAX_CONCURRENT positions on DIFFERENT tickers.
+    Prevents duplicate positions on the SAME ticker.
     """
     
     def __init__(self):
@@ -108,38 +120,105 @@ class SingleAssetLock:
         self.is_currently_holding = False
         self.active_locked_ticker = None
         self.lock_acquired_at = 0.0
-        self.lock_timeout_seconds = 30  # Shortened from 300s
+        self.lock_timeout_seconds = 1800  # 30 min auto-release
+        self._open_tickers: dict[str, float] = {}  # ticker -> acquired_at
         
     def acquire(self, ticker: str) -> bool:
-        """Always returns True — multi-asset trading enabled."""
-        return True
+        """Acquire a slot for the given ticker.
+
+        Returns False if:
+        - Same ticker already has an open position (no duplicates)
+        - Max concurrent positions reached (capacity full)
+        """
+        with self._lock:
+            ticker = ticker.upper()
+            # Block duplicate on same ticker
+            if ticker in self._open_tickers:
+                logger.warning("[LOCK] Duplicate blocked: %s already open", ticker)
+                return False
+            # Block if at capacity
+            if len(self._open_tickers) >= _MAX_CONCURRENT:
+                logger.warning(
+                    "[LOCK] Capacity full (%d/%d): cannot open %s",
+                    len(self._open_tickers), _MAX_CONCURRENT, ticker,
+                )
+                return False
+            self._open_tickers[ticker] = time.time()
+            self.is_currently_holding = True
+            self.active_locked_ticker = ticker
+            self.lock_acquired_at = time.time()
+            logger.info(
+                "[LOCK] Acquired %s (%d/%d slots used)",
+                ticker, len(self._open_tickers), _MAX_CONCURRENT,
+            )
+            return True
     
     def release(self):
-        """No-op — lock is disabled."""
-        pass
-
-    def force_reset(self):
-        """Unconditionally clear ALL lock state back to the open gate.
-        Called on every position close (SL/TP/Giveback) so the execution
-        thread can never be left stuck holding a stale ticker lock."""
-        try:
-            with self._lock:
+        """Release the most recently acquired ticker."""
+        with self._lock:
+            if self._open_tickers:
+                # Release the active_locked_ticker if set, otherwise last entry
+                target = self.active_locked_ticker
+                if target and target in self._open_tickers:
+                    del self._open_tickers[target]
+                else:
+                    self._open_tickers.pop(next(reversed(self._open_tickers)), None)
+            if self._open_tickers:
+                self.active_locked_ticker = next(reversed(self._open_tickers))
+            else:
                 self.is_currently_holding = False
                 self.active_locked_ticker = None
                 self.lock_acquired_at = 0.0
-        except Exception:
-            # Even if the RLock misbehaves, force the attributes clear.
+
+    def release_ticker(self, ticker: str):
+        """Release a specific ticker (used by close_position)."""
+        with self._lock:
+            ticker = ticker.upper()
+            self._open_tickers.pop(ticker, None)
+            if self._open_tickers:
+                self.is_currently_holding = True
+                self.active_locked_ticker = next(reversed(self._open_tickers))
+            else:
+                self.is_currently_holding = False
+                self.active_locked_ticker = None
+                self.lock_acquired_at = 0.0
+            logger.info("[LOCK] Released %s (%d slots remaining)", ticker, len(self._open_tickers))
+
+    def force_reset(self):
+        """Unconditionally clear ALL lock state. Called on emergency reset."""
+        with self._lock:
+            self._open_tickers.clear()
             self.is_currently_holding = False
             self.active_locked_ticker = None
             self.lock_acquired_at = 0.0
     
     def is_locked_for(self, ticker: str) -> bool:
-        """Always returns False — never blocks any ticker."""
-        return False
+        """True if a DIFFERENT ticker has the active lock (legacy compat)."""
+        with self._lock:
+            if not self.is_currently_holding:
+                return False
+            return self.active_locked_ticker is not None and self.active_locked_ticker != ticker.upper()
+    
+    def has_open_position(self, ticker: str) -> bool:
+        """True if this specific ticker already has an open position."""
+        with self._lock:
+            return ticker.upper() in self._open_tickers
+    
+    def open_count(self) -> int:
+        """Number of currently open position slots."""
+        with self._lock:
+            return len(self._open_tickers)
     
     def check_timeout(self) -> bool:
-        """Always returns False — no timeout needed."""
-        return False
+        """Release stale locks older than timeout."""
+        with self._lock:
+            if not self.is_currently_holding:
+                return False
+            if time.time() - self.lock_acquired_at > self.lock_timeout_seconds:
+                logger.warning("[LOCK] Timeout — force resetting stale lock on %s", self.active_locked_ticker)
+                self.force_reset()
+                return True
+            return False
 
 
 # =========================================================================
@@ -288,11 +367,30 @@ class VcaniTradeEngine:
         self._ghost_executor = GhostExecutor()
         self.trade_engine = TradeEngine()
         self.trade_executor = TradeExecutor()
-        self.trade_monitor = TradeMonitor()
+        self.trade_monitor = TradeMonitor(
+            ghost_executor=self._ghost_executor,
+            on_manual_close=self._on_manual_close_detected,
+        )
         self.scanner = Scanner()
         self.headmaster = HeadmasterSupervisor()
         # Set engine lock reference for single-asset lock respect
         self.scanner.set_engine_lock(self.asset_lock)
+
+        # === LIQUIDITY EARLY EXIT ENGINE ===
+        # Exits positions a few pips before the nearest liquidation zone,
+        # then enforces a global sit-out cooldown before re-entering.
+        self._liquidity_engine = LiquidityEngine()
+        self._global_sitout_until = 0.0  # time.time() — global cooldown after liquidity exit
+        # Buffer: exit this far BEFORE the zone. Uses the SMALLER of the two.
+        self._LIQUIDITY_EXIT_BUFFER_PCT = 0.001   # 0.1% (~62 pts on BTC @ 62k)
+        self._LIQUIDITY_EXIT_BUFFER_PTS = 10.0     # 10 points (your "few pips" rule)
+        self._LIQUIDITY_SITOUT_SECONDS = 180       # sit out 3 min after liquidity exit
+
+        # === HARD PROFIT TARGET ===
+        # Close the entire position when profit reaches this many pips.
+        # Non-negotiable — takes profit regardless of what indicators say.
+        self._HARD_PROFIT_TARGET_PIPS = 100.0       # close at +100 pips
+        self._HARD_PROFIT_SITOUT_SECONDS = 120      # wait 2 min after hitting target
 
         # === VELEZ REFLEX BRIDGE ===
         # Inject the async flatten / state-reset / scanner-rearm callables into
@@ -536,8 +634,8 @@ class VcaniTradeEngine:
             if self.current_mode == "AUTONOMOUS" and action in {"BUY", "SELL"}:
                 logger.info("[AUTO] Dispatching autonomous execution for %s %s", action, ticker)
                 QTimer.singleShot(0, lambda: self.process_validated_execution_path(payload))
-        except Exception:
-            pass
+        except Exception as _brain_err:
+            logger.error("[BRAIN] Signal handler error for %s %s: %s", ticker, action, _brain_err)
 
     def process_validated_execution_path(self, payload: dict):
         """Route validated bridge/swarm signals into teacher or autonomous execution."""
@@ -550,12 +648,10 @@ class VcaniTradeEngine:
             return
 
         # === STALE POSITION CLEANUP (CRITICAL — must run BEFORE the duplicate guard) ===
-        # If a position has been "open" for more than 5 minutes without a confirmed close,
-        # it's almost certainly a phantom (TV click happened but fill was never confirmed, or
-        # the position closed on TV but our local tracker never got the close event).
-        # Without this, the duplicate-position guard below would block ALL future trades forever.
+        # If a position has been "open" for more than 4 hours without a confirmed close,
+        # it's likely a phantom. 4 hours is generous — real futures trades don't last this long.
         import time as _stale_time
-        _stale_threshold = 300  # 5 minutes — generous for slow TV fills, but no longer
+        _stale_threshold = 14400  # 4 hours — matches execute_trade stale check
         for _pos in list(self.positions):
             _opened = _pos.get("opened_at", 0)
             if _opened and (_stale_time.time() - _opened) > _stale_threshold:
@@ -571,20 +667,86 @@ class VcaniTradeEngine:
         # This prevents the 200+ duplicate trades per session problem.
         existing_positions = [p for p in self.positions if p.get("asset") == ticker]
         if existing_positions:
-            logger.info("[GUARD] Already in position on %s (%d open) — skipping %s signal",
-                       ticker, len(existing_positions), action)
-            return
+            # VERIFY: check if position actually still exists in TradingView.
+            # If TradeMonitor says no active trade, the position was manually closed
+            # but our tracker missed the event. Clean up and allow the new signal.
+            if not self.trade_monitor.is_active:
+                logger.warning(
+                    "[GUARD] Position tracker has %s but TradeMonitor says no active trade — "
+                    "clearing phantom and allowing new signal", ticker,
+                )
+                for p in existing_positions:
+                    try:
+                        self.positions.remove(p)
+                    except ValueError:
+                        pass
+                self.asset_lock.release_ticker(ticker)
+                # Fall through to allow the new signal
+            else:
+                logger.info("[GUARD] Already in position on %s (%d open) — skipping %s signal",
+                           ticker, len(existing_positions), action)
+                return
 
         # === COOLDOWN GUARD ===
-        # Don't re-enter within 120 seconds of closing a position on the same ticker.
-        # Gives the market time to settle after exit before re-entering.
+        # Don't re-entry too quickly after closing a position.
+        # After a WIN: wait 2 minutes (let the trend breathe)
+        # After a LOSS: wait 5 minutes (don't revenge trade)
         cooldown_key = f"_last_close_time_{ticker}"
+        cooldown_reason_key = f"_last_close_reason_{ticker}"
         import time as _time
         last_close = getattr(self, cooldown_key, 0)
-        if (_time.time() - last_close) < 120:
-            logger.info("[GUARD] Cooldown active for %s — %d seconds since last close",
-                       ticker, int(_time.time() - last_close))
+        last_reason = getattr(self, cooldown_reason_key, "")
+        # Longer cooldown after a loss
+        is_loss_close = any(x in str(last_reason).upper() for x in ["STOP", "REVERSAL", "U-TURN", "LOSS"])
+        cooldown_seconds = 300 if is_loss_close else 120  # 5 min after loss, 2 min after win
+        elapsed = _time.time() - last_close
+        if elapsed < cooldown_seconds:
+            logger.info("[GUARD] Cooldown active for %s — %ds since last close (%s), need %ds",
+                       ticker, int(elapsed), "loss" if is_loss_close else "win", cooldown_seconds)
             return
+
+        # === LAST OPEN COOLDOWN ===
+        # Don't re-enter within 5 min of the last BUY/SELL on this ticker.
+        # Prevents rapid-fire trading when signals keep firing.
+        last_open_key = f"_last_open_time_{ticker}"
+        last_open = getattr(self, last_open_key, 0)
+        if (_time.time() - last_open) < 300:  # 5 min between opens
+            logger.info("[GUARD] Open cooldown for %s — %ds since last entry",
+                       ticker, int(_time.time() - last_open))
+            return
+
+        # === NUCLEAR DUPLICATE GUARD ===
+        # Check if we already have an open position for this ticker.
+        # This is the LAST LINE OF DEFENSE — even if the lock fails,
+        # this check prevents duplicate positions.
+        _existing = [p for p in self.positions if p.get("asset") == ticker]
+        if _existing:
+            logger.warning(
+                "[NUCLEAR-GUARD] BLOCKED %s %s — already have %d position(s) on %s",
+                action, ticker, len(_existing), ticker,
+            )
+            return
+
+        # === LIQUIDITY SIT-OUT CHECK ===
+        # After exiting near a liquidity zone, sit out for a few minutes.
+        # This replicates your "run away for a few minutes, don't do anything" rule.
+        if time.time() < self._global_sitout_until:
+            _remaining = int(self._global_sitout_until - time.time())
+            logger.info("[SIT-OUT] Cooling down %ds after liquidity exit — skipping %s %s", _remaining, action, ticker)
+            return
+
+        # === ADAPTIVE RISK CHECK (cumulative loss protection) ===
+        # Blocks or restricts trades when the bot is on a losing streak.
+        try:
+            _ar_state = adaptive_risk.evaluate()
+            if _ar_state.mode == "LOCKED":
+                logger.warning("[ADAPTIVE] %s — ALL trades blocked", _ar_state.reason)
+                self._log_dashboard(f"[ADAPTIVE] LOCKED: {_ar_state.reason}")
+                return
+            if _ar_state.mode != "NORMAL":
+                logger.info("[ADAPTIVE] %s", _ar_state.reason)
+        except Exception:
+            _ar_state = None
 
         # === CONFIDENCE FILTER (HAWK MODE — sniper selectivity) ===
         # Only take trades when confidence is at or above the high-conviction floor.
@@ -677,19 +839,62 @@ class VcaniTradeEngine:
             tv_windows = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
             if tv_windows:
                 chart_title = tv_windows[0].title.upper()
-                ticker_clean = ticker.replace("1!", "").replace("=F", "")
+                ticker_clean = ticker.replace("1!", "").replace("=F", "").replace("-", "")
+                # Check if current chart matches the signal ticker
                 if ticker_clean not in chart_title and ticker not in chart_title:
-                    logger.warning("[GUARD] Chart shows different symbol (title: %s) — BLOCKED %s %s",
-                                  tv_windows[0].title[:50], action, ticker)
-                    return
+                    # VISIBLE SWITCH ALERT — don't silently block, tell the user
+                    switch_msg = (
+                        f"[SWITCH CHART] {action} signal on {ticker}! "
+                        f"Your chart shows {tv_windows[0].title[:30]}. "
+                        f"Switch to {ticker} to execute this trade."
+                    )
+                    logger.warning("[SWITCH] %s", switch_msg)
+                    self._log_dashboard(f"[SWITCH CHART] {action} {ticker} — SWITCH YOUR CHART NOW!")
+                    try:
+                        _speak_alert(f"Switch chart to {ticker} for {action} signal!", min_interval_seconds=5.0)
+                        self.ai_narrator.flash_brain_verdict(
+                            ticker, f"[SWITCH] {action}", f"Switch chart to {ticker}!", hold_ms=3000,
+                            confidence=confidence,
+                        )
+                    except Exception:
+                        pass
+                    return  # Block execution but user sees exactly what to do
         except Exception:
-            # If we can't check, BLOCK for safety on prop firm
-            logger.warning("[GUARD] Cannot verify chart symbol — BLOCKED %s %s for safety", action, ticker)
-            return
+            # If window check fails, proceed anyway — don't block
+            pass
 
         entry = float(payload.get("entry_price") or payload.get("price") or self._fetch_current_price(ticker) or 0.0)
         stop_loss = float(payload.get("stop_loss") or payload.get("sl") or 0.0)
         take_profit = float(payload.get("take_profit") or payload.get("tp") or 0.0)
+
+        # === MANDATORY STOP LOSS ===
+        # If the signal didn't provide a stop loss, calculate one.
+        # NEVER enter a trade without a stop loss — this is non-negotiable.
+        if stop_loss <= 0 and entry > 0:
+            # Default: 0.5% from entry (configurable via env var)
+            _sl_pct = float(getattr(config, "DEFAULT_STOP_LOSS_PCT", 0.5) or 0.5) / 100.0
+            if action == "BUY":
+                stop_loss = round(entry * (1.0 - _sl_pct), 2)
+            else:
+                stop_loss = round(entry * (1.0 + _sl_pct), 2)
+            logger.warning(
+                "[SAFETY] No stop loss in signal — calculated default: %s %s @ %.2f -> SL %.2f (%.1f%%)",
+                action, ticker, entry, stop_loss, _sl_pct * 100,
+            )
+
+        # === MANDATORY TAKE PROFIT ===
+        # If no TP provided, set it at 100 pips (the hard profit target).
+        if take_profit <= 0 and entry > 0:
+            _tp_pips = float(getattr(config, "HARD_PROFIT_TARGET_PIPS", 100) or 100)
+            if action == "BUY":
+                take_profit = round(entry + _tp_pips, 2)
+            else:
+                take_profit = round(entry - _tp_pips, 2)
+            logger.info(
+                "[SAFETY] No take profit in signal — set to 100 pips: TP %.2f",
+                take_profit,
+            )
+
         logger.info("[EXEC] Prepared %s %s entry=%.2f sl=%.2f tp=%.2f", action, ticker, entry, stop_loss, take_profit)
         self._log_dashboard(f"[ROUTE] {self.current_mode}: {action} {ticker} | {reason[:140]}")
 
@@ -759,11 +964,12 @@ class VcaniTradeEngine:
             except Exception:
                 pass
             try:
-                self.asset_lock.force_reset()
+                self.asset_lock.release_ticker(ticker)
             except Exception:
                 pass
             try:
                 setattr(self, f"_last_close_time_{ticker}", time.time())
+                setattr(self, f"_last_close_reason_{ticker}", "MANUAL_CLOSE")
             except Exception:
                 pass
             try:
@@ -995,18 +1201,20 @@ class VcaniTradeEngine:
         logger.info("[ENGINE] VcaniTrade Engine STOPPED")
     
     def execute_trade(self, ticker: str, action: str, entry: float, sl: float, tp: float) -> TradeResult:
-        """Execute a trade with single-asset lock enforcement.
-        RULE: Only 1 position allowed at a time. Never stack."""
+        """Execute a trade with multi-asset concurrency control.
+        RULE: Up to MAX_CONCURRENT positions on different tickers. No duplicates on same ticker."""
         
-        # SAFETY: If positions list somehow has stale entries, don't block new trades forever.
-        # Each position should be auto-cleaned by close_position(). If a position has been
-        # "open" for more than 30 minutes without an exit, it's likely stale/phantom.
+        # SAFETY: Remove positions older than 4 hours (likely phantoms).
+        # 4 hours is long enough for any real futures trade.
         import time as _time
+        STALE_THRESHOLD = 14400  # 4 hours
         for pos in list(self.positions):
             opened_at = pos.get("opened_at", 0)
-            if opened_at and (_time.time() - opened_at) > 1800:  # 30 min stale check
-                logger.warning("[STALE] Removing stale phantom position: %s (opened %ds ago)",
-                              pos.get("asset"), int(_time.time() - opened_at))
+            if opened_at and (_time.time() - opened_at) > STALE_THRESHOLD:
+                logger.warning(
+                    "[STALE] Removing phantom position: %s (opened %ds ago — exceeds 4h threshold)",
+                    pos.get("asset"), int(_time.time() - opened_at),
+                )
                 self.positions.remove(pos)
         
         # 0. Enforce native timezone-aware asset class permission gates cleanly
@@ -1019,30 +1227,18 @@ class VcaniTradeEngine:
                     reason=f"Asset class {ticker} not in allowed futures/crypto profiles"
                 )
         
-        # 1. Check if we're locked for a different ticker
-        if self.asset_lock.is_locked_for(ticker):
-            logger.warning(
-                "[LOCK] Trade REJECTED for %s — locked for %s",
-                ticker, self.asset_lock.active_locked_ticker
-            )
-            return TradeResult(
-                status="REJECTED_LOCK",
-                ticker=ticker,
-                reason=f"Locked for {self.asset_lock.active_locked_ticker}"
-            )
-        
-        # 2. Acquire lock
+        # 1. Acquire lock (handles duplicate check + capacity check)
         if not self.asset_lock.acquire(ticker):
             return TradeResult(
                 status="REJECTED_LOCK",
                 ticker=ticker,
-                reason="Failed to acquire asset lock"
+                reason=f"Lock rejected for {ticker} (duplicate or capacity full)"
             )
         
         try:
             # 3. Pre-trade audit
             if not self._run_pretrade_market_audit(ticker, entry):
-                self.asset_lock.release()
+                self.asset_lock.release_ticker(ticker)
                 return TradeResult(
                     status="REJECTED_AUDIT",
                     ticker=ticker,
@@ -1083,6 +1279,8 @@ class VcaniTradeEngine:
                         "opened_at": _t.time(),
                     }
                 )
+                # Track last open time for cooldown
+                setattr(self, f"_last_open_time_{ticker}", _t.time())
                 # WAKE THE HEADMASTER — new position to supervise
                 try:
                     self.headmaster.on_position_opened(
@@ -1099,6 +1297,33 @@ class VcaniTradeEngine:
                 except Exception as hm_err:
                     logger.debug("[HEADMASTER] Init error (non-critical): %s", hm_err)
                 
+                # REGISTER LADDER EXIT — TP1/TP2/TP3 partial profit-taking
+                try:
+                    ladder_exit_manager.register_trade(
+                        symbol=ticker,
+                        side=action,
+                        entry_price=entry,
+                        initial_stop=sl,
+                        quantity=1.0,
+                    )
+                except Exception as ladder_err:
+                    logger.debug("[LADDER] Registration error (non-critical): %s", ladder_err)
+                
+                # REGISTER TRADE MONITOR — detect manual closes in TradingView
+                try:
+                    self.trade_monitor.set_trade(ticker, action, entry)
+                except Exception as tm_err:
+                    logger.debug("[MONITOR] set_trade error (non-critical): %s", tm_err)
+
+                # REGISTER REVERSAL DETECTOR — catch immediate post-entry reversals
+                try:
+                    reversal_detector.register_entry(
+                        asset=ticker, side=action,
+                        entry_price=entry, stop_loss=sl,
+                    )
+                except Exception:
+                    pass
+                
                 return TradeResult(
                     status="EXECUTED",
                     ticker=ticker,
@@ -1108,7 +1333,7 @@ class VcaniTradeEngine:
                     take_profit=tp
                 )
             else:
-                self.asset_lock.release()
+                self.asset_lock.release_ticker(ticker)
                 return TradeResult(
                     status="FAILED",
                     ticker=ticker,
@@ -1117,7 +1342,7 @@ class VcaniTradeEngine:
         
         except Exception as e:
             logger.error("[EXEC] Trade execution error: %s", e)
-            self.asset_lock.release()
+            self.asset_lock.release_ticker(ticker)
             return TradeResult(
                 status="ERROR",
                 ticker=ticker,
@@ -1176,69 +1401,66 @@ class VcaniTradeEngine:
             return None
 
     def _evaluate_position_exit(self, position: dict, market_data: MarketDataPoint) -> Tuple[bool, str]:
-        """INTELLIGENT EXIT: Trailing stop + reversal detection + liquidity targets.
-        Does NOT auto-click flatten (user closes on TradingView).
-        Instead logs the EXIT signal clearly so user can act immediately."""
+        """HAWK EXIT: Dynamic tiered pullback from peak = close full.
+
+        Retracement thresholds tighten as profit grows:
+          < $100 peak  →  20% giveback allowed  (noise filter for small gains)
+          $100–$300    →  15% giveback
+          $300–$800    →  10% giveback  (your $600 scenario exits at $540)
+          > $800       →   8% giveback  (protect large wins aggressively)
+        """
         action = str(position.get("action", "")).upper()
         entry = float(position.get("entry_price", market_data.price) or market_data.price)
         price = float(market_data.price or 0.0)
         if price <= 0:
             return False, ""
 
-        rsi = float(market_data.indicators.get("RSI", 50.0) or 50.0)
         atr = float(market_data.indicators.get("ATR", 0.0) or 0.0)
-        ema9 = float(market_data.indicators.get("EMA9", 0.0) or 0.0)
-        ema21 = float(market_data.indicators.get("EMA21", 0.0) or 0.0)
-        macd_hist = float(market_data.indicators.get("MACD_HIST", 0.0) or 0.0)
-        macd_hist_prev = float(market_data.indicators.get("MACD_HIST_PREV", 0.0) or 0.0)
         pnl_points = price - entry if action == "BUY" else entry - price
         pnl_atr = pnl_points / max(atr, 1e-9)
+        pnl_dollars = pnl_points * 2.0  # approximate for futures ($2/pt MNQ)
 
-        # --- STOP LOSS: 2x ATR (hard protection) ---
+        # --- HARD STOP LOSS: 2x ATR (prevents catastrophic losses) ---
         if pnl_atr <= -2.0:
             return True, f"STOP LOSS: {pnl_atr:.1f} ATR ({pnl_points:.0f} pts)"
 
-        # --- Track peak profit ---
+        # --- Track peak profit in points ---
         max_pnl_key = f"_max_pnl_{position.get('asset', '')}_{entry}"
         prev_max_pts = getattr(self, max_pnl_key, 0.0)
         if pnl_points > prev_max_pts:
             setattr(self, max_pnl_key, pnl_points)
             prev_max_pts = pnl_points
-        prev_max_atr = prev_max_pts / max(atr, 1e-9)
 
-        # --- TRAILING STOP: Once up 1 ATR, keep at least 50% of peak ---
-        if prev_max_atr >= 1.0:
-            trail_floor = prev_max_atr * 0.50
-            if pnl_atr < trail_floor:
-                return True, f"TRAILING STOP: peak +{prev_max_atr:.1f} ATR, now +{pnl_atr:.1f} ATR — take profit NOW"
+        # --- DYNAMIC TIERED PULLBACK RULE ---
+        # Tighter retracement as profit grows — institutional-style trailing.
+        if prev_max_pts > (atr * 0.3):  # Only activate after real profit
+            peak_dollars = prev_max_pts * 2.0
+            # Select retracement threshold based on peak profit tier
+            # TIGHTENED: institutional-grade — exit before profit evaporates
+            if peak_dollars > 800:
+                pullback_threshold = 0.04   # 4%  — protect large wins aggressively
+            elif peak_dollars > 300:
+                pullback_threshold = 0.05   # 5% — don't give back more than 5%
+            elif peak_dollars > 100:
+                pullback_threshold = 0.08   # 8% — moderate wins, tighter hold
+            else:
+                pullback_threshold = 0.10   # 10% — small wins, still tight
 
-        # --- TARGET: 2.5x ATR (nearest typical liquidity zone) ---
-        if pnl_atr >= 2.5:
-            return True, f"TARGET REACHED: +{pnl_atr:.1f} ATR ({pnl_points:.0f} pts) — liquidity zone hit"
+            pullback_pct = (prev_max_pts - pnl_points) / prev_max_pts if prev_max_pts > 0 else 0
+            if pullback_pct >= pullback_threshold:
+                return True, (
+                    f"PULLBACK {pullback_threshold*100:.0f}%: peaked +{prev_max_pts:.1f} pts "
+                    f"(~${peak_dollars:.0f}), gave back {pullback_pct*100:.0f}% to "
+                    f"+{pnl_points:.1f} pts — CLOSING FULL POSITION"
+                )
 
-        # --- REVERSAL CANDLE: color flip at 0.5+ ATR profit ---
-        candle_open = float(market_data.indicators.get("CANDLE_OPEN", 0.0) or 0.0)
-        candle_close = float(market_data.indicators.get("CANDLE_CLOSE", price) or price)
-        prev_candle_open = float(market_data.indicators.get("PREV_CANDLE_OPEN", 0.0) or 0.0)
-        prev_candle_close = float(market_data.indicators.get("PREV_CANDLE_CLOSE", 0.0) or 0.0)
-        if candle_open > 0 and prev_candle_open > 0 and pnl_atr >= 0.5:
-            current_red = candle_close < candle_open
-            prev_green = prev_candle_close > prev_candle_open
-            current_green = candle_close > candle_open
-            prev_red = prev_candle_close < prev_candle_open
-            if action == "BUY" and current_red and prev_green:
-                return True, f"REVERSAL CANDLE at +{pnl_atr:.1f} ATR — close NOW"
-            if action == "SELL" and current_green and prev_red:
-                return True, f"REVERSAL CANDLE at +{pnl_atr:.1f} ATR — close NOW"
-
-        # --- MOMENTUM FLIP at 0.8+ ATR profit ---
-        if pnl_atr >= 0.8:
-            if action == "BUY" and macd_hist < 0 <= macd_hist_prev:
-                return True, f"MACD FLIPPED at +{pnl_atr:.1f} ATR — momentum dying"
-            if action == "SELL" and macd_hist > 0 >= macd_hist_prev:
-                return True, f"MACD FLIPPED at +{pnl_atr:.1f} ATR — momentum dying"
+        # --- BREAK-EVEN PROTECTION ---
+        # Once up 1 ATR, never let it go negative (break-even floor)
+        if (atr * 1.0) > 0 and prev_max_pts >= (atr * 1.0) and pnl_points <= 0:
+            return True, f"BREAK-EVEN: was +{prev_max_pts:.1f} pts, now {pnl_points:.1f} — protecting capital"
 
         # --- RSI EXTREME with profit ---
+        rsi = float(market_data.indicators.get("RSI", 50) or 50)
         if action == "BUY" and rsi >= 78 and pnl_atr > 0.5:
             return True, f"RSI {rsi:.0f} exhausted at +{pnl_atr:.1f} ATR"
         if action == "SELL" and rsi <= 22 and pnl_atr > 0.5:
@@ -1281,6 +1503,166 @@ class VcaniTradeEngine:
             logger.debug("[U-TURN] Error checking %s: %s", ticker, e)
             return False, ""
 
+    def _check_ema9_retest_exit(self, position: dict) -> tuple:
+        """EMA9 RETEST EXIT: Exit when price dips to or below EMA9 after an uptrend.
+
+        This is the core of your strategy:
+        - Price was above EMA9 (trend intact)
+        - Price retraces and TOUCHES EMA9 (wick dips to/below it)
+        - Exit immediately — don't wait for the candle to close
+
+        TIGHTENED: Now triggers on WICK TOUCH (not just close below).
+        This catches the reversal earlier, before the candle fully closes.
+        """
+        ticker = position.get("asset")
+        if not ticker:
+            return False, ""
+        try:
+            entry_price = float(position.get("entry_price", 0) or 0)
+            if entry_price <= 0:
+                return False, ""
+
+            df = self.scanner._fetch_market_data(ticker)
+            if df is None or len(df) < 15:
+                return False, ""
+
+            close = df["Close"]
+            low = df["Low"]
+            ema9 = close.ewm(span=9, adjust=False).mean()
+
+            current_price = float(close.iloc[-1])
+            current_low = float(low.iloc[-1])
+            current_ema9 = float(ema9.iloc[-1])
+            prev_close = float(close.iloc[-2])
+            prev_ema9 = float(ema9.iloc[-2])
+
+            if current_ema9 <= 0 or prev_ema9 <= 0:
+                return False, ""
+
+            # Only trigger if we're in profit
+            if current_price <= entry_price:
+                return False, ""
+
+            # Check: was price above EMA9 on previous candle?
+            was_above = prev_close > prev_ema9
+            # TIGHTENED: check if current candle's WICK touched or crossed EMA9
+            wick_touched = current_low <= current_ema9
+            # Also check if close is below (original stricter condition)
+            close_below = current_price < current_ema9
+
+            if was_above and (wick_touched or close_below):
+                ema9_slope = float(ema9.iloc[-1]) - float(ema9.iloc[-3]) if len(ema9) >= 3 else 0.0
+                pnl_pts = current_price - entry_price
+
+                trigger = "wick touch" if wick_touched and not close_below else "close below"
+                reason = (
+                    f"EMA9 RETEST ({trigger}): BUY {ticker} @ {entry_price:.2f} -> "
+                    f"low {current_low:.2f} {'<=' if wick_touched else '>'} EMA9 {current_ema9:.2f} "
+                    f"(close={current_price:.2f}, slope={'rising' if ema9_slope > 0 else 'falling'}) "
+                    f"--- locked +{pnl_pts:.1f} pts"
+                )
+                logger.info("[EMA9-EXIT] %s", reason)
+                return True, reason
+
+            return False, ""
+        except Exception as e:
+            logger.debug("[EMA9-EXIT] Error checking %s: %s", ticker, e)
+            return False, ""
+
+    def _check_liquidity_early_exit(self, position: dict) -> tuple:
+        """LIQUIDITY EARLY EXIT: Exit a few pips before the nearest liquidation zone.
+
+        This replicates your manual strategy:
+        1. Find the nearest opposing liquidity zone (supply for BUY, demand for SELL)
+        2. If price is approaching it (within buffer %) AND we're in profit → exit
+        3. After exit, enforce a global sit-out cooldown
+
+        Returns (should_exit, reason).
+        """
+        ticker = position.get("asset")
+        if not ticker:
+            return False, ""
+        try:
+            entry_price = float(position.get("entry_price", 0) or 0)
+            action = str(position.get("action", "BUY") or "BUY").upper()
+            is_long = action in ("BUY", "LONG")
+            if entry_price <= 0:
+                return False, ""
+
+            # Fetch data and run liquidity analysis
+            df = self.scanner._fetch_market_data(ticker)
+            if df is None or len(df) < 20:
+                return False, ""
+            current_price = float(df["Close"].iloc[-1])
+            if current_price <= 0:
+                return False, ""
+
+            # Only check if we're in profit
+            if is_long:
+                pnl_pts = current_price - entry_price
+            else:
+                pnl_pts = entry_price - current_price
+            if pnl_pts <= 0:
+                return False, ""
+
+            # Run liquidity analysis
+            liq = self._liquidity_engine.analyze(df, ticker)
+
+            # Find the nearest opposing liquidity zone
+            if is_long:
+                # For BUY: nearest supply zone above us is the target
+                opposing_zones = [
+                    z for z in (liq.supply_zones + liq.fvg_bearish + liq.liquidity_pools)
+                    if z.direction == "bearish" and not z.invalidated and z.bottom > current_price
+                ]
+                if not opposing_zones:
+                    return False, ""
+                nearest = min(opposing_zones, key=lambda z: z.bottom)
+                zone_price = float(nearest.bottom)
+                # Exit when price is within buffer of the zone
+                # Use the SMALLER of percentage-based and point-based buffer
+                buffer_pct = zone_price * self._LIQUIDITY_EXIT_BUFFER_PCT
+                buffer_pts = self._LIQUIDITY_EXIT_BUFFER_PTS
+                buffer = min(buffer_pct, buffer_pts)
+                if current_price >= (zone_price - buffer):
+                    reason = (
+                        f"LIQUIDITY EARLY EXIT: BUY {ticker} @ {entry_price:.2f} -> "
+                        f"approaching supply zone at {zone_price:.2f} "
+                        f"(current={current_price:.2f}, buffer={buffer:.1f} pts) -- "
+                        f"secured +{pnl_pts:.1f} pts profit"
+                    )
+                    logger.info("[LIQ-EXIT] %s", reason)
+                    return True, reason
+            else:
+                # For SELL: nearest demand zone below us is the target
+                opposing_zones = [
+                    z for z in (liq.demand_zones + liq.fvg_bullish + liq.liquidity_pools)
+                    if z.direction == "bullish" and not z.invalidated and z.top < current_price
+                ]
+                if not opposing_zones:
+                    return False, ""
+                nearest = max(opposing_zones, key=lambda z: z.top)
+                zone_price = float(nearest.top)
+                # Exit when price is within buffer of the zone
+                # Use the SMALLER of percentage-based and point-based buffer
+                buffer_pct = zone_price * self._LIQUIDITY_EXIT_BUFFER_PCT
+                buffer_pts = self._LIQUIDITY_EXIT_BUFFER_PTS
+                buffer = min(buffer_pct, buffer_pts)
+                if current_price <= (zone_price + buffer):
+                    reason = (
+                        f"LIQUIDITY EARLY EXIT: SELL {ticker} @ {entry_price:.2f} -> "
+                        f"approaching demand zone at {zone_price:.2f} "
+                        f"(current={current_price:.2f}, buffer={buffer:.1f} pts) -- "
+                        f"secured +{pnl_pts:.1f} pts profit"
+                    )
+                    logger.info("[LIQ-EXIT] %s", reason)
+                    return True, reason
+
+            return False, ""
+        except Exception as e:
+            logger.debug("[LIQ-EXIT] Error checking %s: %s", ticker, e)
+            return False, ""
+
     def _run_position_exit_scan(self):
         """Scan open positions for quick exit/stop guidance every 5 seconds.
         Also runs the Headmaster Supervisor for advanced exit decisions."""
@@ -1292,6 +1674,56 @@ class VcaniTradeEngine:
             if not ticker:
                 continue
 
+            # ── HARD PROFIT TARGET (non-negotiable) ───────────────
+            # Close the ENTIRE position when profit reaches 100 pips.
+            # No indicators, no analysis — just lock in the gain.
+            try:
+                entry_price = float(position.get("entry_price", 0) or 0)
+                action = str(position.get("action", "BUY") or "BUY").upper()
+                is_long = action in ("BUY", "LONG")
+                if entry_price > 0:
+                    current_price = self._fetch_current_price(ticker)
+                    if current_price and current_price > 0:
+                        if is_long:
+                            pnl_pips = current_price - entry_price
+                        else:
+                            pnl_pips = entry_price - current_price
+
+                        if pnl_pips >= self._HARD_PROFIT_TARGET_PIPS:
+                            reason = (
+                                f"HARD TARGET HIT: {action} {ticker} @ {entry_price:.2f} -> "
+                                f"+{pnl_pips:.1f} pips (target={self._HARD_PROFIT_TARGET_PIPS:.0f}) "
+                                f"--- LOCKING PROFIT"
+                            )
+                            logger.info("[PROFIT-TARGET] %s", reason)
+                            self._log_dashboard(f"[PROFIT-TARGET] CLOSE {ticker}! +{pnl_pips:.1f} pips")
+                            _speak_alert(
+                                f"Profit target hit on {ticker}. +{pnl_pips:.0f} pips. Closing now.",
+                                min_interval_seconds=2.0,
+                            )
+                            QTimer.singleShot(0, lambda t=ticker, r=reason: self.close_position(t, r))
+                            # Sit out after hitting hard target
+                            self._global_sitout_until = time.time() + self._HARD_PROFIT_SITOUT_SECONDS
+                            logger.info("[PROFIT-TARGET] Sitting out %ds before next trade",
+                                       self._HARD_PROFIT_SITOUT_SECONDS)
+                            continue
+            except Exception as _pt_err:
+                logger.debug("[PROFIT-TARGET] Error: %s", _pt_err)
+
+            # ── EMA9 RETEST EXIT (your core strategy) ─────────────
+            # Exit when price closes below EMA9 after being above it.
+            # This is the "escape early at first sign of weakness" rule.
+            try:
+                _ema9_exit, _ema9_reason = self._check_ema9_retest_exit(position)
+                if _ema9_exit:
+                    logger.info("[EMA9-EXIT] %s: %s", ticker, _ema9_reason)
+                    self._log_dashboard(f"[EMA9-EXIT] CLOSE {ticker}! {_ema9_reason}")
+                    _speak_alert(f"EMA9 break on {ticker}. Taking profit.", min_interval_seconds=2.0)
+                    QTimer.singleShot(0, lambda t=ticker, r=_ema9_reason: self.close_position(t, r))
+                    continue
+            except Exception as _ema9_err:
+                logger.debug("[EMA9-EXIT] Error checking %s: %s", ticker, _ema9_err)
+
             # HAWK U-TURN CHECK
             try:
                 _should_exit, _exit_reason = self._check_u_turn_exit(position)
@@ -1300,6 +1732,59 @@ class VcaniTradeEngine:
                     _speak_alert(f"U-turn on {ticker}. Taking profit.", min_interval_seconds=3.0)
                     QTimer.singleShot(0, lambda p=position, r=_exit_reason: self.close_position(p.get("asset", ticker), r))
                     continue
+            except Exception as uturn_err:
+                logger.debug("[U-TURN] Error checking %s: %s", ticker, uturn_err)
+
+            # ── LIQUIDITY EARLY EXIT ──────────────────────────────
+            # Exit a few pips before the nearest liquidation zone.
+            # This is your "escape early" strategy — lock in profit
+            # before price reaches the zone where reversals happen.
+            try:
+                _liq_exit, _liq_reason = self._check_liquidity_early_exit(position)
+                if _liq_exit:
+                    logger.info("[LIQ-EXIT] %s: %s", ticker, _liq_reason)
+                    self._log_dashboard(f"[LIQ-EXIT] CLOSE {ticker}! {_liq_reason}")
+                    _speak_alert(f"Liquidity zone approaching on {ticker}. Taking profit early.", min_interval_seconds=2.0)
+                    QTimer.singleShot(0, lambda t=ticker, r=_liq_reason: self.close_position(t, r))
+                    # Enforce global sit-out after liquidity exit
+                    self._global_sitout_until = time.time() + self._LIQUIDITY_SITOUT_SECONDS
+                    logger.info("[LIQ-EXIT] Sitting out for %ds before next trade", self._LIQUIDITY_SITOUT_SECONDS)
+                    continue
+            except Exception as _liq_err:
+                logger.debug("[LIQ-EXIT] Error checking %s: %s", ticker, _liq_err)
+
+            # ── INSTITUTIONAL REVERSAL ENGINE ─────────────────────
+            # Multi-layer reversal detection: price action + volume +
+            # momentum divergence + structural breaks. Catches U-turns
+            # after breakouts above EMA20 with high accuracy.
+            try:
+                _df_rev = self.scanner._fetch_market_data(ticker)
+                if _df_rev is not None and len(_df_rev) >= 20:
+                    _rev_signal = reversal_engine.analyze(ticker, _df_rev)
+                    if _rev_signal.is_reversal:
+                        logger.warning("[REVERSAL-ENGINE] %s", _rev_signal.summary())
+                        self._log_dashboard(f"[REVERSAL-ENGINE] CLOSE {ticker}! {_rev_signal.summary()}")
+                        _speak_alert(
+                            f"Reversal detected on {ticker}. "
+                            f"Confidence {_rev_signal.confidence}. Exiting now.",
+                            min_interval_seconds=2.0,
+                        )
+                        QTimer.singleShot(0, lambda t=ticker, r=_rev_signal.summary(): self.close_position(t, r))
+                        continue
+            except Exception as _rev_err:
+                logger.debug("[REVERSAL-ENGINE] Error: %s", _rev_err)
+
+            # ── POST-ENTRY REVERSAL CHECK ─────────────────────────
+            try:
+                _cur_price = self._fetch_current_price(ticker)
+                if _cur_price and _cur_price > 0:
+                    _should_rev, _rev_reason = reversal_detector.check(ticker, _cur_price)
+                    if _should_rev:
+                        logger.warning("[REVERSAL] Cutting %s: %s", ticker, _rev_reason)
+                        self._log_dashboard(f"[REVERSAL] CLOSE {ticker}! {_rev_reason}")
+                        _speak_alert(f"Reversal on {ticker}. Cutting loss.", min_interval_seconds=2.0)
+                        QTimer.singleShot(0, lambda t=ticker, r=_rev_reason: self.close_position(t, r))
+                        continue
             except Exception:
                 pass
 
@@ -1312,9 +1797,7 @@ class VcaniTradeEngine:
                     continue
 
                 # === HEADMASTER SUPERVISOR CHECK ===
-                # Headmaster monitors but does NOT auto-flatten on paper trading
-                # (clicking opposite direction opens new positions instead of closing)
-                # It ALERTS the user to close manually.
+                # Headmaster Velez reflex engine — auto-flatten immediately.
                 self.headmaster.evaluate(ticker, market_data.price, market_data.indicators)
                 if self.headmaster.should_close:
                     reason = self.headmaster.consume_close_command()
@@ -1324,7 +1807,27 @@ class VcaniTradeEngine:
                         _speak_alert(f"Headmaster says close {ticker} now. {reason}", min_interval_seconds=3.0)
                     except Exception:
                         pass
+                    QTimer.singleShot(0, lambda t=ticker, r=reason: self.close_position(t, r))
                     continue
+
+                # === LADDER EXIT (TP1/TP2/TP3 partial scale-out) ===
+                try:
+                    rsi_val = float(market_data.indicators.get("RSI", 50) or 50)
+                    ladder_sig = ladder_exit_manager.evaluate(
+                        symbol=ticker,
+                        current_price=market_data.price,
+                        rsi=rsi_val,
+                    )
+                    if ladder_sig.action == "CLOSE_FULL":
+                        reason_l = f"[LADDER] {ladder_sig.reason}"
+                        self._log_dashboard(reason_l)
+                        QTimer.singleShot(0, lambda t=ticker, r=reason_l: self.close_position(t, r))
+                        continue
+                    elif ladder_sig.action == "CLOSE_PARTIAL":
+                        reason_l = f"[LADDER] {ladder_sig.reason} — closing {ladder_sig.close_pct*100:.0f}%"
+                        self._log_dashboard(reason_l)
+                except Exception as ladder_err:
+                    logger.debug("[LADDER] Evaluation error (non-critical): %s", ladder_err)
 
                 # === STANDARD EXIT LOGIC ===
                 should_exit, reason = self._evaluate_position_exit(position, market_data)
@@ -1341,14 +1844,11 @@ class VcaniTradeEngine:
                         _speak_alert(f"Exit {action} {ticker} now. {reason}", min_interval_seconds=3.0)
                     except Exception:
                         pass
-                    # Only auto-flatten for STOP LOSS (losing money).
-                    # For profit exits, ALERT the user — they close manually.
-                    if self.current_mode == "AUTONOMOUS" and "STOP LOSS" in reason:
+                    # Auto-flatten in AUTONOMOUS mode for ALL exits (stop loss AND profit).
+                    # close_position() clicks the Flatten button, which is safe
+                    # (it does NOT open an opposite position).
+                    if self.current_mode == "AUTONOMOUS":
                         QTimer.singleShot(0, lambda p=position, r=reason: self.close_position(p.get("asset", ticker), r))
-                    elif self.current_mode == "AUTONOMOUS":
-                        # Profit exit — just log loudly, user closes manually
-                        logger.info("[TAKE PROFIT SIGNAL] %s %s — CLOSE NOW! Reason: %s", action, ticker, reason)
-                        self._log_dashboard(f"[TAKE PROFIT] CLOSE {ticker} NOW! {reason}")
             except Exception as e:
                 logger.warning("[EXIT] Error checking position %s: %s", ticker, e)
 
@@ -1388,6 +1888,31 @@ class VcaniTradeEngine:
             except Exception as e:
                 logger.warning("[EXIT] Error checking dynamic exit for %s: %s", ticker, e)
     
+    def _on_manual_close_detected(self):
+        """Called by TradeMonitor when it detects a manual close in TradingView.
+        Resets all internal state so the bot can hunt for the next opportunity."""
+        logger.warning("[INTERVENTION] Manual close detected — resetting all state")
+        # Clear all positions (the manual close already flattened them)
+        self.positions.clear()
+        # Release all lock slots
+        self.asset_lock.force_reset()
+        # Put headmaster to sleep
+        try:
+            self.headmaster.on_position_closed()
+        except Exception:
+            pass
+        # Clear ladder state
+        try:
+            for sym in list(ladder_exit_manager._states.keys()):
+                ladder_exit_manager.clear_trade(sym)
+        except Exception:
+            pass
+        # Clear trade monitor state
+        self.trade_monitor.clear_trade()
+        # Log it
+        self._log_dashboard("[INTERVENTION] Manual close detected. Scanner rearmed for next opportunity.")
+        logger.info("[INTERVENTION] All state reset. Bot is hunting for the next trade.")
+
     def _headmaster_kill_order(self, ticker: str, reason: str):
         """HEADMASTER KILL ORDER: Bypass all filters, flatten immediately, reset everything.
         This is the 'Thank You Handshake Protocol' — take profit and move on."""
@@ -1403,20 +1928,18 @@ class VcaniTradeEngine:
         logger.info("[HEADMASTER] Dynamic U-Turn Exit executed! Taken the profit! Thank you so much!")
         self._log_dashboard(f"[HEADMASTER] ✓ Profit secured on {ticker}! Thank you! Reason: {reason[:80]}")
         
-        # STEP 3: Force reset ALL locks unconditionally
+        # STEP 3: Release THIS ticker's lock, remove from positions list
         try:
-            # Remove from positions list
             for i, pos in enumerate(list(self.positions)):
                 if pos.get("asset") == ticker:
                     self.positions.pop(i)
                     break
-            # Force reset asset lock
-            self.asset_lock.force_reset()
-            # Set cooldown
+            self.asset_lock.release_ticker(ticker)
             import time as _time
             setattr(self, f"_last_close_time_{ticker}", _time.time())
-            # Put headmaster to sleep
-            self.headmaster.on_position_closed()
+            setattr(self, f"_last_close_reason_{ticker}", reason)
+            if self.asset_lock.open_count() == 0:
+                self.headmaster.on_position_closed()
         except Exception as e:
             logger.error("[HEADMASTER] Lock reset error: %s", e)
         
@@ -1424,67 +1947,111 @@ class VcaniTradeEngine:
         logger.info("[HEADMASTER] Scanner rearmed. Hunting for next entry...")
 
     def close_position(self, ticker: str, reason: str = ""):
-        """Close a position and release the asset lock.
+        """Close ALL positions for a ticker and release the lock.
 
-        TASK 1 — GLOBAL LOCK LEAK FIX: the execution gate is reset
-        UNCONDITIONALLY the instant a position closes (Stop Loss, Take
-        Profit, or Profit Giveback Shield). This happens BEFORE the broker
-        flatten call so that even if the flatten throws, the gate is already
-        open and ESM6/MCL1!/MGC1! can immediately claim the execution thread.
+        With multi-asset support, only the closed ticker's slot is released.
+        Other open positions are unaffected.
+
+        IMPORTANT: This closes ALL positions for the ticker (not just one).
+        If you have 3 buy positions on MNQ, all 3 are flattened.
         """
-        # --- UNCONDITIONAL GATE RESET (must happen first, no matter what) ---
-        try:
-            self.asset_lock.force_reset()
-            logger.info("[LOCK] Execution gate force-reset to None on close of %s", ticker)
-        except Exception as lock_err:
-            logger.error("[LOCK] force_reset failed for %s: %s", ticker, lock_err)
-        # Also clear any per-ticker churn lock dict if present
-        try:
-            if hasattr(self, "locked_tickers") and isinstance(self.locked_tickers, dict):
-                self.locked_tickers.pop(ticker, None)
-        except Exception:
-            pass
+        # --- Count how many positions we have for this ticker ---
+        _matching = [p for p in self.positions if p.get("asset") == ticker]
+        if not _matching:
+            logger.warning("[CLOSE] No positions found for %s — nothing to close", ticker)
+            return
+
+        _qty = len(_matching)
+        logger.info("[CLOSE] Closing %d position(s) for %s | Reason: %s", _qty, ticker, reason)
 
         try:
-            # Execute close
+            # Execute close — use flatten_position which clicks "Close position"
+            # (NOT execute_trade which clicks "Sell" and only reduces by 1)
             if config.get_active_mode() == "TRADINGVIEW":
-                self.rpa_executor.flatten_position(ticker)
+                success = self.rpa_executor.flatten_position(ticker)
+                if not success:
+                    logger.error("[CLOSE] flatten_position FAILED for %s — retrying once", ticker)
+                    time.sleep(1.0)
+                    success = self.rpa_executor.flatten_position(ticker)
+                    if not success:
+                        logger.error("[CLOSE] flatten_position FAILED TWICE for %s", ticker)
             else:
                 self.trade_executor.close_position(ticker)
-            
-            # Remove from local position list once close request has been issued.
+
+            # Remove ALL matching positions from local list
+            _closed_positions = []
             try:
-                for i, position in enumerate(list(self.positions)):
-                    if position.get("asset") == ticker:
-                        self.positions.pop(i)
-                        _pk = f"_peak_profit_{ticker}"
-                        if hasattr(self, _pk):
-                            delattr(self, _pk)
-                        break
+                for pos in list(self.positions):
+                    if pos.get("asset") == ticker:
+                        self.positions.remove(pos)
+                        _closed_positions.append(pos)
+                _pk = f"_peak_profit_{ticker}"
+                if hasattr(self, _pk):
+                    delattr(self, _pk)
+            except Exception as pos_err:
+                logger.error("[CLOSE] Failed to remove %s positions: %s", ticker, pos_err)
+
+            # ── REALIZED P&L TRACKING (for each closed position) ──
+            for _closed_position in _closed_positions:
+                try:
+                    _entry = float(_closed_position.get("entry_price", 0) or 0)
+                    _side = str(_closed_position.get("action", "BUY") or "BUY").upper()
+                    _opened_at = _closed_position.get("opened_at", 0)
+                    _hold_sec = (time.time() - _opened_at) if _opened_at else 0.0
+                    _exit_price = self._fetch_current_price(ticker)
+                    if _entry > 0 and _exit_price and _exit_price > 0:
+                        _pnl = (_exit_price - _entry) if _side == "BUY" else (_entry - _exit_price)
+                        pnl_tracker.record_close(
+                            trade_id=f"{ticker}_{int(_opened_at or time.time())}",
+                            asset=ticker, side=_side,
+                            entry_price=_entry, exit_price=_exit_price,
+                            pnl=_pnl, hold_seconds=_hold_sec,
+                            reason=reason,
+                        )
+                except Exception as _pnl_err:
+                    logger.debug("[PnL] record_close error: %s", _pnl_err)
+
+            # Clear reversal detector for this ticker
+            try:
+                reversal_detector.clear(ticker)
+                reversal_engine.clear_state(ticker)
             except Exception:
                 pass
-            
-            # Lock already force-reset above — this is a belt-and-suspenders release.
+
+            # Clear ladder exit tracking for this ticker
             try:
-                self.asset_lock.release()
+                ladder_exit_manager.clear_trade(ticker)
             except Exception:
                 pass
-            
-            logger.info("[CLOSE] Position closed: %s | Reason: %s", ticker, reason)
-            
-            # Put headmaster back to sleep
+
+            # Clear trade monitor tracking for this ticker
             try:
-                self.headmaster.on_position_closed()
+                self.trade_monitor.clear_trade()
             except Exception:
                 pass
-            
+
+            logger.info("[CLOSE] %d position(s) closed for %s | Reason: %s", len(_closed_positions), ticker, reason)
+
+            # --- Release lock AFTER close is confirmed (not before!) ---
+            try:
+                self.asset_lock.release_ticker(ticker)
+            except Exception as lock_err:
+                logger.error("[LOCK] release_ticker failed for %s: %s", ticker, lock_err)
+
+            # Put headmaster back to sleep if no more positions
+            try:
+                if self.asset_lock.open_count() == 0:
+                    self.headmaster.on_position_closed()
+            except Exception:
+                pass
+
             # Set cooldown timestamp so we don't re-enter immediately
             import time as _time
             setattr(self, f"_last_close_time_{ticker}", _time.time())
+            setattr(self, f"_last_close_reason_{ticker}", reason)
             
         except Exception as e:
             logger.error("[CLOSE] Error closing position %s: %s", ticker, e)
-            # Gate is already open from force_reset above; nothing to recover.
     
     def _run_pretrade_market_audit(self, ticker: str, entry_price: float) -> bool:
         """Run pre-trade market audit."""
@@ -1514,15 +2081,11 @@ class VcaniTradeEngine:
             return 0.0
 
     def _janitor_clear_phantom_positions(self):
-        """STALE POSITION JANITOR — runs every 30s.
-        A position that has been 'open' for more than 5 minutes without a confirmed
-        close event is almost certainly a phantom (TV click happened but fill was never
-        confirmed, or the position was closed on TV but our local tracker never got
-        the close event). Without this janitor, the duplicate-position guard would
-        block ALL future trades on that ticker forever.
-        """
+        """STALE POSITION JANITOR — runs every 60s.
+        A position older than 4 hours without a confirmed close event is likely phantom.
+        Real trades should never last this long on a scalping bot."""
         import time as _jt
-        _threshold = 300  # 5 minutes
+        _threshold = 14400  # 4 hours
         cleared = 0
         for _pos in list(self.positions):
             _opened = _pos.get("opened_at", 0)

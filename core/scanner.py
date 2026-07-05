@@ -240,13 +240,16 @@ class Scanner:
 
     def _soft_signal(self, ticker: str, df: "pd.DataFrame", close: "pd.Series",
                      ema9: "pd.Series", ema21: "pd.Series",
-                     current_rsi: float, trend_dir: str, vol_ratio: float) -> Optional[str]:
+                     current_rsi: float, trend_dir: str, vol_ratio: float,
+                     ema20: "pd.Series" = None, ema200: "pd.Series" = None) -> Optional[str]:
         """Light signal that fires on any clear directional bias, even in chop.
 
         This is the SOFT TIER — used so the user can see *something* happening
         even when the strict MOMENTUM/BREAKOUT signals don't fire. It does NOT
         bypass the stability requirement or any safety gate; it just adds more
         opportunities in markets that are mostly flat.
+
+        HAWK RULE: Must respect EMA 20/200 filter — NO trades between EMAs.
 
         Returns 'BUY' / 'SELL' / None.
         """
@@ -256,16 +259,55 @@ class Scanner:
             price = float(close.iloc[-1])
             ema9_v = float(ema9.iloc[-1])
             ema21_v = float(ema21.iloc[-1])
+
+            # ── HAWK EMA 20/200 FILTER (Oliver Velez rule) ────────
+            # BUY only if price is fully ABOVE both EMA20 and EMA200.
+            # SELL only if price is fully BELOW both EMA20 and EMA200.
+            # If price is BETWEEN the EMAs → NO TRADE.
+            ema20_v = float(ema20.iloc[-1]) if ema20 is not None and len(ema20) > 0 else 0.0
+            ema200_v = float(ema200.iloc[-1]) if ema200 is not None and len(ema200) > 0 else 0.0
+
+            if ema20_v > 0 and ema200_v > 0:
+                # Price between EMAs → block all signals
+                if min(ema20_v, ema200_v) < price < max(ema20_v, ema200_v):
+                    return None
+                # BUY: candle must close above both EMAs
+                if price < ema20_v or price < ema200_v:
+                    # Still allow SELL if below both
+                    pass
+                # SELL: candle must close below both EMAs
+                if price > ema20_v and price > ema200_v:
+                    # Still allow BUY if above both
+                    pass
+
             # Heuristic 1: price is decisively above/below both EMAs AND RSI confirms.
             if price > ema9_v > ema21_v and current_rsi > 50 and current_rsi < 70:
+                # BUY must be above both EMA20 and EMA200
+                if ema20_v > 0 and price < ema20_v:
+                    return None
+                if ema200_v > 0 and price < ema200_v:
+                    return None
                 return "BUY"
             if price < ema9_v < ema21_v and current_rsi < 50 and current_rsi > 30:
+                # SELL must be below both EMA20 and EMA200
+                if ema20_v > 0 and price > ema20_v:
+                    return None
+                if ema200_v > 0 and price > ema200_v:
+                    return None
                 return "SELL"
             # Heuristic 2: 1H bias is clear (trend_dir says "Bull" / "Bear")
             # and price is on the right side of EMA21.
             if trend_dir == "Bull" and price > ema21_v and current_rsi > 45 and current_rsi < 65:
+                if ema20_v > 0 and price < ema20_v:
+                    return None
+                if ema200_v > 0 and price < ema200_v:
+                    return None
                 return "BUY"
             if trend_dir == "Bear" and price < ema21_v and current_rsi < 55 and current_rsi > 35:
+                if ema20_v > 0 and price > ema20_v:
+                    return None
+                if ema200_v > 0 and price > ema200_v:
+                    return None
                 return "SELL"
         except Exception:
             return None
@@ -309,9 +351,14 @@ class Scanner:
         
         # Determine which tickers to scan
         if self._engine_lock and self._engine_lock.is_currently_holding:
-            # Only scan the locked ticker
-            tickers_to_scan = [self._engine_lock.active_locked_ticker]
-            logger.debug("[SCANNER] Locked mode: scanning only %s", tickers_to_scan[0])
+            # Multi-asset: scan all watchlist tickers EXCEPT those already open
+            open_tickers = set(getattr(self._engine_lock, '_open_tickers', {}).keys())
+            tickers_to_scan = [t for t in self.tickers if t.upper() not in open_tickers]
+            if not tickers_to_scan:
+                logger.debug("[SCANNER] All watchlist tickers have open positions — nothing to scan")
+                return signals
+            logger.debug("[SCANNER] Multi-asset mode: scanning %d tickers (excluding %s)",
+                        len(tickers_to_scan), open_tickers)
         else:
             # Scan all tickers in watchlist
             tickers_to_scan = self.tickers
@@ -623,9 +670,9 @@ class Scanner:
                     htf_bullish = float(ema9_5m.iloc[-1]) > float(ema21_5m.iloc[-1])
                     htf_bearish = float(ema9_5m.iloc[-1]) < float(ema21_5m.iloc[-1])
             except Exception:
-                # If 5m data unavailable, allow trade (don't block)
-                htf_bullish = True
-                htf_bearish = True
+                # If 5m data unavailable, don't confirm either direction
+                htf_bullish = False
+                htf_bearish = False
 
             # EMA for trend detection (1-minute)
             ema9 = close.ewm(span=9, adjust=False).mean()
@@ -648,16 +695,30 @@ class Scanner:
                 _ema_settings = {}
             _ema20_filter_enabled = bool(_ema_settings.get("require_price_above_20ema_for_buy", True))
             _ema200_filter_enabled = bool(_ema_settings.get("require_price_above_200ema_for_buy", True))
-            # Live filter state
-            price_above_ema20 = price > ema20_value if ema20_value > 0 else True
-            price_below_ema20 = price < ema20_value if ema20_value > 0 else True
-            price_above_ema200 = price > ema200_value if ema200_value > 0 else True
-            price_below_ema200 = price < ema200_value if ema200_value > 0 else True
+            # Live filter state — BLOCK when data insufficient (don't default to pass)
+            price_above_ema20 = price > ema20_value if ema20_value > 0 else False
+            price_below_ema20 = price < ema20_value if ema20_value > 0 else False
+            price_above_ema200 = price > ema200_value if ema200_value > 0 else False
+            price_below_ema200 = price < ema200_value if ema200_value > 0 else False
 
             # Price action: last 5 candles direction
             recent_closes = close.iloc[-5:].tolist()
             rises = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] > recent_closes[i-1])
             falls = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] < recent_closes[i-1])
+
+            # === HARD BLOCK: Price between EMA20 and EMA200 ===
+            # Oliver Velez rule: NEVER trade when price is between the EMAs.
+            # BUY requires close ABOVE both. SELL requires close BELOW both.
+            _between_emas = False
+            if ema20_value > 0 and ema200_value > 0:
+                _lower = min(ema20_value, ema200_value)
+                _upper = max(ema20_value, ema200_value)
+                if _lower < price < _upper:
+                    _between_emas = True
+                    logger.info(
+                        "[VELEZ-EMA] BLOCKED: price %.2f is between EMA20 %.2f and EMA200 %.2f — NO TRADE",
+                        price, ema20_value, ema200_value,
+                    )
 
             # Trend state
             ema_bullish = ema9.iloc[-1] > ema21.iloc[-1]
@@ -680,8 +741,9 @@ class Scanner:
             
             # === BUY CONDITIONS ===
             # Trend is up + momentum + RSI safe zone + 5-MIN AGREES +
-            # HAWK 20/200 EMA FILTER: price MUST be above 20 EMA (and 200 EMA if enabled)
-            if (ema_bullish
+            # HAWK 20/200 EMA FILTER: price MUST be above BOTH EMAs (Oliver Velez rule)
+            if (not _between_emas  # HARD BLOCK: no trade between EMAs
+                and ema_bullish
                 and price_above_ema9
                 and rises >= 3
                 and macd_positive
@@ -701,8 +763,9 @@ class Scanner:
 
             # === SELL CONDITIONS ===
             # Trend is down + momentum + RSI safe zone + 5-MIN AGREES +
-            # HAWK 20/200 EMA FILTER: price MUST be below 20 EMA (and 200 EMA if enabled)
-            elif (ema_bearish
+            # HAWK 20/200 EMA FILTER: price MUST be below BOTH EMAs (Oliver Velez rule)
+            elif (not _between_emas  # HARD BLOCK: no trade between EMAs
+                  and ema_bearish
                   and price_below_ema9
                   and falls >= 3
                   and macd_negative
@@ -722,7 +785,8 @@ class Scanner:
 
             # === BREAKOUT BUY (strong move with volume) ===
             # Also gated by HAWK 20/200 EMA — breakouts only valid in trend direction
-            elif (price > bb_high.iloc[-1]
+            elif (not _between_emas  # HARD BLOCK: no trade between EMAs
+                  and price > bb_high.iloc[-1]
                   and vol_ratio > 1.5
                   and rises >= 3
                   and current_rsi > 55
@@ -735,7 +799,8 @@ class Scanner:
 
             # === BREAKOUT SELL (strong move with volume) ===
             # Also gated by HAWK 20/200 EMA — breakouts only valid in trend direction
-            elif (price < bb_low.iloc[-1]
+            elif (not _between_emas  # HARD BLOCK: no trade between EMAs
+                  and price < bb_low.iloc[-1]
                   and vol_ratio > 1.5
                   and falls >= 3
                   and current_rsi < 45
@@ -754,6 +819,71 @@ class Scanner:
                     action = "SELL"
                 else:
                     action = "WAIT"
+
+                # === LIQUIDITY ZONE GATE ===
+                # BLOCK buys at FRESH (untouched) supply zones. BLOCK sells at FRESH demand zones.
+                # Touched zones are excluded — once price has tested a zone, the supply/demand
+                # has likely been absorbed and should not block entries.
+                try:
+                    liq = self.liquidity_engine.analyze(df, ticker)
+                    in_supply = any(
+                        not z.invalidated and not z.touched and z.bottom <= price <= z.top
+                        for z in (liq.supply_zones + liq.fvg_bearish + liq.liquidity_pools)
+                        if z.direction == "bearish"
+                    )
+                    in_demand = any(
+                        not z.invalidated and not z.touched and z.bottom <= price <= z.top
+                        for z in (liq.demand_zones + liq.fvg_bullish + liq.liquidity_pools)
+                        if z.direction == "bullish"
+                    )
+                    if action == "BUY" and in_supply:
+                        logger.info(
+                            "[LIQUIDITY-GATE] BLOCKED BUY %s — price %.2f is inside a supply zone",
+                            ticker, price,
+                        )
+                        return None
+                    if action == "SELL" and in_demand:
+                        logger.info(
+                            "[LIQUIDITY-GATE] BLOCKED SELL %s — price %.2f is inside a demand zone",
+                            ticker, price,
+                        )
+                        return None
+
+                    # === LIQUIDITY-BASED TP/SL ===
+                    # Use nearest opposing liquidity zone for TP, nearest same-side zone for SL.
+                    # Falls back to ATR if no liquidity zone found.
+                    if action == "BUY":
+                        liq_tp = liq.take_profit_long
+                        liq_sl = float(liq.nearest_demand.bottom) if liq.nearest_demand else None
+                    else:
+                        liq_tp = liq.take_profit_short
+                        liq_sl = float(liq.nearest_supply.top) if liq.nearest_supply else None
+
+                    # Use liquidity TP/SL if available, otherwise fall back to ATR
+                    if liq_tp and liq_sl and liq_tp > 0 and liq_sl > 0:
+                        tp_price = round(liq_tp, 2)
+                        sl_price = round(liq_sl, 2)
+                        logger.info(
+                            "[LIQUIDITY] %s %s | TP=%.2f (opposing zone) | SL=%.2f (same-side zone)",
+                            action, ticker, tp_price, sl_price,
+                        )
+                    else:
+                        # ATR fallback
+                        if action == "BUY":
+                            tp_price = round(price + (stop_distance * 2.5), 2)
+                            sl_price = round(price - stop_distance, 2)
+                        else:
+                            tp_price = round(price - (stop_distance * 2.5), 2)
+                            sl_price = round(price + stop_distance, 2)
+
+                except Exception as liq_err:
+                    logger.debug("[LIQUIDITY] Analysis error for %s: %s — using ATR fallback", ticker, liq_err)
+                    if action == "BUY":
+                        tp_price = round(price + (stop_distance * 2.5), 2)
+                        sl_price = round(price - stop_distance, 2)
+                    else:
+                        tp_price = round(price - (stop_distance * 2.5), 2)
+                        sl_price = round(price + stop_distance, 2)
 
                 # Skip H1 confirmation — it lags and causes wrong-direction trades
                 # Instead, use signal stability (same direction 2 cycles = confirmed)
@@ -776,8 +906,8 @@ class Scanner:
                         "sma_slow": sma_slow.iloc[-1],
                         "volume_ratio": vol_ratio,
                         "atr": atr,
-                        "stop_loss": round(price - stop_distance, 2) if action == "BUY" else round(price + stop_distance, 2),
-                        "take_profit": round(price + (stop_distance * 2.5), 2) if action == "BUY" else round(price - (stop_distance * 2.5), 2),
+                        "stop_loss": sl_price,
+                        "take_profit": tp_price,
                         "ema9": round(float(ema9.iloc[-1]), 2),
                         "ema21": round(float(ema21.iloc[-1]), 2),
                         "macd_hist": round(float(macd_hist.iloc[-1]), 4),
@@ -796,6 +926,7 @@ class Scanner:
             # we never get a one-tick trade.
             soft_action = self._soft_signal(
                 ticker, df, close, ema9, ema21, current_rsi, trend_dir, vol_ratio,
+                ema20=ema20, ema200=ema200,
             )
             if soft_action:
                 stable, stability_count = self._signal_history_is_stable(ticker, soft_action)
@@ -808,12 +939,51 @@ class Scanner:
                     return None
                 # Soft signal has lower strength (0.55-0.7) — the brain will
                 # still gate it.
-                if soft_action == "BUY":
-                    soft_stop = round(price - stop_distance, 2)
-                    soft_tp = round(price + (stop_distance * 2.0), 2)
-                else:
-                    soft_stop = round(price + stop_distance, 2)
-                    soft_tp = round(price - (stop_distance * 2.0), 2)
+                # === LIQUIDITY ZONE GATE (soft signals too) ===
+                try:
+                    liq_soft = self.liquidity_engine.analyze(df, ticker)
+                    in_supply = any(
+                        not z.invalidated and not z.touched and z.bottom <= price <= z.top
+                        for z in (liq_soft.supply_zones + liq_soft.fvg_bearish + liq_soft.liquidity_pools)
+                        if z.direction == "bearish"
+                    )
+                    in_demand = any(
+                        not z.invalidated and not z.touched and z.bottom <= price <= z.top
+                        for z in (liq_soft.demand_zones + liq_soft.fvg_bullish + liq_soft.liquidity_pools)
+                        if z.direction == "bullish"
+                    )
+                    if soft_action == "BUY" and in_supply:
+                        logger.info("[LIQUIDITY-GATE] BLOCKED SOFT BUY %s — price in supply zone", ticker)
+                        return None
+                    if soft_action == "SELL" and in_demand:
+                        logger.info("[LIQUIDITY-GATE] BLOCKED SOFT SELL %s — price in demand zone", ticker)
+                        return None
+
+                    if soft_action == "BUY":
+                        liq_tp_s = liq_soft.take_profit_long
+                        liq_sl_s = float(liq_soft.nearest_demand.bottom) if liq_soft.nearest_demand else None
+                    else:
+                        liq_tp_s = liq_soft.take_profit_short
+                        liq_sl_s = float(liq_soft.nearest_supply.top) if liq_soft.nearest_supply else None
+
+                    if liq_tp_s and liq_sl_s and liq_tp_s > 0 and liq_sl_s > 0:
+                        soft_tp = round(liq_tp_s, 2)
+                        soft_stop = round(liq_sl_s, 2)
+                    else:
+                        if soft_action == "BUY":
+                            soft_stop = round(price - stop_distance, 2)
+                            soft_tp = round(price + (stop_distance * 2.0), 2)
+                        else:
+                            soft_stop = round(price + stop_distance, 2)
+                            soft_tp = round(price - (stop_distance * 2.0), 2)
+                except Exception:
+                    if soft_action == "BUY":
+                        soft_stop = round(price - stop_distance, 2)
+                        soft_tp = round(price + (stop_distance * 2.0), 2)
+                    else:
+                        soft_stop = round(price + stop_distance, 2)
+                        soft_tp = round(price - (stop_distance * 2.0), 2)
+
                 return TechnicalSignal(
                     ticker=ticker,
                     signal_type=f"SOFT_{soft_action}",

@@ -304,6 +304,18 @@ class RPAExecutor:
                 pyautogui.press('escape')
                 time.sleep(0.2)
 
+                # 3.5. Set order quantity BEFORE clicking Buy/Sell
+                # This ensures the correct quantity is entered, especially for
+                # closing multiple positions (e.g., 3 buys → sell 3 to flatten).
+                page = getattr(self, "_controlled_page", None)
+                if page and not page.is_closed():
+                    qty = int(getattr(config, "INITIAL_ENTRY_BULLETS", 1) or 1)
+                    try:
+                        self._set_tradingview_order_quantity(page, float(qty))
+                        time.sleep(0.2)
+                    except Exception as qty_err:
+                        logger.warning("[HY3] Quantity set failed (non-critical): %s", qty_err)
+
                 # 4. Click the Buy or Sell button directly on the current chart.
                 clicked = self._click_via_controlled_page(target_key, ticker)
                 if not clicked:
@@ -2442,47 +2454,96 @@ class RPAExecutor:
             return False
 
     def flatten_position(self, ticker_hint: str = "") -> bool:
-        """Close position on TradingView. Tries JS close button first, then coordinates."""
-        
-        logger.info("[FLATTEN] Attempting to close position for %s", ticker_hint or "active chart")
+        """Close ALL positions for a ticker on TradingView.
+
+        STRATEGY (in order):
+        1. Try HTML/Playwright "Close position" button
+        2. If that fails → click SELL button with correct quantity (mouse-based)
+        3. If that fails → keyboard shortcut to Sell panel
+
+        ALWAYS confirms any dialog that appears.
+        """
+        logger.info("[FLATTEN] Attempting to close ALL positions for %s", ticker_hint or "active chart")
 
         # METHOD 1: Playwright JS — search for Close/Flatten button in DOM
         if self._click_close_via_controlled_page(ticker_hint):
-            logger.info("[FLATTEN] SUCCESS: Playwright found and clicked Close for %s", ticker_hint)
+            logger.info("[FLATTEN] Method 1: Playwright clicked Close for %s", ticker_hint)
+            time.sleep(0.5)
+            pyautogui.press('enter')
             time.sleep(0.3)
+            pyautogui.press('enter')
+            time.sleep(0.2)
             pyautogui.press('escape')
             return True
 
-        # METHOD 2: Click the X button on the position line on the chart
-        # TradingView shows a small X next to the P&L when you hover the position line
+        logger.info("[FLATTEN] Method 1 failed — trying Method 2 (Sell button with quantity)")
+
+        # METHOD 2: Click SELL button with correct quantity via mouse
+        # This is the most reliable fallback — directly clicks the Sell button
+        # on the TradingView order panel, which creates a sell order that
+        # offsets (closes) the existing buy positions.
         window = self._get_browser_window(ticker_hint)
         if window:
             try:
                 window.activate()
-                time.sleep(0.2)
-                
+                time.sleep(0.3)
+
+                # Step 1: Set quantity to match all open positions for this ticker
+                # We need to know how many positions are open — check via the engine ref
+                engine = getattr(self, '_engine_ref', None)
+                qty_to_close = 1  # default
+                if engine and hasattr(engine, 'positions'):
+                    matching = [p for p in engine.positions if p.get("asset") == ticker_hint]
+                    qty_to_close = max(len(matching), 1)
+                    logger.info("[FLATTEN] %d position(s) found for %s — setting sell qty to %d",
+                               qty_to_close, ticker_hint, qty_to_close)
+
+                # Step 2: Set quantity via HTML injection
                 page = getattr(self, "_controlled_page", None)
                 if page and not page.is_closed():
-                    closed = self._run_async(self._js_click_position_close(page))
-                    if closed:
-                        logger.info("[FLATTEN] SUCCESS: Clicked position X button for %s", ticker_hint)
+                    try:
+                        self._set_tradingview_order_quantity(page, float(qty_to_close))
                         time.sleep(0.3)
-                        pyautogui.press('escape')
-                        return True
-            except Exception:
-                pass
+                    except Exception as qty_err:
+                        logger.warning("[FLATTEN] HTML quantity set failed: %s — trying keyboard", qty_err)
 
-        # METHOD 3: Fallback — click the configured flatten coordinate
-        if window:
-            try:
-                target_x, target_y = config.FALLBACK_COORDS.get("flatten_button", (960, 620))
-                pyautogui.moveTo(target_x, target_y, duration=0.1)
+                # Step 3: Click the SELL button (not Buy!) via coordinates
+                sell_x, sell_y = config.FALLBACK_COORDS.get("sell_button", (960, 580))
+                logger.info("[FLATTEN] Clicking SELL button at (%d, %d) with qty=%d", sell_x, sell_y, qty_to_close)
+                pyautogui.moveTo(sell_x, sell_y, duration=0.15)
+                time.sleep(0.1)
                 pyautogui.click()
                 time.sleep(0.5)
-                pyautogui.press('enter')  # Confirm if dialog appears
+
+                # Step 4: Confirm any dialog
+                pyautogui.press('enter')
+                time.sleep(0.3)
+                pyautogui.press('enter')
                 time.sleep(0.2)
                 pyautogui.press('escape')
-                logger.info("[FLATTEN] Method 3: Coordinate click at (%d, %d) for %s", target_x, target_y, ticker_hint)
+
+                logger.info("[FLATTEN] Method 2: SELL button clicked with qty=%d for %s", qty_to_close, ticker_hint)
+                return True
+            except Exception as e:
+                logger.error("[FLATTEN] Method 2 failed: %s", e)
+
+        # METHOD 3: Keyboard shortcut — use TradingView's Sell shortcut
+        # Tab to the Sell button area and press Enter
+        if window:
+            try:
+                window.activate()
+                time.sleep(0.2)
+                # TradingView: Alt+S opens Sell panel on some versions
+                # Fallback: click at known sell coordinates
+                sell_x, sell_y = config.FALLBACK_COORDS.get("sell_button", (960, 580))
+                pyautogui.click(sell_x, sell_y)
+                time.sleep(0.3)
+                pyautogui.press('enter')
+                time.sleep(0.3)
+                pyautogui.press('enter')
+                time.sleep(0.2)
+                pyautogui.press('escape')
+                logger.info("[FLATTEN] Method 3: Keyboard/mouse sell for %s", ticker_hint)
                 return True
             except Exception as e:
                 logger.error("[FLATTEN] All methods failed for %s: %s", ticker_hint, e)

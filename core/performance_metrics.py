@@ -42,7 +42,7 @@ class PerformanceMetrics:
                      size: float, pnl: float, hold_time_sec: float = 0.0,
                      entry_time: str = "", exit_time: str = ""):
         """Record a closed trade for analytics."""
-        ret = (exit - entry) / entry if entry > 0 else 0
+        ret = (exit - entry) / entry if entry > 0 and side == "BUY" else (entry - exit) / entry if entry > 0 else 0
         trade = {
             "symbol": symbol,
             "side": side,

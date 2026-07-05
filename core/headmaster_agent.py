@@ -401,7 +401,8 @@ class HeadmasterSupervisor:
             )
 
         if legs_ok:
-            self._velez_leg_count += 1
+            # The all() check already verified VELEZ_LEG_COUNT consecutive candles
+            self._velez_leg_count = VELEZ_LEG_COUNT
         else:
             self._velez_leg_count = 0
 

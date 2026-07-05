@@ -93,7 +93,8 @@ class SafetyState(BaseModel):
         import config
         
         # MAX_DAILY_LOSS=0 means disabled (e.g., Apex has no daily limit)
-        daily_loss_ok = (config.MAX_DAILY_LOSS <= 0) or (abs(self.daily_pnl) < config.MAX_DAILY_LOSS)
+        # A6 FIX: only trigger on NEGATIVE pnl (a profit must not halt trading).
+        daily_loss_ok = (config.MAX_DAILY_LOSS <= 0) or (self.daily_pnl >= -config.MAX_DAILY_LOSS)
         self.can_trade = (
             not self.kill_switch_active
             and not self.daily_loss_limit_hit

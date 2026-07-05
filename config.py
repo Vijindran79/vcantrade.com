@@ -19,10 +19,11 @@ MOUSE_HUMAN_DELAY_MIN = 0.8    # Min reaction time
 MOUSE_HUMAN_DELAY_MAX = 1.6    # Max reaction time
 
 # ===== STRUCTURAL AI FEATURE FLAGS =====
-USE_VISION = False  # qwen:latest is text-only — no image input
-FAST_VISION_ENABLED = False
-VLM_MODEL = os.getenv("VLM_MODEL", "moondream")
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "moondream")
+USE_VISION = True  # ENABLED: vision model reads chart screenshots for pattern confirmation
+FAST_VISION_ENABLED = True  # ENABLED: fast vision scan on every signal
+VLM_MODEL = os.getenv("VLM_MODEL", "qwen3.5:4b")  # best balance: vision + thinking + speed
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "qwen3.5:4b")
+FAST_CHART_VISION_MODEL = os.getenv("FAST_CHART_VISION_MODEL", "moondream")  # fast fallback for quick checks
 MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.90"))  # HAWK MODE: was 0.60, raised for 90% WR
 SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() == "true"
 
@@ -51,6 +52,19 @@ TP_HIGH_CONFIDENCE_MAX = 160.0 # Maximum target when AI confidence >= 85% ($200)
 # in the execution path. Kept as absolute fallbacks only.
 TRAILING_STOP_ACTIVATE_AFTER_PROFIT = 30.0  # $30 profit before trailing activates
 TRAILING_STOP_DISTANCE = 15.0              # $15 trail distance after activation
+
+# Break-even stop settings (used by ProfitLock)
+AUTONOMOUS_BREAK_EVEN_TRIGGER_USD = float(os.getenv("AUTONOMOUS_BREAK_EVEN_TRIGGER_USD", "15.0"))
+AUTONOMOUS_BREAK_EVEN_PLUS_USD = float(os.getenv("AUTONOMOUS_BREAK_EVEN_PLUS_USD", "2.0"))
+AUTONOMOUS_BREAK_EVEN_BUFFER_PCT = float(os.getenv("AUTONOMOUS_BREAK_EVEN_BUFFER_PCT", "0.1"))
+
+# Hard profit target — close entire position when profit reaches this many pips
+# Non-negotiable exit. Set to 0 to disable.
+HARD_PROFIT_TARGET_PIPS = float(os.getenv("HARD_PROFIT_TARGET_PIPS", "100"))
+
+# Default stop loss — used when signal doesn't provide one
+# NEVER trade without a stop loss. This is your safety net.
+DEFAULT_STOP_LOSS_PCT = float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.5"))  # 0.5% from entry
 
 # ===== PROP FIRM RULES (The "Professor") =====
 PROP_FIRM_ENABLED = os.getenv("PROP_FIRM_ENABLED", "True").lower() == "true"

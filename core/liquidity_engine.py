@@ -68,6 +68,9 @@ class LiquidityEngine:
         self.zone_history: Dict[str, List[LiquidityZone]] = {}
         self.max_history = 100
 
+    MAX_ZONES_PER_TYPE = 15
+    MIN_ZONE_SIZE_PCT = 0.0005  # 0.05% of price — filters out micro-noise zones
+
     def analyze(self, df: pd.DataFrame, ticker: str) -> ZoneAnalysis:
         """Run full liquidity analysis on price data."""
         if df is None or len(df) < 20:
@@ -77,10 +80,12 @@ class LiquidityEngine:
         result = ZoneAnalysis(ticker=ticker, current_price=current_price)
 
         # Detect all zone types
-        result.demand_zones = self._detect_order_blocks(df, "bullish")
-        result.supply_zones = self._detect_order_blocks(df, "bearish")
-        result.fvg_bullish, result.fvg_bearish = self._detect_fvgs(df)
-        result.liquidity_pools = self._detect_liquidity_pools(df)
+        result.demand_zones = self._prune_zones(self._detect_order_blocks(df, "bullish"), current_price)
+        result.supply_zones = self._prune_zones(self._detect_order_blocks(df, "bearish"), current_price)
+        fvg_bull, fvg_bear = self._detect_fvgs(df)
+        result.fvg_bullish = self._prune_zones(fvg_bull, current_price)
+        result.fvg_bearish = self._prune_zones(fvg_bear, current_price)
+        result.liquidity_pools = self._prune_zones(self._detect_liquidity_pools(df), current_price)
 
         # Mark touched/invalidated zones
         self._update_zone_states(result, current_price)
@@ -119,6 +124,17 @@ class LiquidityEngine:
         )
 
         return result
+
+    def _prune_zones(self, zones: List[LiquidityZone], current_price: float) -> List[LiquidityZone]:
+        """Filter out micro-noise zones and cap count by strength."""
+        if not zones:
+            return zones
+        min_size = current_price * self.MIN_ZONE_SIZE_PCT
+        # Drop zones that are too small (noise)
+        filtered = [z for z in zones if abs(z.top - z.bottom) >= min_size]
+        # Sort by strength descending and keep top N
+        filtered.sort(key=lambda z: z.strength, reverse=True)
+        return filtered[:self.MAX_ZONES_PER_TYPE]
 
     def _detect_order_blocks(self, df: pd.DataFrame, direction: str) -> List[LiquidityZone]:
         """Detect bullish or bearish order blocks."""
