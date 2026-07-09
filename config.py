@@ -80,6 +80,15 @@ VELEZ_CHART_INTERVAL = os.getenv("VELEZ_CHART_INTERVAL", "1m")
 MARKET_STUDY_ENABLED = os.getenv("MARKET_STUDY_ENABLED", "true").lower() == "true"
 MARKET_STUDY_SECONDS = float(os.getenv("MARKET_STUDY_SECONDS", "180"))  # 3 min default
 
+# ===== INSTITUTIONAL PRE-CHECK (analyze before every order) =====
+# Runs VOLUME + VOLUME PROFILE (POC/value area) + ORDER FLOW (cumulative
+# delta) + LIQUIDITY SWEEP on the live chart BEFORE an entry is placed.
+# HARD-BLOCKS only on clearly adverse reads (sweep against direction, or
+# order flow strongly opposed) so it sharpens entries instead of killing them.
+INSTITUTIONAL_GATE_ENABLED = os.getenv("INSTITUTIONAL_GATE_ENABLED", "true").lower() == "true"
+INSTITUTIONAL_BLOCK_SWEEP = os.getenv("INSTITUTIONAL_BLOCK_SWEEP", "true").lower() == "true"
+INSTITUTIONAL_BLOCK_ORDERFLOW = os.getenv("INSTITUTIONAL_BLOCK_ORDERFLOW", "true").lower() == "true"
+
 # ===== PROFIT GUARD (secure profits like a professional) =====
 # Engages once a sniper entry is in solid profit, then trails a stop at a
 # 10-15% pullback from the peak so winners are banked instead of given back.

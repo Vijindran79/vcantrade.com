@@ -44,6 +44,7 @@ from core.headmaster_agent import HeadmasterSupervisor
 from core.hybrid_execution_gateway import HybridExecutionGateway
 from core.ladder_exit import ladder_exit_manager
 from core.profit_guard import evaluate as pg_evaluate, htf_room_from_prices as pg_htf_room
+from core.institutional_precheck import run_institutional_precheck
 from core.pnl_tracker import pnl_tracker, reversal_detector, adaptive_risk
 from core.liquidity_engine import LiquidityEngine
 from core.reversal_engine import reversal_engine
@@ -1313,6 +1314,35 @@ class VcaniTradeEngine:
                 action=action,
                 reason=f"Market study in progress ({_remain}s remaining)",
             )
+
+        # === INSTITUTIONAL PRE-CHECK (volume / profile / order flow / sweep) ===
+        if getattr(config, "INSTITUTIONAL_GATE_ENABLED", True):
+            try:
+                _pc_interval = str(getattr(config, "VELEZ_CHART_INTERVAL", "1m") or "1m")
+                _pc_df = self.scanner._fetch_market_data(ticker, interval=_pc_interval)
+                if _pc_df is not None and len(_pc_df) >= 20:
+                    _pc = run_institutional_precheck(
+                        ticker, _pc_df, action,
+                        cfg={
+                            "block_sweep": getattr(config, "INSTITUTIONAL_BLOCK_SWEEP", True),
+                            "block_flow": getattr(config, "INSTITUTIONAL_BLOCK_ORDERFLOW", True),
+                        },
+                    )
+                    logger.info("[PRE-CHECK] %s", _pc["summary"])
+                    self._log_dashboard(f"[PRE-CHECK] {ticker} {action}: {_pc['verdict']} | {_pc['summary']}")
+                    if _pc.get("block"):
+                        logger.warning("[PRE-CHECK] REJECTED %s %s: %s", action, ticker, _pc["reason"])
+                        self._log_dashboard(f"[PRE-CHECK] BLOCKED {action} {ticker}: {_pc['reason']}")
+                        return TradeResult(
+                            status="REJECTED_INSTITUTIONAL",
+                            ticker=ticker,
+                            action=action,
+                            reason=_pc["reason"],
+                        )
+                else:
+                    logger.debug("[PRE-CHECK] no chart data for %s — skipped", ticker)
+            except Exception as _pc_err:
+                logger.debug("[PRE-CHECK] error (allowing): %s", _pc_err)
 
         # === OLIVER VELEZ DIRECTIONAL GATE (every entry must pass) ===
         _velez_ok, _velez_reason = self._velez_trend_allows(ticker, action)
