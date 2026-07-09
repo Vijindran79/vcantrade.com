@@ -43,6 +43,7 @@ from core.ghost_executor import GhostExecutor
 from core.headmaster_agent import HeadmasterSupervisor
 from core.hybrid_execution_gateway import HybridExecutionGateway
 from core.ladder_exit import ladder_exit_manager
+from core.profit_guard import evaluate as pg_evaluate, htf_room_from_prices as pg_htf_room
 from core.pnl_tracker import pnl_tracker, reversal_detector, adaptive_risk
 from core.liquidity_engine import LiquidityEngine
 from core.reversal_engine import reversal_engine
@@ -382,8 +383,8 @@ class VcaniTradeEngine:
         self._liquidity_engine = LiquidityEngine()
         self._global_sitout_until = 0.0  # time.time() — global cooldown after liquidity exit
         # Buffer: exit this far BEFORE the zone. Uses the SMALLER of the two.
-        self._LIQUIDITY_EXIT_BUFFER_PCT = 0.001   # 0.1% (~62 pts on BTC @ 62k)
-        self._LIQUIDITY_EXIT_BUFFER_PTS = 10.0     # 10 points (your "few pips" rule)
+        self._LIQUIDITY_EXIT_BUFFER_PCT = 0.0005   # Tightened: 0.05% (~31 pts on BTC @ 62k)
+        self._LIQUIDITY_EXIT_BUFFER_PTS = 5.0      # Tightened: 5 points for early profit lock
         self._LIQUIDITY_SITOUT_SECONDS = 180       # sit out 3 min after liquidity exit
 
         # === HARD PROFIT TARGET ===
@@ -497,6 +498,9 @@ class VcaniTradeEngine:
         except Exception:
             pass
         self._log_dashboard(f"[ENGINE] Runtime mode synced: {normalized}")
+        # Re-study the market whenever trading mode is (re)activated
+        if self.is_running:
+            self._begin_market_study()
         if normalized == "AUTONOMOUS" and self.is_running:
             QTimer.singleShot(100, self._run_scanner_cycle)
 
@@ -631,8 +635,13 @@ class VcaniTradeEngine:
                 _speak_alert(f"{action} {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
             elif action == "WAIT" and bool(getattr(config, "ENABLE_WAIT_NARRATION", False)):
                 _speak_alert(f"Wait on {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
+            _confidence_val = float(payload.get("confidence", 0.0) or 0.0)
+            _auto_exec_threshold = float(getattr(config, "HAWK_AUTO_EXEC_CONFIDENCE_THRESHOLD", 0.68) or 0.68)
             if self.current_mode == "AUTONOMOUS" and action in {"BUY", "SELL"}:
                 logger.info("[AUTO] Dispatching autonomous execution for %s %s", action, ticker)
+                QTimer.singleShot(0, lambda: self.process_validated_execution_path(payload))
+            elif self.current_mode == "TEACHER" and action in {"BUY", "SELL"} and _confidence_val >= _auto_exec_threshold:
+                logger.info("[TEACHER-AUTO] High confidence signal auto-executing in TEACHER mode: %s %s at %.1f%%", action, ticker, _confidence_val * 100)
                 QTimer.singleShot(0, lambda: self.process_validated_execution_path(payload))
         except Exception as _brain_err:
             logger.error("[BRAIN] Signal handler error for %s %s: %s", ticker, action, _brain_err)
@@ -661,6 +670,14 @@ class VcaniTradeEngine:
                     self.positions.remove(_pos)
                 except ValueError:
                     pass
+
+        # === MARKET STUDY GATE ===
+        # While the board is still studying the chart, withhold ALL entries.
+        if self._market_study_active():
+            _remain = int(self._study_until - time.time())
+            logger.info("[STUDY] Execution paused during market study — %ds remaining", _remain)
+            self._log_dashboard(f"[STUDY] Market study in progress — execution paused, ready in {_remain}s")
+            return
 
         # === DUPLICATE POSITION GUARD ===
         # Don't open another trade if we already have a position open on this ticker.
@@ -891,7 +908,7 @@ class VcaniTradeEngine:
             else:
                 take_profit = round(entry - _tp_pips, 2)
             logger.info(
-                "[SAFETY] No take profit in signal — set to 100 pips: TP %.2f",
+"[SAFETY] No take profit in signal — set to 100 pips: TP %.2f",
                 take_profit,
             )
 
@@ -907,8 +924,13 @@ class VcaniTradeEngine:
             pass
 
         if self.current_mode != "AUTONOMOUS":
-            self._log_dashboard(f"[TEACHER] Approval required for {action} {ticker}")
-            return
+            hawk_auto_exec_threshold = float(getattr(config, "HAWK_AUTO_EXEC_CONFIDENCE_THRESHOLD", 0.95) or 0.95)
+            if _effective_conf >= hawk_auto_exec_threshold:
+                logger.info("[TEACHER-AUTO] High confidence signal overriding TEACHER mode: %s %s at %.1f%%", action, ticker, _effective_conf * 100)
+                self._log_dashboard(f"[TEACHER-AUTO] Auto-executing {action} {ticker} at {int(_effective_conf * 100)}% confidence")
+            else:
+                self._log_dashboard(f"[TEACHER] Approval required for {action} {ticker}")
+                return
 
         result = self.execute_trade(ticker, action, entry, stop_loss, take_profit)
         self._log_dashboard(f"[EXEC] {result.status}: {action} {ticker} {result.reason or ''}")
@@ -1075,6 +1097,8 @@ class VcaniTradeEngine:
             self._log_dashboard("[DATA-SCOUT] Listener armed")
         
         logger.info("[ENGINE] VcaniTrade Engine STARTED")
+        # Open a Market Study window so the LLM studies the chart before any trade
+        self._begin_market_study()
     
     def _start_scanner_timer(self):
         """Start periodic scanner using QTimer.
@@ -1106,10 +1130,10 @@ class VcaniTradeEngine:
         except Exception:
             pass
         
-        # FAST EXIT MONITOR: Check open positions every 3 seconds for instant profit-taking
+        # FAST EXIT MONITOR: Check open positions every 1 second for instant profit-taking (tightened for prop firm)
         self._exit_timer = QTimer()
         self._exit_timer.timeout.connect(self._run_position_exit_scan)
-        self._exit_timer.start(3000)  # 3 seconds
+        self._exit_timer.start(1000)  # 1 second - aggressive for prop firm exam
 
         # STALE POSITION JANITOR: Clear phantom positions every 30s so a stuck
         # tracker can never block new entries forever (even if no signal arrives)
@@ -1127,6 +1151,29 @@ class VcaniTradeEngine:
             pass
         self._log_dashboard(f"[SCAN] Scanner armed: {len(self.current_watchlist)} market(s), {_interval:.2f}s structural cycle")
         self._log_dashboard(f"[SCAN] Set scan_interval_seconds in trading_settings.json (range {_min:.1f}-{_max:.1f}s) to change at runtime.")
+
+    def _begin_market_study(self):
+        """Open a Market Study window: the LLM/scanner keep analyzing the chart,
+        but execution is blocked until the window ends. Prevents impulsive
+        entries the instant the board starts."""
+        if not getattr(config, "MARKET_STUDY_ENABLED", True):
+            return
+        secs = float(getattr(config, "MARKET_STUDY_SECONDS", 180) or 180)
+        if secs <= 0:
+            return
+        self._study_until = time.time() + secs
+        self._log_dashboard(
+            f"[STUDY] Market study started — LLM reading the chart, execution paused for {int(secs)}s"
+        )
+        logger.info("[STUDY] Market study window opened for %.0fs", secs)
+        try:
+            QTimer.singleShot(300, self._run_scanner_cycle)
+        except Exception:
+            pass
+
+    def _market_study_active(self) -> bool:
+        su = getattr(self, "_study_until", 0)
+        return bool(su) and time.time() < su
 
     def update_scan_interval(self, new_seconds: float = None) -> float:
         """Reload the scan interval from trading_settings.json and rearm the QTimer.
@@ -1200,10 +1247,86 @@ class VcaniTradeEngine:
         
         logger.info("[ENGINE] VcaniTrade Engine STOPPED")
     
+    def _velez_trend_allows(self, ticker: str, action: str):
+        """Oliver Velez directional gate on the LIVE chart.
+
+        BUY  only if price is ABOVE EMA20 AND ABOVE EMA200.
+        SELL only if price is BELOW  EMA20 AND BELOW  EMA200.
+        Price between the EMAs = NO TRADE (rejected).
+
+        Uses the same live chart data the scanner uses, so a brain/swarm
+        signal reasoned on a higher timeframe cannot slip through counter-trend.
+        Returns (allowed: bool, reason: str).
+        """
+        if not getattr(config, "VELEZ_GATE_ENABLED", True):
+            return True, "gate disabled"
+        action = str(action or "").upper()
+        if action not in ("BUY", "SELL"):
+            return True, "non-directional"
+        try:
+            interval = str(getattr(config, "VELEZ_CHART_INTERVAL", "1m") or "1m")
+            df = self.scanner._fetch_market_data(ticker, interval=interval)
+            if df is None or len(df) < 20:
+                # No live chart data: do not block blindly, but warn.
+                return True, "no chart data (skipped)"
+            close = df["Close"] if "Close" in df else df.get("close")
+            if close is None or len(close) < 20:
+                return True, "no close data (skipped)"
+            price = float(close.iloc[-1])
+            ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+            have200 = len(close) >= 200
+            ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1]) if have200 else 0.0
+            require200 = getattr(config, "VELEZ_REQUIRE_200EMA", True) and have200
+
+            if action == "BUY":
+                if price <= ema20:
+                    return False, f"BUY blocked: price {price:.2f} ≤ 20EMA {ema20:.2f} (Velez)"
+                if require200 and price <= ema200:
+                    return False, f"BUY blocked: price {price:.2f} ≤ 200EMA {ema200:.2f} (Velez)"
+                if have200 and ema20 < ema200:
+                    return False, f"BUY blocked: 20EMA {ema20:.2f} below 200EMA {ema200:.2f} (bear structure)"
+                return True, f"BUY ok: price {price:.2f} > 20EMA {ema20:.2f}" + (f" > 200EMA {ema200:.2f}" if have200 else "")
+            else:  # SELL
+                if price >= ema20:
+                    return False, f"SELL blocked: price {price:.2f} ≥ 20EMA {ema20:.2f} (Velez)"
+                if require200 and price >= ema200:
+                    return False, f"SELL blocked: price {price:.2f} ≥ 200EMA {ema200:.2f} (Velez)"
+                if have200 and ema20 > ema200:
+                    return False, f"SELL blocked: 20EMA {ema20:.2f} above 200EMA {ema200:.2f} (bull structure)"
+                return True, f"SELL ok: price {price:.2f} < 20EMA {ema20:.2f}" + (f" < 200EMA {ema200:.2f}" if have200 else "")
+        except Exception as e:
+            logger.debug("[VELEZ-GATE] eval error (allowing): %s", e)
+            return True, f"eval error (skipped): {e}"
+
     def execute_trade(self, ticker: str, action: str, entry: float, sl: float, tp: float) -> TradeResult:
         """Execute a trade with multi-asset concurrency control.
         RULE: Up to MAX_CONCURRENT positions on different tickers. No duplicates on same ticker."""
-        
+
+        # === MARKET STUDY GATE (withhold entries while the board studies) ===
+        if self._market_study_active():
+            _remain = int(self._study_until - time.time())
+            logger.info("[STUDY] Execution paused during market study — %ds remaining", _remain)
+            self._log_dashboard(f"[STUDY] Market study in progress — execution paused, ready in {_remain}s")
+            return TradeResult(
+                status="REJECTED_STUDY",
+                ticker=ticker,
+                action=action,
+                reason=f"Market study in progress ({_remain}s remaining)",
+            )
+
+        # === OLIVER VELEZ DIRECTIONAL GATE (every entry must pass) ===
+        _velez_ok, _velez_reason = self._velez_trend_allows(ticker, action)
+        if not _velez_ok:
+            logger.warning("[VELEZ-GATE] REJECTED counter-trend %s %s: %s", action, ticker, _velez_reason)
+            self._log_dashboard(f"[VELEZ-GATE] BLOCKED {action} {ticker}: {_velez_reason}")
+            return TradeResult(
+                status="REJECTED_TREND",
+                ticker=ticker,
+                action=action,
+                reason=_velez_reason,
+            )
+        logger.info("[VELEZ-GATE] %s %s passed: %s", action, ticker, _velez_reason)
+
         # SAFETY: Remove positions older than 4 hours (likely phantoms).
         # 4 hours is long enough for any real futures trade.
         import time as _time
@@ -1494,7 +1617,7 @@ class VcaniTradeEngine:
                 current_peak = profit
             if current_peak > 0:
                 pullback_pct = (current_peak - profit) / current_peak
-                if pullback_pct > 0.40 and profit > 0:
+                if pullback_pct > 0.30 and profit > 0:  # Tightened from 0.40 to 0.30
                     return True, f"U-TURN: Peak {current_peak:.2f}, now {profit:.2f} ({pullback_pct*100:.0f}% pullback)"
                 if profit < 0 and current_peak > 0:
                     return True, f"U-TURN: Was +{current_peak:.2f}, now {profit:.2f} - protect capital"
@@ -1663,6 +1786,84 @@ class VcaniTradeEngine:
             logger.debug("[LIQ-EXIT] Error checking %s: %s", ticker, e)
             return False, ""
 
+    def _check_profit_guard_exit(self, position):
+        """Profit Guard: let winners run, bank them on a 10-15% pullback.
+
+        Returns (should_exit, reason). The actual close + unit confirmation is
+        handled by close_position() -> rpa_executor.flatten_position(), which
+        closes EVERY unit for the ticker and then clears local state, confirming
+        no position remains open.
+        """
+        if not getattr(config, "PROFIT_GUARD_ENABLED", True):
+            return False, ""
+        ticker = position.get("asset")
+        action = str(position.get("action", "BUY") or "BUY").upper()
+        entry = float(position.get("entry_price", 0) or 0)
+        stop = float(position.get("stop_loss", 0) or 0)
+        price = self._fetch_current_price(ticker)
+        if entry <= 0 or not price or price <= 0:
+            return False, ""
+
+        peak_key = f"_pg_peak_{ticker}"
+        armed_key = f"_pg_armed_{ticker}"
+        be_key = f"_pg_be_{ticker}"
+        prev_peak = getattr(self, peak_key, 0.0)
+        armed = getattr(self, armed_key, False)
+
+        # session awareness: widen the leash during busy/high-volume sessions
+        widen = 0.0
+        if getattr(config, "PROFIT_GUARD_SESSION_WIDEN_PCT", 0):
+            try:
+                if getattr(self, "session_detector", None) and self.session_detector.is_peak_volatility():
+                    widen = float(getattr(config, "PROFIT_GUARD_SESSION_WIDEN_PCT", 0) or 0)
+            except Exception:
+                pass
+
+        # higher-timeframe room: tighten when the trend runs out of space
+        room = "UNKNOWN"
+        if getattr(config, "PROFIT_GUARD_USE_HTF_ROOM", True):
+            try:
+                room = pg_htf_room(ticker, price, getattr(self, "scanner", None))
+            except Exception:
+                room = "UNKNOWN"
+
+        res = pg_evaluate(
+            entry=entry,
+            stop=stop,
+            action=action,
+            price=price,
+            peak=prev_peak,
+            armed=armed,
+            trigger_pct=float(getattr(config, "PROFIT_GUARD_TRIGGER_PCT", 100.0)),
+            pullback_pct=float(getattr(config, "PROFIT_GUARD_PULLBACK_PCT", 12.5)),
+            session_widen_pct=widen,
+            htf_room=room,
+        )
+
+        setattr(self, peak_key, res["peak"])
+        setattr(self, armed_key, res["armed"])
+
+        # break-even lock once armed (guarantee no loss on the runner)
+        if res.get("break_even") and getattr(config, "PROFIT_GUARD_BREAK_EVEN", True) and not getattr(self, be_key, False):
+            try:
+                self.rpa_executor.update_stop(ticker, action, float(entry))
+                setattr(self, be_key, True)
+                logger.info("[PROFIT-GUARD] Break-even stop moved to %.2f for %s", entry, ticker)
+            except Exception as _be_err:
+                logger.debug("[PROFIT-GUARD] break-even update skipped: %s", _be_err)
+
+        if res["exit"]:
+            # re-entry: keep sit-out short so the bot can hunt the next opportunity
+            _sit = float(getattr(config, "PROFIT_GUARD_REENTRY_SITOUT_SECONDS", 0) or 0)
+            if _sit > 0:
+                self._global_sitout_until = time.time() + _sit
+            return True, res["reason"]
+
+        if res["armed"]:
+            logger.debug("[PROFIT-GUARD] %s momentum=%s profit=+%.0f%% peak=+%.0f%% trail=%.2f room=%s",
+                         ticker, res["momentum"], res["profit_pct"], res["run_up_pct"], res["trail"], room)
+        return False, ""
+
     def _run_position_exit_scan(self):
         """Scan open positions for quick exit/stop guidance every 5 seconds.
         Also runs the Headmaster Supervisor for advanced exit decisions."""
@@ -1673,6 +1874,22 @@ class VcaniTradeEngine:
             ticker = position.get("asset")
             if not ticker:
                 continue
+
+            # ── PROFIT GUARD (secure profits like a professional) ──
+            # Runs FIRST. Lets the trade flow while momentum is strong, arms a
+            # trailing stop once in solid profit, and exits the FULL position
+            # on a 10-15% pullback from the peak. Full close uses flatten_position
+            # which closes every unit, then confirms no position remains.
+            try:
+                _pg_exit, _pg_reason = self._check_profit_guard_exit(position)
+                if _pg_exit:
+                    logger.info("[PROFIT-GUARD] %s", _pg_reason)
+                    self._log_dashboard(f"[PROFIT-GUARD] CLOSE {ticker}!")
+                    _speak_alert(f"Profit secured on {ticker}. Pullback hit. Closing.", min_interval_seconds=2.0)
+                    QTimer.singleShot(0, lambda t=ticker, r=_pg_reason: self.close_position(t, r))
+                    continue
+            except Exception as _pg_err:
+                logger.debug("[PROFIT-GUARD] Error: %s", _pg_err)
 
             # ── HARD PROFIT TARGET (non-negotiable) ───────────────
             # Close the ENTIRE position when profit reaches 100 pips.
@@ -1688,6 +1905,58 @@ class VcaniTradeEngine:
                             pnl_pips = current_price - entry_price
                         else:
                             pnl_pips = entry_price - current_price
+
+                        # Track peak profit for U-turn protection + time since peak
+                        peak_key = f"_peak_profit_{ticker}"
+                        peak_time_key = f"_peak_time_{ticker}"
+                        lock_key = f"_lock_taken_{ticker}"
+                        current_peak = getattr(self, peak_key, 0.0)
+                        peak_time = getattr(self, peak_time_key, 0.0)
+                        lock_taken = getattr(self, lock_key, False)
+                        now = time.time()
+                        
+                        if pnl_pips > current_peak:
+                            setattr(self, peak_key, pnl_pips)
+                            setattr(self, peak_time_key, now)
+                            setattr(self, lock_key, False)
+                            current_peak = pnl_pips
+                            peak_time = now
+                            lock_taken = False
+                        
+                        # PEAK PROFIT LOCK TAKE: Exit within 5-10 seconds after peak
+                        # Suppressed once the Profit Guard owns a real runner, so
+                        # big winners are trailed (10-15% pullback), not cut at a
+                        # 1.5-pip wiggle. Still protects tiny spikes from full give-back.
+                        _pg_armed = getattr(self, f"_pg_armed_{ticker}", False)
+                        if (not lock_taken and current_peak >= 10 and not _pg_armed):  # 10 pips min for lock-take
+                            _time_since_peak = now - peak_time
+                            _decline_pct = (current_peak - pnl_pips) / current_peak if current_peak > 0 else 0
+                            _should_exit = False
+                            _exit_reason = ""
+                            
+                            # Exit on 15% decline after peak (fast U-turn)
+                            if _decline_pct > 0.15:
+                                _should_exit = True
+                                _exit_reason = f"PEAK-LOCK: {action} {ticker} peaked +{current_peak:.1f}, declined {_decline_pct*100:.0f}% -> exiting at +{pnl_pips:.1f}"
+                            # OR exit after 7 seconds at any profit (time-based lock)
+                            elif _time_since_peak >= 7.0 and pnl_pips >= 5:
+                                _should_exit = True
+                                _exit_reason = f"PEAK-LOCK: {action} {ticker} locked +{pnl_pips:.1f} after {_time_since_peak:.0f}s since peak +{current_peak:.1f}"
+                            
+                            if _should_exit:
+                                setattr(self, lock_key, True)
+                                logger.info("[PEAK-LOCK] %s", _exit_reason)
+                                self._log_dashboard(f"[PEAK-LOCK] CLOSE {ticker}! {_exit_reason}")
+                                QTimer.singleShot(0, lambda t=ticker, r=_exit_reason: self.close_position(t, r))
+                                continue
+
+                        # IMMEDIATE EXIT: Profit evaporated (protecting from U-turn eat-all)
+                        if pnl_pips <= 0 and current_peak > 0:
+                            reason = f"ZERO PROTECT: {action} {ticker} profit gone (was +{current_peak:.1f})"
+                            logger.warning("[ZERO-PROTECT] %s", reason)
+                            self._log_dashboard(f"[ZERO-PROTECT] CLOSE {ticker}! Profit evaporated")
+                            QTimer.singleShot(0, lambda t=ticker, r=reason: self.close_position(t, r))
+                            continue
 
                         if pnl_pips >= self._HARD_PROFIT_TARGET_PIPS:
                             reason = (
@@ -1986,8 +2255,11 @@ class VcaniTradeEngine:
                         self.positions.remove(pos)
                         _closed_positions.append(pos)
                 _pk = f"_peak_profit_{ticker}"
-                if hasattr(self, _pk):
-                    delattr(self, _pk)
+                _pt = f"_peak_time_{ticker}"
+                _lk = f"_lock_taken_{ticker}"
+                for _attr in [_pk, _pt, _lk, f"_pg_peak_{ticker}", f"_pg_armed_{ticker}", f"_pg_be_{ticker}"]:
+                    if hasattr(self, _attr):
+                        delattr(self, _attr)
             except Exception as pos_err:
                 logger.error("[CLOSE] Failed to remove %s positions: %s", ticker, pos_err)
 

@@ -21,9 +21,9 @@ MOUSE_HUMAN_DELAY_MAX = 1.6    # Max reaction time
 # ===== STRUCTURAL AI FEATURE FLAGS =====
 USE_VISION = True  # ENABLED: vision model reads chart screenshots for pattern confirmation
 FAST_VISION_ENABLED = True  # ENABLED: fast vision scan on every signal
-VLM_MODEL = os.getenv("VLM_MODEL", "qwen3.5:4b")  # best balance: vision + thinking + speed
-MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "qwen3.5:4b")
-FAST_CHART_VISION_MODEL = os.getenv("FAST_CHART_VISION_MODEL", "moondream")  # fast fallback for quick checks
+VLM_MODEL = os.getenv("VLM_MODEL", "qwen3-vl:2b")  # small, fast, accurate chart/OCR reader
+MULTI_ASSET_VISION_MODEL = os.getenv("MULTI_ASSET_VISION_MODEL", "qwen3-vl:2b")
+FAST_CHART_VISION_MODEL = os.getenv("FAST_CHART_VISION_MODEL", "qwen3-vl:2b")  # was moondream (weak OCR)
 MIN_CONFIDENCE_THRESHOLD = float(os.getenv("MIN_CONFIDENCE_THRESHOLD", "0.90"))  # HAWK MODE: was 0.60, raised for 90% WR
 SAVE_DEBUG_SCREENSHOTS = os.getenv("SAVE_DEBUG_SCREENSHOTS", "false").lower() == "true"
 
@@ -61,6 +61,38 @@ AUTONOMOUS_BREAK_EVEN_BUFFER_PCT = float(os.getenv("AUTONOMOUS_BREAK_EVEN_BUFFER
 # Hard profit target — close entire position when profit reaches this many pips
 # Non-negotiable exit. Set to 0 to disable.
 HARD_PROFIT_TARGET_PIPS = float(os.getenv("HARD_PROFIT_TARGET_PIPS", "100"))
+
+# ===== OLIVER VELEZ TREND GATE (directional safety) =====
+# Hard rule enforced on EVERY entry, on the live chart:
+#   BUY  only if price is ABOVE EMA20 AND ABOVE EMA200
+#   SELL only if price is BELOW  EMA20 AND BELOW  EMA200
+#   (price between the EMAs = NO TRADE). Stops counter-trend entries.
+VELEZ_GATE_ENABLED = os.getenv("VELEZ_GATE_ENABLED", "true").lower() == "true"
+VELEZ_REQUIRE_200EMA = os.getenv("VELEZ_REQUIRE_200EMA", "true").lower() == "true"
+VELEZ_CHART_INTERVAL = os.getenv("VELEZ_CHART_INTERVAL", "1m")
+
+# ===== MARKET STUDY / WARM-UP (observe before executing) =====
+# On board start (and when trading mode is activated) the bot studies the
+# chart via the LLM/swarm for this many seconds BEFORE it is allowed to
+# execute. The scanner+swarm keep analyzing the whole time; we just withhold
+# entries so the bot never trades blindly the moment the board launches.
+# 2-5 minutes is the sweet spot (LLM chart study itself takes ~20-40s).
+MARKET_STUDY_ENABLED = os.getenv("MARKET_STUDY_ENABLED", "true").lower() == "true"
+MARKET_STUDY_SECONDS = float(os.getenv("MARKET_STUDY_SECONDS", "180"))  # 3 min default
+
+# ===== PROFIT GUARD (secure profits like a professional) =====
+# Engages once a sniper entry is in solid profit, then trails a stop at a
+# 10-15% pullback from the peak so winners are banked instead of given back.
+# "100% profit" is measured as % of risk (entry - stop): 100 = +1R.
+PROFIT_GUARD_ENABLED = os.getenv("PROFIT_GUARD_ENABLED", "true").lower() == "true"
+PROFIT_GUARD_TRIGGER_PCT = float(os.getenv("PROFIT_GUARD_TRIGGER_PCT", "100.0"))
+PROFIT_GUARD_PULLBACK_PCT = float(os.getenv("PROFIT_GUARD_PULLBACK_PCT", "12.5"))
+PROFIT_GUARD_SESSION_WIDEN_PCT = float(os.getenv("PROFIT_GUARD_SESSION_WIDEN_PCT", "5.0"))
+PROFIT_GUARD_BREAK_EVEN = os.getenv("PROFIT_GUARD_BREAK_EVEN", "true").lower() == "true"
+PROFIT_GUARD_USE_HTF_ROOM = os.getenv("PROFIT_GUARD_USE_HTF_ROOM", "true").lower() == "true"
+# After a profit-guard exit, how long to wait before hunting the next
+# opportunity. Keep short so re-entries are fast. 0 = re-enter immediately.
+PROFIT_GUARD_REENTRY_SITOUT_SECONDS = float(os.getenv("PROFIT_GUARD_REENTRY_SITOUT_SECONDS", "0"))
 
 # Default stop loss — used when signal doesn't provide one
 # NEVER trade without a stop loss. This is your safety net.
@@ -375,7 +407,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_V1_URL = os.getenv("OLLAMA_V1_URL", "http://127.0.0.1:11434")
 MICRO_BRAIN_ENABLED = os.getenv("MICRO_BRAIN_ENABLED", "true").lower() == "true"
 MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:1.5b-instruct-q4_K_M")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_TIMEOUT = 180
 JSON_OUTPUT = True
@@ -420,6 +452,7 @@ MAX_SLIPPAGE_PERCENT = float(os.getenv("MAX_SLIPPAGE_PERCENT", "0.5"))
 
 # ===== TEACHER MODE =====
 TEACHER_MODE = os.getenv("TEACHER_MODE", "False").lower() == "true"
+HAWK_AUTO_EXEC_CONFIDENCE_THRESHOLD = float(os.getenv("HAWK_AUTO_EXEC_CONFIDENCE_THRESHOLD", "0.68"))  # Sync with min_confidence_to_trade default
 
 # ===== UI FEATURE FLAGS =====
 HUD_GLASS_ENABLED = os.getenv("HUD_GLASS_ENABLED", "True").lower() == "true"
