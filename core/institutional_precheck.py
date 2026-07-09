@@ -179,7 +179,9 @@ def run_institutional_precheck(ticker: str, df: pd.DataFrame, action: str, cfg: 
 
         # ---------- VERDICT / GATE ----------
         block_sweep = bool(cfg.get("block_sweep", True))
-        block_flow = bool(cfg.get("block_flow", True))
+        require_flow = bool(cfg.get("require_flow", cfg.get("block_flow", True)))
+        flow_min = float(cfg.get("flow_min", 0.10))
+        require_discount = bool(cfg.get("require_discount", False))
         reasons = []
 
         if block_sweep and action == "BUY" and sweep.get("sweep_high"):
@@ -189,14 +191,25 @@ def run_institutional_precheck(ticker: str, df: pd.DataFrame, action: str, cfg: 
             out["block"] = True
             reasons.append("liquidity sweep of lows (don't sell the grab)")
 
-        if block_flow and flow:
+        # Sharp entries: only trade WITH order flow, not against it.
+        if require_flow and flow:
             dp = flow.get("delta_pct", 0.0)
-            if action == "BUY" and dp < -0.30:
+            if action == "BUY" and dp < flow_min:
                 out["block"] = True
-                reasons.append(f"order flow opposed (delta {dp:+.2f}, net selling)")
-            if action == "SELL" and dp > 0.30:
+                reasons.append(f"order flow not supportive (delta {dp:+.2f} < {flow_min})")
+            if action == "SELL" and dp > -flow_min:
                 out["block"] = True
-                reasons.append(f"order flow opposed (delta {dp:+.2f}, net buying)")
+                reasons.append(f"order flow not supportive (delta {dp:+.2f} > {-flow_min})")
+
+        # Sharp entries: buy in discount, sell in premium (value-area context).
+        if require_discount and profile:
+            _pos = profile.get("price_position", "")
+            if action == "BUY" and str(_pos).startswith("PREMIUM"):
+                out["block"] = True
+                reasons.append("price in premium - buy in discount")
+            if action == "SELL" and str(_pos).startswith("DISCOUNT"):
+                out["block"] = True
+                reasons.append("price in discount - sell in premium")
 
         # Build human-readable summary
         vstr = f"volx{vol_parts.get('vol_ratio','?')}" if vol_parts else "vol=n/a"

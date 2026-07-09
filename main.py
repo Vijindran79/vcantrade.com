@@ -1326,6 +1326,9 @@ class VcaniTradeEngine:
                         cfg={
                             "block_sweep": getattr(config, "INSTITUTIONAL_BLOCK_SWEEP", True),
                             "block_flow": getattr(config, "INSTITUTIONAL_BLOCK_ORDERFLOW", True),
+                            "require_flow": getattr(config, "INSTITUTIONAL_REQUIRE_FLOW", True),
+                            "flow_min": float(getattr(config, "INSTITUTIONAL_FLOW_MIN", 0.10) or 0.10),
+                            "require_discount": getattr(config, "INSTITUTIONAL_REQUIRE_DISCOUNT", False),
                         },
                     )
                     logger.info("[PRE-CHECK] %s", _pc["summary"])
@@ -2012,8 +2015,14 @@ class VcaniTradeEngine:
             # ── EMA9 RETEST EXIT (your core strategy) ─────────────
             # Exit when price closes below EMA9 after being above it.
             # This is the "escape early at first sign of weakness" rule.
+            # Once the Profit Guard owns the runner (in solid profit) we let it
+            # run and bank on the pullback instead of chopping a winner here.
+            _pg_armed = getattr(self, f"_pg_armed_{ticker}", False)
             try:
-                _ema9_exit, _ema9_reason = self._check_ema9_retest_exit(position)
+                _ema9_exit = False
+                _ema9_reason = ""
+                if not _pg_armed:
+                    _ema9_exit, _ema9_reason = self._check_ema9_retest_exit(position)
                 if _ema9_exit:
                     logger.info("[EMA9-EXIT] %s: %s", ticker, _ema9_reason)
                     self._log_dashboard(f"[EMA9-EXIT] CLOSE {ticker}! {_ema9_reason}")
@@ -2025,7 +2034,10 @@ class VcaniTradeEngine:
 
             # HAWK U-TURN CHECK
             try:
-                _should_exit, _exit_reason = self._check_u_turn_exit(position)
+                _should_exit = False
+                _exit_reason = ""
+                if not _pg_armed:
+                    _should_exit, _exit_reason = self._check_u_turn_exit(position)
                 if _should_exit:
                     self._log_dashboard(f"[U-TURN] CLOSE {ticker} NOW! {_exit_reason}")
                     _speak_alert(f"U-turn on {ticker}. Taking profit.", min_interval_seconds=3.0)
@@ -2038,8 +2050,12 @@ class VcaniTradeEngine:
             # Exit a few pips before the nearest liquidation zone.
             # This is your "escape early" strategy — lock in profit
             # before price reaches the zone where reversals happen.
+            # Yields to the Profit Guard once armed so winners can run.
             try:
-                _liq_exit, _liq_reason = self._check_liquidity_early_exit(position)
+                _liq_exit = False
+                _liq_reason = ""
+                if not _pg_armed:
+                    _liq_exit, _liq_reason = self._check_liquidity_early_exit(position)
                 if _liq_exit:
                     logger.info("[LIQ-EXIT] %s: %s", ticker, _liq_reason)
                     self._log_dashboard(f"[LIQ-EXIT] CLOSE {ticker}! {_liq_reason}")

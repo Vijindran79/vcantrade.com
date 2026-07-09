@@ -88,6 +88,12 @@ MARKET_STUDY_SECONDS = float(os.getenv("MARKET_STUDY_SECONDS", "180"))  # 3 min 
 INSTITUTIONAL_GATE_ENABLED = os.getenv("INSTITUTIONAL_GATE_ENABLED", "true").lower() == "true"
 INSTITUTIONAL_BLOCK_SWEEP = os.getenv("INSTITUTIONAL_BLOCK_SWEEP", "true").lower() == "true"
 INSTITUTIONAL_BLOCK_ORDERFLOW = os.getenv("INSTITUTIONAL_BLOCK_ORDERFLOW", "true").lower() == "true"
+# Sharper entries: require order flow to SUPPORT the direction (trade with the
+# flow, not against it). flow_min is the min cumulative-delta% to allow a trade.
+INSTITUTIONAL_REQUIRE_FLOW = os.getenv("INSTITUTIONAL_REQUIRE_FLOW", "true").lower() == "true"
+INSTITUTIONAL_FLOW_MIN = float(os.getenv("INSTITUTIONAL_FLOW_MIN", "0.10"))
+# Optional extra filter: only BUY in discount / SELL in premium (value area).
+INSTITUTIONAL_REQUIRE_DISCOUNT = os.getenv("INSTITUTIONAL_REQUIRE_DISCOUNT", "false").lower() == "true"
 
 # ===== PROFIT GUARD (secure profits like a professional) =====
 # Engages once a sniper entry is in solid profit, then trails a stop at a
