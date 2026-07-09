@@ -78,7 +78,10 @@ VELEZ_CHART_INTERVAL = os.getenv("VELEZ_CHART_INTERVAL", "1m")
 # entries so the bot never trades blindly the moment the board launches.
 # 2-5 minutes is the sweet spot (LLM chart study itself takes ~20-40s).
 MARKET_STUDY_ENABLED = os.getenv("MARKET_STUDY_ENABLED", "true").lower() == "true"
-MARKET_STUDY_SECONDS = float(os.getenv("MARKET_STUDY_SECONDS", "180"))  # 3 min default
+# ===== SESSION / MARKET-HOURS GATE =====
+# Block entries when the market for that ticker is closed (weekend, holiday,
+# off-hours for the asset class). Crypto trades 24/7 so it is never blocked.
+SESSION_GATE_ENABLED = os.getenv("SESSION_GATE_ENABLED", "true").lower() == "true"
 
 # ===== INSTITUTIONAL PRE-CHECK (analyze before every order) =====
 # Runs VOLUME + VOLUME PROFILE (POC/value area) + ORDER FLOW (cumulative

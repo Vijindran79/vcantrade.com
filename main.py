@@ -1315,6 +1315,28 @@ class VcaniTradeEngine:
                 reason=f"Market study in progress ({_remain}s remaining)",
             )
 
+        # === SESSION / MARKET-HOURS GATE (don't enter a closed market) ===
+        if getattr(config, "SESSION_GATE_ENABLED", True):
+            try:
+                _sd = getattr(self, "session_detector", None)
+                if _sd is not None:
+                    _crypto = is_crypto_ticker(ticker)
+                    _weekend_closed = (not _crypto) and _sd.is_weekend_mode()
+                    _no_new = not _sd.should_allow_new_trades(ticker)
+                    if _weekend_closed or _no_new:
+                        _ctx = _sd.get_session_context()
+                        _sess = str(_ctx.get("primary_session", "CLOSED")) if isinstance(_ctx, dict) else "CLOSED"
+                        logger.info("[SESSION] No new trades for %s — market %s (standing aside)", ticker, _sess)
+                        self._log_dashboard(f"[SESSION] Market {_sess} — standing aside, no entries on {ticker}")
+                        return TradeResult(
+                            status="REJECTED_SESSION_CLOSED",
+                            ticker=ticker,
+                            action=action,
+                            reason=f"Market closed ({_sess})",
+                        )
+            except Exception as _sess_err:
+                logger.debug("[SESSION] gate error (allowing): %s", _sess_err)
+
         # === INSTITUTIONAL PRE-CHECK (volume / profile / order flow / sweep) ===
         if getattr(config, "INSTITUTIONAL_GATE_ENABLED", True):
             try:
