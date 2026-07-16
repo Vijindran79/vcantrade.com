@@ -9,7 +9,7 @@ Designed for BlackRock-grade institutional reporting.
 import logging
 import math
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -52,8 +52,8 @@ class PerformanceMetrics:
             "pnl": pnl,
             "return_pct": ret * 100,
             "hold_sec": hold_time_sec,
-            "entry_time": entry_time or datetime.utcnow().isoformat(),
-            "exit_time": exit_time or datetime.utcnow().isoformat(),
+            "entry_time": entry_time or datetime.now(timezone.utc).isoformat(),
+            "exit_time": exit_time or datetime.now(timezone.utc).isoformat(),
             "is_win": pnl > 0,
         }
         self.trades.append(trade)
@@ -67,7 +67,7 @@ class PerformanceMetrics:
         prev_eq = self.equity_curve[-1]["equity"] if self.equity_curve else 0.0
         new_eq = prev_eq + pnl
         self.equity_curve.append({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "equity": new_eq,
             "pnl": pnl,
         })
@@ -226,7 +226,7 @@ class PerformanceMetrics:
         Full institutional-grade report. What BlackRock's risk team sees.
         """
         return {
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "total_trades": self.total_trades(),
             "total_pnl": round(self.total_pnl(), 2),
             "win_rate_pct": round(self.win_rate(), 2),

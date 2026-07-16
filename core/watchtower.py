@@ -17,7 +17,7 @@ import logging
 import time
 import statistics
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -386,11 +386,11 @@ class WatchtowerScanner(QThread):
         # Check cooldown
         last_alert = self.alert_cooldowns.get(alert.asset)
         if last_alert:
-            elapsed = (datetime.utcnow() - last_alert).total_seconds()
+            elapsed = (datetime.now(timezone.utc) - last_alert).total_seconds()
             if elapsed < self.alert_cooldown_seconds:
                 return  # Still in cooldown
 
-        self.alert_cooldowns[alert.asset] = datetime.utcnow()
+        self.alert_cooldowns[alert.asset] = datetime.now(timezone.utc)
         self.alert_detected.emit(alert)
         logger.warning(
             f"WATCHTOWER ALERT: [{alert.severity}] {alert.alert_type} on "

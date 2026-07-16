@@ -22,7 +22,7 @@ import time
 import asyncio
 import threading
 from numbers import Number
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
@@ -71,7 +71,7 @@ class TechnicalSignal:
         )
         self.strength = strength  # 0.0-1.0
         self.metadata = metadata or {}
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(timezone.utc)
 
 
 class Scanner:
@@ -374,7 +374,22 @@ class Scanner:
                     self.status_callback(str(ticker), "scanning")
                 signal = self._scan_ticker(ticker)
                 if signal:
-                    signals.append(signal)
+                    # FLOW-ALIGN: make the scanner trade WITH the live order-flow
+                    # tape (cum delta of last 15 bars). If the scanner's direction
+                    # decisively contradicts the real-time tape, flip it. This
+                    # keeps the scanner-led design but prevents the flow-gate
+                    # from blocking every trade.
+                    signal = self._align_to_flow(signal)
+                    if signal:
+                        signals.append(signal)
+                else:
+                    # FLOW-ONLY signal: no technical setup, but the live tape
+                    # is decisively directional. Emit a SOFT signal in the
+                    # direction of the tape — the most reliable profitable edge
+                    # is simply trading WITH the order flow.
+                    flow_signal = self._flow_only_signal(str(ticker))
+                    if flow_signal:
+                        signals.append(flow_signal)
             except Exception as e:
                 logger.warning("[SCANNER] Error scanning %s: %s", ticker, e)
                 if self.status_callback:
@@ -407,24 +422,43 @@ class Scanner:
         )
 
         verdict = str(decision.get("verdict", "[SIGNAL] WAIT") or "[SIGNAL] WAIT").upper()
+        
+        # Get signal strength early for both HOLD override and confidence boost
+        signal_strength = float(getattr(signal, "strength", 0.0) or 0.0)
+        
         if self.status_callback:
             if decision.get("fallback_mode"):
                 self.status_callback(ticker, f"brain_fallback:{decision.get('brain_used', 'OLLAMA_PREDATOR')}")
             self.status_callback(ticker, f"brain_verdict:{verdict}")
 
-        # Brain can only CONFIRM or REJECT (WAIT). It cannot flip direction.
-        # The scanner's math-based direction is always correct.
-        # If brain says WAIT, we skip. If brain says BUY/SELL (either direction), we proceed
-        # with the SCANNER's original direction — not the brain's.
+        # NUCLEAR FIX: Override HOLD action when technical signal is strong
+        # If LLM says WAIT but technical signal is strong (strength >= 0.60), use scanner's direction
         if "BUY" not in verdict and "SELL" not in verdict:
-            logger.info("[SCANNER] Brain returned WAIT for %s: %s", ticker, decision.get("reasoning", ""))
-            return None
+            if signal_strength >= 0.60:
+                logger.info(
+                    "[NUCLEAR] LLM returned WAIT but technical signal strong (%.2f) - "
+                    "using scanner direction: %s",
+                    signal_strength, action
+                )
+                verdict = f"[SIGNAL] {action}"
+            else:
+                logger.info("[SCANNER] Brain returned WAIT for %s: %s", ticker, decision.get("reasoning", ""))
+                return None
 
         # USE SCANNER'S DIRECTION, not brain's. Brain is just a go/no-go gate.
         final_action = action
         logger.info("[SCANNER] Brain approved %s for %s (scanner direction: %s)", verdict, ticker, action)
         metadata = getattr(signal, "metadata", {}) or {}
         confidence = self._combined_confidence(signal, decision, action_override=final_action)
+
+        # NUCLEAR FIX: Boost LOW confidence to MEDIUM when technical signal is strong (strength >= 0.60)
+        if confidence < 0.60 and signal_strength >= 0.60:
+            confidence = max(0.60, confidence)
+            logger.info(
+                "[NUCLEAR] Boosting confidence to MEDIUM (%.2f) due to strong signal (%.2f)",
+                confidence, signal_strength
+            )
+
         return {
             "ticker": ticker,
             "action": final_action,
@@ -439,6 +473,7 @@ class Scanner:
             "h1_analysis": metadata.get("h1_analysis", {}),
             "raw_decision": decision,
             "metadata": getattr(signal, "metadata", {}) or {},
+            "investment_amount": 1000.0,
         }
 
     async def dispatch_to_local(self, trade_signal: dict) -> bool:
@@ -473,7 +508,180 @@ class Scanner:
             return "BUY"
         if "BEAR" in signal_type or "OVERBOUGHT" in signal_type:
             return "SELL"
+        # SOFT signals: extract direction from signal_type
+        if "SOFT_BUY" in signal_type or signal_type.endswith("_BUY"):
+            return "BUY"
+        if "SOFT_SELL" in signal_type or signal_type.endswith("_SELL"):
+            return "SELL"
+        if "MOMENTUM_BUY" in signal_type:
+            return "BUY"
+        if "MOMENTUM_SELL" in signal_type:
+            return "SELL"
+        if "BREAKOUT_BUY" in signal_type:
+            return "BUY"
+        if "BREAKOUT_SELL" in signal_type:
+            return "SELL"
         return "WAIT"
+
+    # --- FLOW ALIGNMENT ---------------------------------------------------
+    def _ema_structure_bearish(self, ticker):
+        """True when the 20-EMA is below the 200-EMA (bearish structure).
+
+        A BUY against a bearish EMA structure is only allowed when live
+        order flow is STRONGLY bullish (proven turn), never on a faint
+        +0.08 tape reading. This stops the bot buying into a downtrend
+        just because the tape blinked green.
+        """
+        try:
+            df = self._fetch_market_data(ticker)
+            if df is None or len(df) < 200:
+                return False
+            close = df["Close"]
+            ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+            ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
+            return ema20 < ema200
+        except Exception:
+            return False
+
+    def _align_to_flow(self, signal):
+        """Flip the signal direction so it agrees with the live order-flow tape.
+
+        Uses the same cumulative-delta formula as the institutional precheck
+        (sign(close-open) * volume over the last 15 bars, divided by total
+        volume). If the live delta is decisively bearish (<= -0.05) the
+        scanner's BUY becomes a SELL, and vice versa. If the tape is neutral
+        the signal is kept as-is.
+        """
+        try:
+            import numpy as np
+            ticker = str(getattr(signal, "ticker", "") or "")
+            if not ticker:
+                return signal
+            df = self._fetch_market_data(ticker)
+            if df is None or len(df) < 16:
+                return signal
+            close = df["Close"]; open_ = df["Open"]; vol = df["Volume"]
+            if float(vol.sum()) <= 0:
+                return signal
+            delta = np.sign((close - open_).values) * vol.values
+            last_n = min(15, len(delta))
+            cum = float(np.sum(delta[-last_n:]))
+            total = float(np.sum(vol.tail(last_n).values)) or 1.0
+            dp = round(cum / total, 3)
+            current = self._action_from_signal(signal)
+            # Decisive flow thresholds (symmetric with the precheck flow_min).
+            # A BUY against a bearish EMA structure (20<200) is only allowed
+            # when flow is STRONGLY bullish (proven turn), not on a faint
+            # +0.08 tape reading. This prevents buying into a downtrend.
+            _bear = self._ema_structure_bearish(ticker)
+            if dp <= -0.05 and current == "BUY":
+                self._flip_signal(signal, "SELL", dp)
+            elif dp >= 0.05 and current == "SELL":
+                if _bear and dp < 0.30:
+                    # Bearish structure + weak bullish flow -> do NOT flip to BUY.
+                    # Keep the SELL (follow the structure). Log it for visibility.
+                    logger.info(
+                        "[SCANNER] FLOW-ALIGN blocked BUY flip for %s: structure bearish (20<200) "
+                        "and flow only dp=%.3f (<0.30) — keeping SELL", ticker, dp)
+                    getattr(signal, "metadata", None).update({
+                        "flow_delta_pct": dp,
+                        "flow_aligned": False,
+                        "buy_blocked_bearish_structure": True,
+                    }) if isinstance(getattr(signal, "metadata", None), dict) else None
+                else:
+                    self._flip_signal(signal, "BUY", dp)
+            else:
+                getattr(signal, "metadata", None).update({
+                    "flow_delta_pct": dp,
+                    "flow_aligned": True,
+                }) if isinstance(getattr(signal, "metadata", None), dict) else None
+        except Exception as e:
+            logger.debug("[SCANNER] _align_to_flow skipped: %s", e)
+        return signal
+
+    def _flip_signal(self, signal, new_action, delta):
+        try:
+            if isinstance(getattr(signal, "metadata", None), dict):
+                signal.metadata["direction"] = new_action
+                signal.metadata["flow_delta_pct"] = delta
+                signal.metadata["flow_aligned"] = True
+                signal.metadata["flipped_from"] = self._action_from_signal(signal)
+            st = str(getattr(signal, "signal_type", "") or "")
+            if "BUY" in st:
+                signal.signal_type = st.replace("BUY", "SELL")
+            elif "SELL" in st:
+                signal.signal_type = st.replace("SELL", "BUY")
+            else:
+                signal.signal_type = f"SOFT_{new_action}"
+            logger.info(
+                "[SCANNER] FLOW-ALIGN %s flipped to %s (delta=%.3f)",
+                getattr(signal, "ticker", "?"), new_action, delta)
+        except Exception as e:
+            logger.debug("[SCANNER] _flip_signal failed: %s", e)
+
+    def _flow_only_signal(self, ticker):
+        """Generate a SOFT signal purely from live order-flow when technicals
+        are silent. Decisive tape (|delta| >= 0.10) is the most reliable edge.
+        """
+        try:
+            import numpy as np
+            df = self._fetch_market_data(ticker)
+            if df is None or len(df) < 16:
+                return None
+            close = df["Close"]; open_ = df["Open"]; vol = df["Volume"]
+            if float(vol.sum()) <= 0:
+                return None
+            delta = np.sign((close - open_).values) * vol.values
+            last_n = min(15, len(delta))
+            cum = float(np.sum(delta[-last_n:]))
+            total = float(np.sum(vol.tail(last_n).values)) or 1.0
+            dp = round(cum / total, 3)
+            # Require decisive flow (>=0.10 magnitude) so neutral markets
+            # produce no signal. A BUY against a bearish EMA structure
+            # (20<200) needs STRONG bullish flow (>=0.30) to prove a real
+            # turn — a faint +0.10 blink must not buy into a downtrend.
+            _bear = self._ema_structure_bearish(ticker)
+            if dp >= 0.10:
+                if _bear and dp < 0.30:
+                    return None  # bearish structure + weak flow -> no BUY signal
+                action = "BUY"
+            elif dp <= -0.10:
+                action = "SELL"
+            else:
+                return None
+            last_price = float(close.iloc[-1])
+            atr = float((close.diff().abs().rolling(14).mean().iloc[-1] or 0.0))
+            if atr <= 0:
+                atr = last_price * 0.001
+            if action == "BUY":
+                sl = last_price - atr * 1.5
+                tp = last_price + atr * 2.0
+            else:
+                sl = last_price + atr * 1.5
+                tp = last_price - atr * 2.0
+            meta = {
+                "direction": action,
+                "flow_delta_pct": dp,
+                "flow_aligned": True,
+                "flow_only": True,
+                "stop_loss": sl,
+                "take_profit": tp,
+                "atr": atr,
+                "last_price": last_price,
+            }
+            sig = TechnicalSignal(
+                ticker=ticker,
+                signal_type=f"SOFT_{action}",
+                strength=0.58,
+                metadata=meta,
+            )
+            logger.info(
+                "[SCANNER] FLOW-ONLY %s %s (delta=%.3f, atr=%.4f)",
+                action, ticker, dp, atr)
+            return sig
+        except Exception as e:
+            logger.debug("[SCANNER] _flow_only_signal failed: %s", e)
+            return None
 
     def _combined_confidence(self, signal: TechnicalSignal, decision: dict, action_override: Optional[str] = None) -> float:
         """Combine technical, brain, higher-timeframe, stability, and volume evidence."""
@@ -706,14 +914,19 @@ class Scanner:
             rises = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] > recent_closes[i-1])
             falls = sum(1 for i in range(1, len(recent_closes)) if recent_closes[i] < recent_closes[i-1])
 
-            # === HARD BLOCK: Price between EMA20 and EMA200 ===
-            # Oliver Velez rule: NEVER trade when price is between the EMAs.
-            # BUY requires close ABOVE both. SELL requires close BELOW both.
+            # === HARD BLOCK (relaxed): Price between EMA20 and EMA200 ===
+            # Oliver Velez rule: avoid trading when price is clearly between the
+            # EMAs. But a TINY gap (noise) should NOT kill all signals — treat as
+            # neutral so a with-flow setup (confirmed by MACD/flow) can still fire.
             _between_emas = False
             if ema20_value > 0 and ema200_value > 0:
                 _lower = min(ema20_value, ema200_value)
                 _upper = max(ema20_value, ema200_value)
-                if _lower < price < _upper:
+                _ema_gap_pct = (_upper - _lower) / _lower if _lower else 0.0
+                _struct_tol = float(getattr(config, "VELEZ_STRUCTURE_TOL", 0.0015) or 0.0015)
+                # Only treat as "between / no-trade zone" if the EMA gap is a REAL
+                # structure (beyond tolerance). Small gaps = neutral, allow trade.
+                if _ema_gap_pct > _struct_tol and _lower < price < _upper:
                     _between_emas = True
                     logger.info(
                         "[VELEZ-EMA] BLOCKED: price %.2f is between EMA20 %.2f and EMA200 %.2f — NO TRADE",
@@ -725,6 +938,9 @@ class Scanner:
             ema_bearish = ema9.iloc[-1] < ema21.iloc[-1]
             price_above_ema9 = price > ema9.iloc[-1]
             price_below_ema9 = price < ema9.iloc[-1]
+            # Relaxed: allow short when price is within 0.05% above the 9-EMA
+            # (ranging market hugs the EMA; don't block valid bear setups).
+            _price_below_ema9 = price < ema9.iloc[-1] * 1.0005
             
             # MACD for momentum confirmation
             macd = trend.MACD(close=close)
@@ -742,7 +958,7 @@ class Scanner:
             # === BUY CONDITIONS ===
             # Trend is up + momentum + RSI safe zone + 5-MIN AGREES +
             # HAWK 20/200 EMA FILTER: price MUST be above BOTH EMAs (Oliver Velez rule)
-            if (not _between_emas  # HARD BLOCK: no trade between EMAs
+            if ((not _between_emas or price_above_ema200)  # HARD BLOCK only when between EMAs AND below major trend (no buying into downtrend)
                 and ema_bullish
                 and price_above_ema9
                 and rises >= 3
@@ -761,18 +977,20 @@ class Scanner:
                 if ema20_value > 0 and not price_above_ema20:
                     logger.info("[HAWK-FILTER] BUY blocked: price %.2f ≤ 20 EMA %.2f", price, ema20_value)
 
-            # === SELL CONDITIONS ===
-            # Trend is down + momentum + RSI safe zone + 5-MIN AGREES +
-            # HAWK 20/200 EMA FILTER: price MUST be below BOTH EMAs (Oliver Velez rule)
-            elif (not _between_emas  # HARD BLOCK: no trade between EMAs
+            # === SELL CONDITIONS (relaxed: trust 5m trend + flow, not 1m MACD noise) ===
+            # A 1m MACD can be marginally positive in a ranging market even when the
+            # 5m trend is bearish and order flow is strongly selling. Require the
+            # 5m trend to be bearish (htf_bearish) + price action (falls>=2) + RSI
+            # not overbought. MACD is a soft confirm only, not a hard block.
+            # price_below_ema9 relaxed with a small tolerance so a ranging market
+            # (price hugging the 9-EMA) can still short with the 5m bear trend.
+            elif ((not _between_emas or price_below_ema200)  # allow SELL when below major trend (price < 200-EMA) even if between EMAs
                   and ema_bearish
-                  and price_below_ema9
-                  and falls >= 3
-                  and macd_negative
-                  and macd_decreasing
+                  and _price_below_ema9
+                  and falls >= 2
                   and current_rsi > 35
-                  and current_rsi < 60
-                  and htf_bearish  # 5-minute trend must be bearish too
+                  and current_rsi < 65
+                  and htf_bearish  # 5-minute trend must be bearish (primary confirm)
                   and (price_below_ema20 or not _ema20_filter_enabled)  # HAWK 20 EMA gate
                   and (price_below_ema200 or not _ema200_filter_enabled)  # HAWK 200 EMA gate
             ):
@@ -785,7 +1003,7 @@ class Scanner:
 
             # === BREAKOUT BUY (strong move with volume) ===
             # Also gated by HAWK 20/200 EMA — breakouts only valid in trend direction
-            elif (not _between_emas  # HARD BLOCK: no trade between EMAs
+            elif ((not _between_emas or price_above_ema200)  # HARD BLOCK only when between EMAs AND below major trend
                   and price > bb_high.iloc[-1]
                   and vol_ratio > 1.5
                   and rises >= 3
@@ -799,7 +1017,7 @@ class Scanner:
 
             # === BREAKOUT SELL (strong move with volume) ===
             # Also gated by HAWK 20/200 EMA — breakouts only valid in trend direction
-            elif (not _between_emas  # HARD BLOCK: no trade between EMAs
+            elif ((not _between_emas or price_below_ema200)  # allow SELL when below major trend even if between EMAs
                   and price < bb_low.iloc[-1]
                   and vol_ratio > 1.5
                   and falls >= 3

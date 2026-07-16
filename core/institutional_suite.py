@@ -6,7 +6,7 @@ Hooks into the trade engine and dashboard.
 """
 import logging
 from typing import Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from core.performance_metrics import metrics as perf_metrics
 from core.position_sizer import sizer as position_sizer
@@ -123,7 +123,7 @@ class InstitutionalSuite:
     def full_report(self) -> Dict:
         """Full institutional report for dashboard/API."""
         return {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "performance": self.perf_metrics.institutional_report(),
             "equity": self.equity.snapshot(),
             "regime": {

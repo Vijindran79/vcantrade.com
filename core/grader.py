@@ -12,7 +12,7 @@ so the user can review win/loss reasoning over time.
 import json
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 
 import requests
@@ -408,7 +408,7 @@ class Grader:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         cursor.execute(
             """
             SELECT * FROM trades WHERE timestamp >= ? AND status = 'CLOSED'

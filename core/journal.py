@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -110,7 +110,7 @@ class TradeJournalDB:
         outcome: str,
         timestamp: Optional[str] = None,
     ) -> int:
-        ts = timestamp or datetime.utcnow().isoformat(timespec="seconds")
+        ts = timestamp or datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -150,7 +150,7 @@ class TradeJournalDB:
         confidence_penalty: float = 0.0,
     ) -> None:
         context = dict(vibe_context or {})
-        ts = datetime.utcnow().isoformat(timespec="seconds")
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._connect() as conn:
             conn.execute(
                 """
@@ -215,7 +215,7 @@ class TradeJournalDB:
             if not row:
                 return
 
-            ts = datetime.utcnow().isoformat(timespec="seconds")
+            ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
             conn.execute(
                 "UPDATE trade_vibes SET outcome = ?, pnl = ?, updated_at = ? WHERE trade_id = ?",
                 (outcome, pnl, ts, int(trade_id)),

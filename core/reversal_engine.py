@@ -42,7 +42,7 @@ LOOKBACK_CANDLES = 20
 
 # Minimum score to trigger reversal alert (0.0-1.0)
 # Higher = fewer false positives, lower = catches more reversals
-REVERSAL_THRESHOLD = 0.55
+REVERSAL_THRESHOLD = 0.45  # Tightened from 0.55 for earlier reversal detection
 
 # Layer weights (must sum to 1.0)
 WEIGHT_PRICE_ACTION = 0.30

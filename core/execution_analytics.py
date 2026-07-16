@@ -5,7 +5,7 @@ Track slippage, fill rate, missed trades, and execution latency.
 """
 import logging
 from typing import Dict, List
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -35,7 +35,7 @@ class ExecutionAnalytics:
         is_partial = filled_size < intended_size
 
         record = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
             "side": side,
             "intended_price": intended_price,
@@ -62,7 +62,7 @@ class ExecutionAnalytics:
                              reason: str):
         """Track trades we wanted but couldn't execute."""
         self.target_fills.append({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol, "side": side,
             "intended_price": intended_price, "reason": reason,
         })

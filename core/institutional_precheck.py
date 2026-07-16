@@ -194,12 +194,18 @@ def run_institutional_precheck(ticker: str, df: pd.DataFrame, action: str, cfg: 
         # Sharp entries: only trade WITH order flow, not against it.
         if require_flow and flow:
             dp = flow.get("delta_pct", 0.0)
-            if action == "BUY" and dp < flow_min:
+            # BUY: only block on CLEARLY bearish flow (delta well below 0).
+            # Neutral/slightly-positive flow should NOT block a BUY that is
+            # otherwise confirmed by trend + momentum + liquidity context.
+            if action == "BUY" and dp < -flow_min:
                 out["block"] = True
-                reasons.append(f"order flow not supportive (delta {dp:+.2f} < {flow_min})")
-            if action == "SELL" and dp > -flow_min:
+                reasons.append(f"order flow not supportive (delta {dp:+.2f} < {-flow_min})")
+            # SELL: only block on CLEARLY bullish flow (delta well above 0).
+            # Neutral/slightly-positive flow (e.g. +0.02) should NOT block a SELL
+            # that is otherwise confirmed by trend + momentum + 5m context.
+            if action == "SELL" and dp > flow_min:
                 out["block"] = True
-                reasons.append(f"order flow not supportive (delta {dp:+.2f} > {-flow_min})")
+                reasons.append(f"order flow not supportive (delta {dp:+.2f} > {flow_min})")
 
         # Sharp entries: buy in discount, sell in premium (value-area context).
         if require_discount and profile:

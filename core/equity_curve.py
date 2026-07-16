@@ -6,7 +6,7 @@ Provides data for dashboard visualization.
 """
 import logging
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 import json
 import threading
 from pathlib import Path
@@ -28,13 +28,13 @@ class EquityCurveTracker:
         self.peak_balance = starting_balance
         self.points: List[Dict] = []
         self.daily_start = starting_balance
-        self.daily_date = datetime.utcnow().date().isoformat()
+        self.daily_date = datetime.now(timezone.utc).date().isoformat()
         self._lock = threading.Lock()
         self._load()
 
     def update(self, current_balance: float, timestamp: Optional[datetime] = None):
         """Update current equity."""
-        ts = timestamp or datetime.utcnow()
+        ts = timestamp or datetime.now(timezone.utc)
         with self._lock:
             self.current_balance = current_balance
             self.peak_balance = max(self.peak_balance, current_balance)
@@ -97,7 +97,7 @@ class EquityCurveTracker:
 
     def recent_points(self, minutes: int = 60) -> List[Dict]:
         """Get points from the last N minutes."""
-        cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
         out = []
         for p in reversed(self.points):
             try:

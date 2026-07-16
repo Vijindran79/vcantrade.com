@@ -14,7 +14,7 @@ import asyncio
 import logging
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Callable
 from secrets import compare_digest
 
@@ -130,14 +130,14 @@ class SignalDispatcher(QObject):
             
             # Add metadata
             data.pop("api_key", None)
-            data["received_at"] = datetime.utcnow().isoformat()
+            data["received_at"] = datetime.now(timezone.utc).isoformat()
             data["local_status"] = "received"
             data["source_ip"] = request.remote or "unknown"
             
             # Store signal
             self.latest_signal = data
             self.signal_count += 1
-            self.last_signal_time = datetime.utcnow()
+            self.last_signal_time = datetime.now(timezone.utc)
             self.signal_received.emit(data)
 
             logger.info(
@@ -222,11 +222,11 @@ class SignalDispatcher(QObject):
 
             metadata = {
                 "status": "Lion is Listening",
-                "received_at": datetime.utcnow().isoformat(),
+                "received_at": datetime.now(timezone.utc).isoformat(),
                 "source_ip": request.remote or "unknown",
                 "brain": str(request.query.get("brain", "external")).strip() or "external",
             }
-            self.last_handshake_time = datetime.utcnow()
+            self.last_handshake_time = datetime.now(timezone.utc)
 
             logger.info(
                 "[HANDSHAKE] Handshake accepted from %s (%s)",
@@ -253,7 +253,7 @@ class SignalDispatcher(QObject):
         return web.json_response({
             "status": "healthy",
             "service": "Signal Dispatcher",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "auth_enabled": bool(config.SIGNAL_API_KEY),
             "public_signal_url": config.PUBLIC_SIGNAL_URL or None,
         })

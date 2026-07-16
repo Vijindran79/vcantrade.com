@@ -32,13 +32,31 @@ dist/
 vcani_trade.log
 vcanitrade_alerts.db
 vcanitrade_ledger.db
+vcanitrade_ledger.db-shm
+vcanitrade_ledger.db-wal
+vcanitrade_pnl.db
 trades.db
 trade_ledger.json
 e2e_output.txt
 e2e_report.txt
 .nuclear_purge_backups/
 
-# Browser profiles (huge + machine-specific)
+# Runtime caches / monitor artifacts
+data_feed_cache.json
+monitor_report.txt
+
+# Test / scratch / backup scripts (not part of the bot)
+mnq_watch.py
+snap_chart.py
+vread.py
+test_gate.py
+test_liq.py
+test_switch.py
+*.bak_test
+LIQUIDITY_ZONE_STRATEGY.md
+assets/
+
+
 browser_profile/
 .chromium-cache/
 .playwright-browsers/

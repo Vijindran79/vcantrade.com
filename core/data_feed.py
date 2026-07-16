@@ -377,8 +377,10 @@ class MarketDataFeed:
                                    ticker, int(now - cached["timestamp"]))
                     return cached["bars"]
 
-        # Update cache on success
-        if bars:
+        # Update cache on success — but NEVER cache a short/truncated dataset.
+        # A <200-bar result (e.g. 50) corrupts the 200-EMA and kills all signals,
+        # and would be served back on every future call. Only cache full datasets.
+        if bars and len(bars) >= 200:
             with self._lock:
                 self._cache[cache_key] = {
                     "timestamp": now,
@@ -387,6 +389,8 @@ class MarketDataFeed:
                 }
             self._save_cache()
             logger.debug("[FEED] %s: %d bars from %s", ticker, len(bars), source_used)
+        elif bars:
+            logger.warning("[FEED] %s: only %d bars fetched (need >=200) — NOT caching short dataset", ticker, len(bars))
 
         return bars
 

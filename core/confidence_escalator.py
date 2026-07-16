@@ -13,7 +13,7 @@ Kill Switch: If SIM fails or S1 breaks, REAL trade is NEVER placed.
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Optional
 
@@ -59,7 +59,7 @@ class ConfidenceMetrics:
         if self.bars_held_s1 >= self.bars_required and self.sim_in_profit:
             conf = 85.0
         self.current_confidence = conf
-        self.confidence_history.append((datetime.utcnow(), conf))
+        self.confidence_history.append((datetime.now(timezone.utc), conf))
 
     def reset(self):
         self.current_confidence = 0.0
@@ -117,7 +117,7 @@ class ConfidenceEscalator:
         self.sim_trade = SimTradeState()
         self.real_trade_placed = False
         self.kill_switch_triggered = False
-        self.last_state_change = datetime.utcnow()
+        self.last_state_change = datetime.now(timezone.utc)
         self.min_profit_pips = min_profit_pips
         self._state_observers = []
 
@@ -135,7 +135,7 @@ class ConfidenceEscalator:
     def _transition_to(self, new_state: EscalatorState, reason: str = ""):
         old_state = self.state
         self.state = new_state
-        self.last_state_change = datetime.utcnow()
+        self.last_state_change = datetime.now(timezone.utc)
         logger.info(f"[ESCALATOR] {old_state.value} -> {new_state.value} | {reason}")
         self._notify_observers()
 
@@ -155,7 +155,7 @@ class ConfidenceEscalator:
         self.sim_trade = SimTradeState(
             active=True,
             entry_price=entry_price,
-            entry_time=datetime.utcnow(),
+            entry_time=datetime.now(timezone.utc),
             stop_loss=stop_loss,
             take_profit=take_profit,
         )
@@ -271,7 +271,7 @@ class ConfidenceEscalator:
         self.sim_trade = SimTradeState()
         self.real_trade_placed = False
         self.kill_switch_triggered = False
-        self.last_state_change = datetime.utcnow()
+        self.last_state_change = datetime.now(timezone.utc)
         logger.info("[ESCALATOR] Reset complete - ready for new cycle")
 
     def get_confidence_display(self) -> dict:
@@ -287,5 +287,5 @@ class ConfidenceEscalator:
             "price_holding_s1": self.metrics.price_holding_s1,
             "kill_switch": self.kill_switch_triggered,
             "real_trade_placed": self.real_trade_placed,
-            "time_in_state": (datetime.utcnow() - self.last_state_change).seconds,
+            "time_in_state": (datetime.now(timezone.utc) - self.last_state_change).seconds,
         }

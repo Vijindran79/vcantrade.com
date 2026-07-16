@@ -1,15 +1,8 @@
 {
   "investment_mode": "dollar",
   "session_watchlist": [
-    "MNQ1!",
     "MGC1!"
   ],
-  "scan_interval_seconds": 2.5,
-  "scan_interval_min": 1.0,
-  "scan_interval_max": 60.0,
-  "min_confidence_to_trade": 0.85,
-  "require_price_above_20ema_for_buy": true,
-  "require_price_above_200ema_for_buy": true,
   "investment_amount": 1000.0,
   "lot_size": 1.0,
   "max_lots": 1.0,
@@ -22,5 +15,12 @@
   "auto_execute_threshold": 0.7,
   "prop_firm_enabled": true,
   "prop_firm_name": "TopStep",
-  "prop_account_size": 50000.0
+  "prop_account_size": 50000.0,
+  "scan_interval_seconds": 2.5,
+  "scan_interval_min": 1.0,
+  "scan_interval_max": 60.0,
+  "min_confidence_to_trade": 0.68,
+  "require_price_above_20ema_for_buy": false,
+  "require_price_above_200ema_for_buy": false,
+  "max_concurrent_positions": 1
 }

@@ -6,7 +6,7 @@ Generates full institutional performance report.
 """
 import logging
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -154,7 +154,7 @@ class Backtester:
             history = []
             if BACKTEST_RESULTS.exists():
                 history = json.loads(BACKTEST_RESULTS.read_text())
-            history.append({**report, "timestamp": datetime.utcnow().isoformat()})
+            history.append({**report, "timestamp": datetime.now(timezone.utc).isoformat()})
             BACKTEST_RESULTS.write_text(json.dumps(history, indent=2, default=str))
         except Exception as e:
             logger.warning("[BACKTEST] Save error: %s", e)

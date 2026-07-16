@@ -12,7 +12,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -152,7 +152,7 @@ class RealizedPnLTracker:
         reason: str = "",
     ):
         """Record a realized P&L from a closed trade. Persists to DB immediately."""
-        closed_at = datetime.utcnow().isoformat()
+        closed_at = datetime.now(timezone.utc).isoformat()
 
         # Update running totals
         self.cumulative_pnl += pnl

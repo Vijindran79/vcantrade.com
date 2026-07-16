@@ -235,21 +235,25 @@ def call_local_brain(
         request_timeout = max(10, int(timeout or config.LLM_TIMEOUT))
 
         # ---------------------------------------------------------------
-        # STEP 4 — PRE-POST AUDIT LOG (visible in both logger and stderr)
+        # STEP 4 — PRE-POST AUDIT LOG (only when BRAIN_AUDIT_LOG is enabled)
+        # Gated OFF by default: this is verbose diagnostic noise that fires on
+        # every brain call and was flooding the console. Set BRAIN_AUDIT_LOG=true
+        # in .env to re-enable for debugging.
         # ---------------------------------------------------------------
-        import sys
-        _audit_msg = (
-            f"\n{'='*72}\n"
-            f"[BRAIN-AUDIT] PRE-POST PAYLOAD DUMP\n"
-            f"  URL        : {url}\n"
-            f"  model used : {chosen_model!r}\n"
-            f"  stream     : {payload['stream']}\n"
-            f"  timeout    : {request_timeout}s\n"
-            f"  prompt[:80]: {str(prompt)[:80]!r}\n"
-            f"{'='*72}"
-        )
-        print(_audit_msg, file=sys.stderr, flush=True)
-        logger.info(_audit_msg)
+        if getattr(config, "BRAIN_AUDIT_LOG", False):
+            import sys
+            _audit_msg = (
+                f"\n{'='*72}\n"
+                f"[BRAIN-AUDIT] PRE-POST PAYLOAD DUMP\n"
+                f"  URL        : {url}\n"
+                f"  model used : {chosen_model!r}\n"
+                f"  stream     : {payload['stream']}\n"
+                f"  timeout    : {request_timeout}s\n"
+                f"  prompt[:80]: {str(prompt)[:80]!r}\n"
+                f"{'='*72}"
+            )
+            print(_audit_msg, file=sys.stderr, flush=True)
+            logger.info(_audit_msg)
 
         session = get_ollama_session()
         try:
@@ -817,7 +821,10 @@ Reply with ONLY JSON like: {{"signal":"BUY","confidence":80,"reason":"prices ris
                     elif falls / total_moves >= 0.7:  # 70%+ candles falling
                         pa_signal = "SELL"
         # Directly invoke the configured local Ollama model.
-        result = call_local_brain(prompt, model=self.model, timeout=15)
+        # NOTE: timeout was 15s, which is too short for qwen:latest (warm ~26s,
+        # cold ~60s). Calls were silently timing out and returning errors.
+        # Use a generous timeout so the brain actually returns a verdict.
+        result = call_local_brain(prompt, model=self.model, timeout=int(getattr(config, "LLM_TIMEOUT", 180)))
         
         # If parse failed (error key present), try to extract signal from raw text
         if "error" in result and "raw" in result:
@@ -843,16 +850,38 @@ Reply with ONLY JSON like: {{"signal":"BUY","confidence":80,"reason":"prices ris
             signal = "WAIT"
 
         # --- PRICE ACTION OVERRIDE: if model contradicts clear candle direction, use candles ---
+        # Also keep a technical tiebreaker (RSI + EMA alignment) for ambiguous candles
+        # so the weak 2B model never decides alone on a choppy tape.
+        ema9 = float(package.get("ema9", 0.0) or 0.0)
+        ema21 = float(package.get("ema21", 0.0) or 0.0)
+        _tech_signal = "WAIT"
+        if ema9 and ema21:
+            if ema9 > ema21 and rsi > 50:
+                _tech_signal = "BUY"
+            elif ema9 < ema21 and rsi < 50:
+                _tech_signal = "SELL"
+
         if pa_signal != "WAIT":
             if signal == "BUY" and pa_signal == "SELL":
                 logger.warning("[BRAIN] OVERRIDE: Model said BUY but candles are falling → SELL")
                 signal = "SELL"
+                reason = f"candles falling ({falls}/{total_moves} down)"
             elif signal == "SELL" and pa_signal == "BUY":
                 logger.warning("[BRAIN] OVERRIDE: Model said SELL but candles are rising → BUY")
                 signal = "BUY"
+                reason = f"candles rising ({rises}/{total_moves} up)"
             elif signal == "WAIT" and pa_signal in {"BUY", "SELL"}:
                 logger.info("[BRAIN] OVERRIDE: Model said WAIT but candles show clear %s direction", pa_signal)
                 signal = pa_signal
+                reason = f"candles clear {pa_signal.lower()}"
+        elif _tech_signal != "WAIT":
+            # Candles ambiguous but EMA/RSI agree -> let the technicals break the tie
+            # instead of trusting the weak model on a choppy tape.
+            if signal != _tech_signal:
+                logger.info("[BRAIN] TECH-TIEBREAKER: model %s but EMA9/21+RSI say %s -> %s",
+                           signal, _tech_signal, _tech_signal)
+                signal = _tech_signal
+                reason = f"EMA9/21 + RSI alignment ({_tech_signal.lower()})"
             
         confidence = 70
         try:

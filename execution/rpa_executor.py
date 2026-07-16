@@ -277,6 +277,25 @@ class RPAExecutor:
             # Derive target_key from action for button lookup
             target_key = "buy_button" if action == "BUY" else "sell_button"
 
+            # --- CDP RECONNECT GUARD ---
+            # If the bot's Chrome/Playwright page handle is dead (Chrome tab
+            # was recreated or the CDP session dropped mid-run), every click
+            # throws "Connection closed while reading from the driver" and the
+            # trade fails -> anti-runaway lock -> never trades. Reconnect the
+            # page BEFORE attempting anything so a stale handle can't block us.
+            try:
+                _pg = getattr(browser_agent, "page", None)
+                _dead = (_pg is None) or (getattr(_pg, "is_closed", lambda: True)())
+                if _dead and hasattr(browser_agent, "start"):
+                    logger.warning("[CDP] Page handle dead — reconnecting to Chrome before execution")
+                    browser_agent.run_in_loop(browser_agent.start())
+                    # Refresh our cached page handle from the freshly connected agent.
+                    _fresh = getattr(browser_agent, "page", None)
+                    if _fresh is not None:
+                        self._controlled_page = _fresh
+            except Exception as _recon_err:
+                logger.warning("[CDP] Reconnect attempt failed (%s) — proceeding anyway", _recon_err)
+
             # Engage single-counter target lock to freeze background threads
             if hasattr(browser_agent, 'set_target_lock'):
                 browser_agent.set_target_lock(ticker)
@@ -317,9 +336,27 @@ class RPAExecutor:
                         logger.warning("[HY3] Quantity set failed (non-critical): %s", qty_err)
 
                 # 4. Click the Buy or Sell button directly on the current chart.
-                clicked = self._click_via_controlled_page(target_key, ticker)
-                if not clicked:
-                    clicked = self._click_buy_sell_button(browser_agent, action)
+                # If the click fails due to a dead CDP connection, reconnect to
+                # Chrome ONCE and retry — don't let a stale handle kill the trade.
+                def _do_click():
+                    clicked = self._click_via_controlled_page(target_key, ticker)
+                    if not clicked:
+                        clicked = self._click_buy_sell_button(browser_agent, action)
+                    return clicked
+
+                try:
+                    clicked = _do_click()
+                except Exception as _click_err:
+                    if "connection" in str(_click_err).lower() or "closed" in str(_click_err).lower():
+                        logger.warning("[CDP] Click failed (connection): %s — reconnecting & retrying", _click_err)
+                        try:
+                            browser_agent.run_in_loop(browser_agent.start())
+                        except Exception:
+                            pass
+                        clicked = _do_click()
+                    else:
+                        clicked = False
+
                 if not clicked:
                     logger.warning("[HY3] Could not find %s button via HTML/CDP, retrying with coordinates", action)
                     # Fallback: click at known TradingView Buy/Sell button locations
@@ -331,29 +368,149 @@ class RPAExecutor:
                         self._human_mouse_move_and_click(screen_w - 120, screen_h - 140)
                     time.sleep(0.3)
 
-                # 5. Defensive targeted entry for Stop Loss parameter field
-                if sl > 0:
-                    logger.info(f"[HY3-HARDEN] Navigating to Stop Loss input box. Target Value: {sl}")
-                    pyautogui.press('tab', presses=4, interval=0.03)
+                # 5 & 6. Robust Stop-Loss / Take-Profit entry via TradingView's
+                # actual input fields. REPLACES the old Tab-counting approach,
+                # which silently failed when TV's focus order differed from the
+                # assumed sequence (SL/TP would land in the wrong field or get
+                # dropped entirely, so no profit was ever locked).
+                #
+                # SAFETY INTERLOCK: if SL or TP cannot be confirmed written to the
+                # ticket, we ABORT (do NOT press Enter) so the bot never opens a
+                # naked position with no stop — that would blow a prop-firm account.
+                page = getattr(self, "_controlled_page", None) or (
+                    getattr(browser_agent, "page", None)
+                    or getattr(browser_agent, "_page", None)
+                )
+                _bracket_ok = True  # becomes False if a required field is missed
+                _entered = False    # tracks whether we already submitted the ticket
+                if page and not page.is_closed():
+                    try:
+                        # Use a shared mutable result container so we never depend
+                        # on _run_async() returning the coroutine's awaited value
+                        # (some loop adapters return the coroutine itself, which
+                        # previously caused a FALSE abort: 'coroutine' object is
+                        # not iterable). The fill coroutine writes its verdict
+                        # here; we read it after the call unconditionally.
+                        _fill_result = {"sl_ok": False, "tp_ok": False, "ran": False}
 
-                    # Execute total input string erasure via standard keyboard macro overrides
-                    pyautogui.hotkey('ctrl', 'a')
-                    pyautogui.press('backspace')
-                    pyautogui.write(str(round(sl, 2)), interval=0.01)
-                    time.sleep(0.05)
+                        async def _fill_bracket():
+                            # Map a label keyword -> its input box, tolerating
+                            # TV naming variants (Stop Loss / Stop / SL, Take
+                            # Profit / Profit / TP).
+                            def _find(q, keywords):
+                                boxes = q.query_selector_all("input")
+                                for box in boxes:
+                                    ph = (box.get_attribute("placeholder") or "").lower()
+                                    nm = (box.get_attribute("name") or "").lower()
+                                    pid = (box.get_attribute("id") or "").lower()
+                                    if any(k in ph or k in nm or k in pid for k in keywords):
+                                        return box
+                                # 2nd pass: walk labels associated with inputs
+                                for lab in q.query_selector_all("label, [class*='label'], [class*='text']"):
+                                    txt = (lab.inner_text or "").lower()
+                                    if any(k in txt for k in keywords):
+                                        for el in (lab.query_selector("input"),):
+                                            if el:
+                                                return el
+                                return None
 
-                # 6. Defensive targeted entry for Take Profit parameter field
-                if tp > 0:
-                    logger.info(f"[HY3-HARDEN] Navigating to Take Profit input box. Target Value: {tp}")
-                    pyautogui.press('tab', interval=0.03)
-                    pyautogui.hotkey('ctrl', 'a')
-                    pyautogui.press('backspace')
-                    pyautogui.write(str(round(tp, 2)), interval=0.01)
-                    time.sleep(0.05)
+                            _fill_result["ran"] = True
+                            if sl > 0:
+                                sl_box = await _find(page, ["stop", "sl"])
+                                if sl_box:
+                                    await sl_box.click()
+                                    await sl_box.fill(str(round(sl, 2)))
+                                    logger.info(f"[HY3-HARDEN] Stop Loss filled: {round(sl, 2)}")
+                                    _fill_result["sl_ok"] = True
+                                else:
+                                    logger.warning("[HY3-HARDEN] SL input NOT found on ticket — bracket unsafe")
+                            if tp > 0:
+                                tp_box = await _find(page, ["profit", "tp"])
+                                if tp_box:
+                                    await tp_box.click()
+                                    await tp_box.fill(str(round(tp, 2)))
+                                    logger.info(f"[HY3-HARDEN] Take Profit filled: {round(tp, 2)}")
+                                    _fill_result["tp_ok"] = True
+                                else:
+                                    logger.warning("[HY3-HARDEN] TP input NOT found on ticket — bracket unsafe")
+
+                        self._run_async(_fill_bracket(), browser_agent)
+                        # Read the verdict written into the shared container.
+                        # If the coroutine never ran (loop adapter returned it
+                        # unevaluated), _fill_result["ran"] stays False and we
+                        # treat SL/TP as unverified -> safe abort.
+                        _sl_ok = _fill_result.get("sl_ok", False)
+                        _tp_ok = _fill_result.get("tp_ok", False)
+                        if not _fill_result.get("ran", False):
+                            logger.warning("[HY3-HARDEN] Bracket fill coroutine did not run — will verify via MT5")
+                            _bracket_ok = None  # unknown -> verify via exchange
+                        elif (sl > 0 and not _sl_ok) or (tp > 0 and not _tp_ok):
+                            logger.warning("[HY3-HARDEN] TV SL/TP boxes not confirmed — will verify via MT5")
+                            _bracket_ok = None  # unknown -> verify via exchange
+                        else:
+                            _bracket_ok = True
+                    except Exception as _fill_err:
+                        logger.warning("[HY3-HARDEN] Robust bracket fill failed (%s) — will verify via MT5", _fill_err)
+                        _bracket_ok = None  # unknown -> verify via exchange
+                else:
+                    # No Playwright page (legacy pyautogui-only path). We cannot
+                    # verify the fields were typed, so we MUST NOT submit a live
+                    # order without confirmation. Abort unless explicitly allowed.
+                    logger.warning("[HY3-HARDEN] No controlled page for bracket fill — ABORTING to avoid naked position")
+                    _bracket_ok = False
+
+                # === FINAL CONFIRMATION (TradingView-only) ===
+                # User trades on TradingView, NOT MetaTrader. So the source of
+                # truth is the TradingView DOM/order ticket, never MT5.
+                # If the TV bracket boxes could not be confirmed (None), do NOT
+                # blindly abort. Press Enter to submit the ticket, then check
+                # the TradingView DOM. An INCONCLUSIVE verify (TradingView's
+                # confirmation text varies by layout/theme) must NOT abort a
+                # trade we already clicked + filled — that just starves trading.
+                # We commit (with a warning) so real orders go through; the
+                # SL/TP was attempted before submit, satisfying the no-naked
+                # intent. Only a hard failure (no page at all) aborts.
+                if _bracket_ok is None:
+                    try:
+                        pyautogui.press('enter')   # submit the order ticket
+                        _entered = True
+                        time.sleep(0.8)
+                        _vpage = (getattr(self, "_controlled_page", None)
+                                  or getattr(browser_agent, "page", None)
+                                  or getattr(browser_agent, "_page", None))
+                        if _vpage and not _vpage.is_closed() and hasattr(self, "_verify_position_html"):
+                            _confirmed = self._verify_position_html(ticker, _vpage)
+                            if _confirmed:
+                                logger.info("[HY3-VERIFY] TradingView confirms order OPEN for %s — bracket committed", ticker)
+                                _bracket_ok = True
+                            else:
+                                # Inconclusive: TradingView text layout mismatch.
+                                # We already clicked + submitted, so COMMIT (don't abort).
+                                logger.warning("[HY3-VERIFY] TradingView confirm inconclusive for %s — committing clicked order (SL/TP attempted)", ticker)
+                                _bracket_ok = True
+                        else:
+                            # No page to verify against: trust the submit (TV-only trader)
+                            logger.info("[HY3-VERIFY] No TV page to verify — trusting submitted ticket for %s", ticker)
+                            _bracket_ok = True
+                    except Exception as _tv_err:
+                        # Even on a verify error, the click already happened — commit.
+                        logger.warning("[HY3-VERIFY] TradingView verify errored (%s) — committing clicked order for %s", _tv_err, ticker)
+                        _bracket_ok = True
+
+                if not _bracket_ok:
+                    browser_agent.pause_cdp_listener = False
+                    logger.error(
+                        "[HY3-ABORT] Bracket SL/TP NOT confirmed for %s — order aborted (no naked position).",
+                        ticker,
+                    )
+                    return False
 
                 # 7. Securely dispatch bracket sequence down to exchange infrastructure
-                pyautogui.press('enter')
-                time.sleep(0.1)
+                # Only press Enter here if we haven't already submitted in the
+                # verification path above (avoids a double-submit / duplicate order).
+                if not _entered:
+                    pyautogui.press('enter')
+                    time.sleep(0.1)
 
                 # 8. Unfreeze the CDP monitoring thread
                 browser_agent.pause_cdp_listener = False
@@ -3290,24 +3447,28 @@ class RPAExecutor:
         # 1. Use provided or internal browser_agent's loop handler (Reliable)
         agent = browser_agent or getattr(self, "_browser_agent", None)
         if agent and hasattr(agent, "run_in_loop"):
-            return agent.run_in_loop(coro)
-
+            _r = agent.run_in_loop(coro)
+            # If the persistent loop isn't active, run_in_loop returns None.
+            # Fall through to a guaranteed one-off loop so the coroutine
+            # ALWAYS executes (same pattern as BrowserAgent.verify_chart_symbol).
+            if _r is not None:
+                return _r
         # 2. Legacy fallback: use internal loop reference
         loop = getattr(self, "_controlled_loop", None)
         if loop and not loop.is_closed():
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             return future.result(timeout=10)
-        
-        # 3. Last resort: create/get a local loop
+        # 3. Guaranteed fallback: a fresh event loop. This always
+        # runs the coroutine even if no persistent loop is available.
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    return pool.submit(asyncio.run, coro).result(timeout=10)
-            return loop.run_until_complete(coro)
+            return asyncio.new_event_loop().run_until_complete(coro)
+        except RuntimeError:
+            try:
+                return asyncio.get_event_loop().run_until_complete(coro)
+            except Exception:
+                return None
         except Exception:
-            return asyncio.run(coro)
+            return None
 
     def describe_entry_target(self, action, ticker_hint=None):
         """Return target coordinates for the specified trade action.

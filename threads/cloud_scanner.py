@@ -55,7 +55,10 @@ class CloudScannerThread(QThread):
             getattr(signal, "signal_type", "SIGNAL") or "SIGNAL"
         ).upper()
         strength = float(getattr(signal, "strength", 0.0) or 0.0)
-        metadata = getattr(signal, "metadata", {}) or {}
+        # Guard: metadata must be a dict. Some scanner paths occasionally attach
+        # a list (or other type) to signal.metadata, which would crash on .get().
+        _raw_meta = getattr(signal, "metadata", {}) or {}
+        metadata = _raw_meta if isinstance(_raw_meta, dict) else {}
         if "BUY" in signal_type or "BULL" in signal_type or "BULLISH" in signal_type:
             action = "BUY"
         elif "SELL" in signal_type or "BEAR" in signal_type or "BEARISH" in signal_type:

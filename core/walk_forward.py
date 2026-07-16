@@ -7,7 +7,7 @@ This is what separates quants from amateurs.
 import logging
 import math
 from typing import Dict, List, Callable, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -178,7 +178,7 @@ class WalkForwardOptimizer:
             "is_robust": degradation < 0.5,  # <50% degradation = robust
             "stable_params": stable_params,
             "splits": oos_results,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
     def _save(self, report: Dict):

@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
@@ -94,14 +94,14 @@ class SwarmIncubationTracker:
             stop = entry * 0.995 if action == "BUY" else entry * 1.005
 
         return {
-            "id": f"sim_{self._ticker(signal)}_{action}_{int(datetime.utcnow().timestamp())}",
+            "id": f"sim_{self._ticker(signal)}_{action}_{int(datetime.now(timezone.utc).timestamp())}",
             "ticker": self._ticker(signal),
             "action": action,
             "entry_price": entry,
             "stop_loss": stop,
             "take_profit": target,
             "confidence": float(signal.get("confidence", 0.0) or 0.0),
-            "opened_at": datetime.utcnow().isoformat(),
+            "opened_at": datetime.now(timezone.utc).isoformat(),
             "reason": str(signal.get("reason", ""))[:300],
         }
 
@@ -116,7 +116,7 @@ class SwarmIncubationTracker:
         else:
             stats["losses"] = int(stats.get("losses", 0)) + 1
             stats["score"] = float(stats.get("score", 0.0)) - 1.0
-        stats["updated_at"] = datetime.utcnow().isoformat()
+        stats["updated_at"] = datetime.now(timezone.utc).isoformat()
         history_row = dict(sim)
         history_row.update({"outcome": outcome, "exit_price": exit_price, "closed_at": stats["updated_at"]})
         self.state["history"].append(history_row)

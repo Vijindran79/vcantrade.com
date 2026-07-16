@@ -180,6 +180,7 @@ class ExecutionStatus(str, Enum):
     SKIPPED_LOW_CONFIDENCE = "SKIPPED_LOW_CONFIDENCE"
     ABORTED_SLIPPAGE = "ABORTED_SLIPPAGE"
     ABORTED_SPREAD = "ABORTED_SPREAD"
+    ABORTED_WRONG_CHART = "ABORTED_WRONG_CHART"
     FAILED_BROWSER_NAV = "FAILED_BROWSER_NAV"
     FAILED_PRICE_FETCH = "FAILED_PRICE_FETCH"
     FAILED_ORDER_EXECUTION = "FAILED_ORDER_EXECUTION"
@@ -600,6 +601,52 @@ class UnifiedTradeExecutor:
                 status="OPEN"
             )
             
+            # === STEP 7a: BULLETPROOF CHART-SYMBOL VERIFY (pre-click) ===
+            # NEVER click buy/sell unless TradingView is ACTUALLY showing the
+            # trade ticker. This is the guard that prevents wrong-symbol buys
+            # (e.g. clicking gold's button while MES/MNQ is the front tab).
+            _chart_sym = None
+            try:
+                if hasattr(self, "browser_agent") and self.browser_agent is not None:
+                    _chart_sym = self.browser_agent.verify_chart_symbol(ticker)
+            except Exception as _vs_err:
+                self._log(f"[VERIFY] chart-symbol read failed: {_vs_err}")
+            import re as _re
+            def _norm(s):
+                s = str(s or "").upper()
+                for ch in ("1!", "=F", "!", "-", "1", "2", "3", "4",
+                            "5", "6", "7", "8", "9", "=", "F"):
+                    s = s.replace(ch, "")
+                return s.strip()
+            _sym_norm = _norm(_chart_sym)
+            _target_norm = _norm(ticker)
+            if _sym_norm and _target_norm and _sym_norm != _target_norm:
+                msg = (f"[ABORT] WRONG CHART: TradingView shows '{_chart_sym}' "
+                       f"but trade target is '{ticker}'. Refusing to click.")
+                self._log(msg)
+                self._log_dashboard(f"[ABORT] Wrong chart '{_chart_sym}' ≠ {ticker} — blocked")
+                return ExecutionResult(
+                    status=ExecutionStatus.ABORTED_WRONG_CHART,
+                    ticker=ticker,
+                    action=action,
+                    signal_price=signal_price,
+                    error_message=msg,
+                )
+            if not _sym_norm:
+                # Could not read the chart symbol at all -> treat as unsafe, block.
+                msg = (f"[ABORT] Could not verify chart symbol for {ticker} "
+                       f"(no TradingView page or unreadable). Refusing to click.")
+                self._log(msg)
+                self._log_dashboard(f"[ABORT] Chart verify failed for {ticker} — blocked")
+                return ExecutionResult(
+                    status=ExecutionStatus.ABORTED_WRONG_CHART,
+                    ticker=ticker,
+                    action=action,
+                    signal_price=signal_price,
+                    error_message=msg,
+                )
+            self._log(f"[VERIFY] Chart confirmed on {ticker} ✅")
+
             # Execute via RPA (Move the mouse, click the buttons!)
             success = self.rpa_executor.execute_trade(trade_rec)
             

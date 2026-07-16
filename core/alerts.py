@@ -8,7 +8,7 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from typing import Dict, List, Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from collections import deque
@@ -124,7 +124,7 @@ class AlertSystem:
         """Fire an alert through all enabled channels."""
         # Cooldown check (no spam)
         key = f"{level}:{title}"
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if key in self._cooldowns:
             if (now - self._cooldowns[key]).total_seconds() < self._cooldown_seconds:
                 return
@@ -183,7 +183,7 @@ class AlertSystem:
         if not all([self.smtp_server, self.email_to, self.smtp_user, self.smtp_password]):
             return
         try:
-            msg = MIMEText(f"{title}\n\n{message}\n\nTime: {datetime.utcnow().isoformat()}")
+            msg = MIMEText(f"{title}\n\n{message}\n\nTime: {datetime.now(timezone.utc).isoformat()}")
             msg["Subject"] = f"[VcanTrade {title}]"
             msg["From"] = self.smtp_user
             msg["To"] = self.email_to

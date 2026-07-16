@@ -6,7 +6,7 @@ Uses exchange API when available, otherwise runs in simulated mode.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 
@@ -59,7 +59,7 @@ class TradeExecutor:
     ) -> OrderResult:
         """Place a LIMIT order at nearest S/R (support for buy, resistance for sell)."""
         limit_price = self._nearest_level(side, fallback_price, levels)
-        order_id = f"sim_{symbol}_{int(datetime.utcnow().timestamp())}"
+        order_id = f"sim_{symbol}_{int(datetime.now(timezone.utc).timestamp())}"
 
         if self.exchange_client and hasattr(self.exchange_client, "create_order"):
             response = self.exchange_client.create_order(

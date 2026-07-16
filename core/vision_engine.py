@@ -17,7 +17,7 @@ import base64
 import io
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -100,7 +100,7 @@ class ChartScreenshot:
         self.image = image
         self.asset = asset
         self.source = source
-        self.timestamp = timestamp or datetime.utcnow()
+        self.timestamp = timestamp or datetime.now(timezone.utc)
         self.region = region
 
     def to_base64(self, fmt: str = VLM_FORMAT, quality: int = VLM_QUALITY) -> str:

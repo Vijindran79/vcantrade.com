@@ -124,16 +124,40 @@ class SingleAssetLock:
         self.lock_acquired_at = 0.0
         self.lock_timeout_seconds = 1800  # 30 min auto-release
         self._open_tickers: dict[str, float] = {}  # ticker -> acquired_at
-        
+        # FAILURE COOLDOWN: after an execution for a ticker FAILS or is aborted
+        # (e.g. bracket fill crash, pre-check reject, click error), block re-entry
+        # for this long so a broken execution path cannot spam-click BUY/SELL in a
+        # tight loop (the runaway-buy bug). On paper this just wastes clicks; on a
+        # real account it would open a position every ~2s.
+        self._last_fail: dict[str, float] = {}  # ticker -> last_failure_epoch
+        self.fail_cooldown_seconds = float(
+            getattr(config, "EXEC_FAILURE_COOLDOWN_SECONDS", 30)
+        )
+
+    def mark_failure(self, ticker: str):
+        """Record a failed/aborted execution attempt for cooldown enforcement."""
+        with self._lock:
+            self._last_fail[ticker.upper()] = time.time()
+
     def acquire(self, ticker: str) -> bool:
         """Acquire a slot for the given ticker.
 
         Returns False if:
         - Same ticker already has an open position (no duplicates)
         - Max concurrent positions reached (capacity full)
+        - The ticker failed execution within the cooldown window (anti-runaway)
         """
         with self._lock:
             ticker = ticker.upper()
+            # Anti-runaway: block re-acquisition right after a failed attempt
+            _lf = self._last_fail.get(ticker, 0.0)
+            if _lf and (time.time() - _lf) < self.fail_cooldown_seconds:
+                _remain = int(self.fail_cooldown_seconds - (time.time() - _lf))
+                logger.warning(
+                    "[LOCK] Cooldown: %s execution failed %ds ago — blocking re-entry for %ds (anti-runaway)",
+                    ticker, int(time.time() - _lf), _remain,
+                )
+                return False
             # Block duplicate on same ticker
             if ticker in self._open_tickers:
                 logger.warning("[LOCK] Duplicate blocked: %s already open", ticker)
@@ -637,6 +661,36 @@ class VcaniTradeEngine:
             elif action == "WAIT" and bool(getattr(config, "ENABLE_WAIT_NARRATION", False)):
                 _speak_alert(f"Wait on {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
             _confidence_val = float(payload.get("confidence", 0.0) or 0.0)
+            # === AGREEMENT RULE (Apex safety): brain verdict AND scanner side must agree ===
+            # Design note: the bot is scanner-led (scanner picks the side, brain is a
+            # go/no-go gate). But the brain's OWN verdict (raw_decision.verdict) is
+            # logged and CAN contradict the side being traded (e.g. brain BUY while
+            # scanner SELL). Trading on that contradiction is a coin-flip on a prop
+            # account. Block unless the brain's verdict agrees with the traded side
+            # (or the brain returned no clear verdict and the momentum/flow gate below
+            # independently confirms the side).
+            _raw_decision = payload.get("raw_decision") or {}
+            _brain_verdict = ""
+            if isinstance(_raw_decision, dict):
+                _brain_verdict = str(_raw_decision.get("verdict", "") or "").upper()
+            if not _brain_verdict and isinstance(payload.get("metadata") or {}, dict):
+                _brain_verdict = str((payload.get("metadata") or {}).get("verdict", "") or "").upper()
+            _brain_side = "BUY" if "BUY" in _brain_verdict else "SELL" if "SELL" in _brain_verdict else ""
+            if _brain_side and _brain_side != action:
+                # Scanner-led design: the scanner picks the side, the brain is a
+                # weak go/no-go gate. A brain/scanner disagreement is logged, but we
+                # no longer HARD-BLOCK here — the momentum / flow / Velez gates below
+                # are the real confluence check. Blocking on a weak-brain disagreement
+                # was deadlocking valid scanner SELLs (e.g. seller-heavy tape).
+                logger.info(
+                    "[AGREE-GATE] Note: brain verdict=%s vs traded side=%s (scanner-led; deferring to momentum/flow gates)",
+                    _brain_side, action,
+                )
+                try:
+                    self._log_dashboard(f"[AGREE-GATE] brain={_brain_side} vs trade={action} (scanner-led, gates decide)")
+                except Exception:
+                    pass
+                # Do NOT return — let the momentum/flow/Velez gates make the final call.
             _auto_exec_threshold = float(getattr(config, "HAWK_AUTO_EXEC_CONFIDENCE_THRESHOLD", 0.68) or 0.68)
             if self.current_mode == "AUTONOMOUS" and action in {"BUY", "SELL"}:
                 logger.info("[AUTO] Dispatching autonomous execution for %s %s", action, ticker)
@@ -851,36 +905,60 @@ class VcaniTradeEngine:
                           ticker, allowed_symbols)
             return
 
-        # Also verify the TradingView chart matches before clicking
+        # Also verify the TradingView chart matches before clicking.
+        # AUTO-SWITCH MODE (A): if the chart is on a different symbol, navigate
+        # the TradingView tab to the signal's ticker, wait for it to load, re-verify
+        # the title, then proceed. Falls back to the alert/block only if the
+        # switch fails (safe — never clicks the wrong chart).
         try:
             import pygetwindow as gw
+            import time as _tw
             tv_windows = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
+            _need_switch = False
             if tv_windows:
                 chart_title = tv_windows[0].title.upper()
                 ticker_clean = ticker.replace("1!", "").replace("=F", "").replace("-", "")
-                # Check if current chart matches the signal ticker
                 if ticker_clean not in chart_title and ticker not in chart_title:
-                    # VISIBLE SWITCH ALERT — don't silently block, tell the user
-                    switch_msg = (
-                        f"[SWITCH CHART] {action} signal on {ticker}! "
-                        f"Your chart shows {tv_windows[0].title[:30]}. "
-                        f"Switch to {ticker} to execute this trade."
-                    )
-                    logger.warning("[SWITCH] %s", switch_msg)
-                    self._log_dashboard(f"[SWITCH CHART] {action} {ticker} — SWITCH YOUR CHART NOW!")
-                    try:
-                        _speak_alert(f"Switch chart to {ticker} for {action} signal!", min_interval_seconds=5.0)
-                        self.ai_narrator.flash_brain_verdict(
-                            ticker, f"[SWITCH] {action}", f"Switch chart to {ticker}!", hold_ms=3000,
-                            confidence=confidence,
-                        )
-                    except Exception:
-                        pass
-                    return  # Block execution but user sees exactly what to do
+                    _need_switch = True
+            if _need_switch and getattr(self, "browser_agent", None) is not None:
+                logger.info("[SWITCH] Chart mismatch for %s — auto-navigating TradingView tab...", ticker)
+                self._log_dashboard(f"[SWITCH] Auto-switching chart → {ticker}")
+                _switched = self.browser_agent.navigate_to_chart(ticker)
+                if _switched:
+                    _tw.sleep(3.0)  # let the chart load
+                    # re-verify the title now matches the target
+                    tv_windows2 = [w for w in gw.getAllWindows() if "tradingview" in w.title.lower()]
+                    if tv_windows2:
+                        _new_title = tv_windows2[0].title.upper()
+                        if ticker_clean in _new_title or ticker in _new_title:
+                            logger.info("[SWITCH] Chart now on %s — proceeding to execute", ticker)
+                            self._log_dashboard(f"[SWITCH] Chart confirmed on {ticker} ✅")
+                        else:
+                            logger.warning("[SWITCH] Auto-switch FAILED — title still '%s' (expected %s). Blocking for safety.",
+                                          tv_windows2[0].title[:40], ticker)
+                            self._log_dashboard(f"[SWITCH] FAILED — keep chart on {ticker}, blocking trade")
+                            return
+                    # title unreadable -> proceed (don't block on a window-title hiccup)
+                else:
+                    logger.warning("[SWITCH] navigate_to_chart(%s) returned False — blocking for safety", ticker)
+                    self._log_dashboard(f"[SWITCH] Could not switch to {ticker} — blocking trade")
+                    return
+            elif _need_switch:
+                # no browser agent available -> tell the user, block
+                switch_msg = (
+                    f"[SWITCH CHART] {action} signal on {ticker}! "
+                    f"Switch to {ticker} to execute this trade."
+                )
+                logger.warning("[SWITCH] %s", switch_msg)
+                self._log_dashboard(f"[SWITCH CHART] {action} {ticker} — SWITCH YOUR CHART NOW!")
+                try:
+                    _speak_alert(f"Switch chart to {ticker} for {action} signal!", min_interval_seconds=5.0)
+                except Exception:
+                    pass
+                return  # Block execution but user sees exactly what to do
         except Exception:
             # If window check fails, proceed anyway — don't block
             pass
-
         entry = float(payload.get("entry_price") or payload.get("price") or self._fetch_current_price(ticker) or 0.0)
         stop_loss = float(payload.get("stop_loss") or payload.get("sl") or 0.0)
         take_profit = float(payload.get("take_profit") or payload.get("tp") or 0.0)
@@ -935,6 +1013,15 @@ class VcaniTradeEngine:
 
         result = self.execute_trade(ticker, action, entry, stop_loss, take_profit)
         self._log_dashboard(f"[EXEC] {result.status}: {action} {ticker} {result.reason or ''}")
+        # ANTI-RUNAWAY: if this execution did NOT result in a live fill, record a
+        # failure so the SingleAssetLock cooldown blocks immediate re-entry (prevents
+        # the bot from clicking BUY/SELL every ~2s on a broken execution path).
+        _ok = getattr(result, "status", "").lower()
+        if _ok not in ("filled", "open", "success", "ok", "executed", "live"):
+            try:
+                self.asset_lock.mark_failure(ticker)
+            except Exception:
+                pass
 
     def execute_hardened_panic_reset(self):
         """Emergency containment hook used by AutomatedSignalBridge."""
@@ -1278,21 +1365,34 @@ class VcaniTradeEngine:
             have200 = len(close) >= 200
             ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1]) if have200 else 0.0
             require200 = getattr(config, "VELEZ_REQUIRE_200EMA", True) and have200
+            # TOLERANCE BAND: tiny EMA gaps (e.g. 20EMA 14pts above 200EMA) are NOT
+            # a real trend structure — they're noise. Treat as NEUTRAL so a trade
+            # with confirming order flow can still fire. Only a clear, wide gap
+            # (beyond VELEZ_STRUCTURE_TOL %) counts as bull/bear structure.
+            _struct_tol = float(getattr(config, "VELEZ_STRUCTURE_TOL", 0.0015) or 0.0015)  # 0.15%
+            _struct_bull = have200 and (ema20 - ema200) / ema200 > _struct_tol if ema200 else False
+            _struct_bear = have200 and (ema200 - ema20) / ema200 > _struct_tol if ema200 else False
 
             if action == "BUY":
-                if price <= ema20:
+                # Allow BUY when price is within the tolerance band BELOW
+                # the EMA (marginal dips are noise, not a bear structure).
+                if price <= ema20 * (1.0 - _struct_tol):
                     return False, f"BUY blocked: price {price:.2f} ≤ 20EMA {ema20:.2f} (Velez)"
-                if require200 and price <= ema200:
+                if require200 and price <= ema200 * (1.0 - _struct_tol):
                     return False, f"BUY blocked: price {price:.2f} ≤ 200EMA {ema200:.2f} (Velez)"
-                if have200 and ema20 < ema200:
+                # Only block on a CLEAR bear structure (wide 20/200 gap), not noise
+                if _struct_bear:
                     return False, f"BUY blocked: 20EMA {ema20:.2f} below 200EMA {ema200:.2f} (bear structure)"
                 return True, f"BUY ok: price {price:.2f} > 20EMA {ema20:.2f}" + (f" > 200EMA {ema200:.2f}" if have200 else "")
             else:  # SELL
-                if price >= ema20:
+                # Allow SELL when price is within the tolerance band ABOVE
+                # the EMA (marginal pops are noise, not a bull structure).
+                if price >= ema20 * (1.0 + _struct_tol):
                     return False, f"SELL blocked: price {price:.2f} ≥ 20EMA {ema20:.2f} (Velez)"
-                if require200 and price >= ema200:
+                if require200 and price >= ema200 * (1.0 + _struct_tol):
                     return False, f"SELL blocked: price {price:.2f} ≥ 200EMA {ema200:.2f} (Velez)"
-                if have200 and ema20 > ema200:
+                # Only block on a CLEAR bull structure (wide 20/200 gap), not noise
+                if _struct_bull:
                     return False, f"SELL blocked: 20EMA {ema20:.2f} above 200EMA {ema200:.2f} (bull structure)"
                 return True, f"SELL ok: price {price:.2f} < 20EMA {ema20:.2f}" + (f" < 200EMA {ema200:.2f}" if have200 else "")
         except Exception as e:
@@ -1337,6 +1437,20 @@ class VcaniTradeEngine:
             except Exception as _sess_err:
                 logger.debug("[SESSION] gate error (allowing): %s", _sess_err)
 
+        # === STALE-DATA GUARD (refuse to trade on a frozen TradingView feed) ===
+        try:
+            if getattr(self, "browser_agent", None) and self.browser_agent.is_feed_stale():
+                logger.warning("[STALE-GUARD] REFUSED %s %s: price feed is frozen/stale — no execution", action, ticker)
+                self._log_dashboard(f"[STALE-GUARD] BLOCKED {action} {ticker}: feed frozen (auto-heal in progress)")
+                return TradeResult(
+                    status="REJECTED_STALE_FEED",
+                    ticker=ticker,
+                    action=action,
+                    reason="price feed frozen — auto-heal reloading chart",
+                )
+        except Exception as _stale_err:
+            logger.debug("[STALE-GUARD] check skipped: %s", _stale_err)
+
         # === INSTITUTIONAL PRE-CHECK (volume / profile / order flow / sweep) ===
         if getattr(config, "INSTITUTIONAL_GATE_ENABLED", True):
             try:
@@ -1355,6 +1469,19 @@ class VcaniTradeEngine:
                     )
                     logger.info("[PRE-CHECK] %s", _pc["summary"])
                     self._log_dashboard(f"[PRE-CHECK] {ticker} {action}: {_pc['verdict']} | {_pc['summary']}")
+                    # Store for downstream gates (MOM/FLOW-GATE) to read live flow.
+                    if not hasattr(self, "_last_precheck") or self._last_precheck is None:
+                        self._last_precheck = {}
+                    self._last_precheck[ticker] = _pc
+                    # Also store the flow delta_pct directly for the FLOW-GATE.
+                    try:
+                        _flow = (_pc or {}).get("flow") or {}
+                        _dp = float(_flow.get("delta_pct", 0.0) or 0.0)
+                        if not hasattr(self, "_last_flow_delta") or self._last_flow_delta is None:
+                            self._last_flow_delta = {}
+                        self._last_flow_delta[ticker] = _dp
+                    except Exception:
+                        pass
                     if _pc.get("block"):
                         logger.warning("[PRE-CHECK] REJECTED %s %s: %s", action, ticker, _pc["reason"])
                         self._log_dashboard(f"[PRE-CHECK] BLOCKED {action} {ticker}: {_pc['reason']}")
@@ -1381,6 +1508,77 @@ class VcaniTradeEngine:
                 reason=_velez_reason,
             )
         logger.info("[VELEZ-GATE] %s %s passed: %s", action, ticker, _velez_reason)
+
+        # === HARD MOMENTUM + ORDER-FLOW GATE (the "don't buy into a falling market" rule) ===
+        # The weak 2B brain sometimes says "prices rising" while MACD momentum is
+        # NEGATIVE and/or sellers outnumber buyers. That caused the 12:57 bad long.
+        # This gate CANNOT be overruled by the brain. A buy needs BOTH:
+        #   - MACD histogram >= 0 (momentum not against us), AND
+        #   - order-flow delta >= flow_min (more buyers than sellers hitting the tape).
+        # A sell needs the inverse. No naked counter-momentum entries.
+        try:
+            import pandas as _pd
+            _iv = getattr(self.scanner, "_indicators", None) or {}
+            _interval = str(getattr(config, "VELEZ_CHART_INTERVAL", "1m") or "1m")
+            _df = self.scanner._fetch_market_data(ticker, interval=_interval)
+            if _df is not None and len(_df) >= 35:
+                _close = _df["Close"] if "Close" in _df else _df.get("close")
+                # --- MACD histogram (momentum) ---
+                _ema12 = _close.ewm(span=12, adjust=False).mean()
+                _ema26 = _close.ewm(span=26, adjust=False).mean()
+                _macd = _ema12 - _ema26
+                _sig = _macd.ewm(span=9, adjust=False).mean()
+                _hist = float((_macd - _sig).iloc[-1])
+                # --- order-flow: use BOTH the precheck delta AND the live
+                # demand/supply imbalance so a stale 0.000 delta can't block a
+                # genuine buying-pressure tape (e.g. Demand 14 > Supply 9). ---
+                _flow_min = float(getattr(config, "INSTITUTIONAL_FLOW_MIN", 0.10) or 0.10)
+                _delta = float(self._last_flow_delta.get(ticker, 0.0)) if hasattr(self, "_last_flow_delta") else 0.0
+                if not hasattr(self, "_last_flow_delta"):
+                    self._last_flow_delta = {}
+                if _delta == 0.0:
+                    _pc_now = getattr(self, "_last_precheck", {}).get(ticker)
+                    if isinstance(_pc_now, dict):
+                        _delta = float(_pc_now.get("delta", 0.0) or 0.0)
+                # Live demand/supply imbalance from the liquidity engine (fallback signal)
+                _demand = 0
+                _supply = 0
+                try:
+                    _liq = getattr(self.scanner, "liquidity", None) or getattr(self, "liquidity_engine", None)
+                    if _liq is not None and hasattr(_liq, "analyze"):
+                        _lres = _liq.analyze(_df, ticker)
+                        if _lres is not None:
+                            _demand = sum(1 for z in getattr(_lres, "demand_zones", []) if not getattr(z, "invalidated", False))
+                            _supply = sum(1 for z in getattr(_lres, "supply_zones", []) if not getattr(z, "invalidated", False))
+                except Exception as _lq_err:
+                    logger.debug("[FLOW-GATE] liquidity fallback skipped: %s", _lq_err)
+                _buy_pressure = (_delta >= _flow_min) or (_demand > _supply)
+                _sell_pressure = (_delta <= -_flow_min) or (_supply > _demand)
+                if action == "BUY":
+                    # Block BUY only if momentum is negative AND flow is NOT bullish.
+                    # A clearly bullish order flow (or demand>supply) overrides a
+                    # slightly-negative MACD in a ranging market.
+                    if _hist < 0 and not _buy_pressure:
+                        logger.warning("[MOM-GATE] REJECTED BUY %s: MACD negative AND no buyer pressure (hist=%.3f delta=%.3f D%d/S%d)", ticker, _hist, _delta, _demand, _supply)
+                        self._log_dashboard(f"[MOM-GATE] BLOCKED BUY {ticker}: momentum down + no flow (hist={_hist:.2f})")
+                        return TradeResult(status="REJECTED_MOMENTUM", ticker=ticker, action=action, reason=f"MACD hist {_hist:.3f} < 0 and no buyer pressure")
+                    if not _buy_pressure:
+                        logger.warning("[FLOW-GATE] REJECTED BUY %s: no buyer pressure (delta=%.3f D%d/S%d)", ticker, _delta, _demand, _supply)
+                        self._log_dashboard(f"[FLOW-GATE] BLOCKED BUY {ticker}: no buyer pressure (delta={_delta:.2f}, D{_demand}/S{_supply})")
+                        return TradeResult(status="REJECTED_FLOW", ticker=ticker, action=action, reason=f"order flow unsupportive (delta {_delta:.3f}, demand {_demand} <= supply {_supply})")
+                else:  # SELL
+                    # Block SELL only if momentum is positive AND flow is NOT bearish.
+                    if _hist > 0 and not _sell_pressure:
+                        logger.warning("[MOM-GATE] REJECTED SELL %s: MACD positive AND no seller pressure (hist=%.3f delta=%.3f D%d/S%d)", ticker, _hist, _delta, _demand, _supply)
+                        self._log_dashboard(f"[MOM-GATE] BLOCKED SELL {ticker}: momentum up + no flow (hist={_hist:.2f})")
+                        return TradeResult(status="REJECTED_MOMENTUM", ticker=ticker, action=action, reason=f"MACD hist {_hist:.3f} > 0 and no seller pressure")
+                    if not _sell_pressure:
+                        logger.warning("[FLOW-GATE] REJECTED SELL %s: no seller pressure (delta=%.3f D%d/S%d)", ticker, _delta, _demand, _supply)
+                        self._log_dashboard(f"[FLOW-GATE] BLOCKED SELL {ticker}: no seller pressure (delta={_delta:.2f}, D{_demand}/S{_supply})")
+                        return TradeResult(status="REJECTED_FLOW", ticker=ticker, action=action, reason=f"order flow unsupportive (delta {_delta:.3f}, supply {_supply} <= demand {_demand})")
+                logger.info("[MOM/FLOW-GATE] %s %s passed: hist=%.3f delta=%.3f D%d/S%d", action, ticker, _hist, _delta, _demand, _supply)
+        except Exception as _mg_err:
+            logger.debug("[MOM/FLOW-GATE] eval skipped (allowing): %s", _mg_err)
 
         # SAFETY: Remove positions older than 4 hours (likely phantoms).
         # 4 hours is long enough for any real futures trade.

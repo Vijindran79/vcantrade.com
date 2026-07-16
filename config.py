@@ -69,6 +69,12 @@ HARD_PROFIT_TARGET_PIPS = float(os.getenv("HARD_PROFIT_TARGET_PIPS", "100"))
 #   (price between the EMAs = NO TRADE). Stops counter-trend entries.
 VELEZ_GATE_ENABLED = os.getenv("VELEZ_GATE_ENABLED", "true").lower() == "true"
 VELEZ_REQUIRE_200EMA = os.getenv("VELEZ_REQUIRE_200EMA", "true").lower() == "true"
+# Tolerance band for the Velez structure/price-vs-EMA check.
+# A price that is only marginally (<this %) above/below an EMA is
+# treated as NEUTRAL (noise), not a blocking trend structure.
+# 0.0025 = 0.25% — blocks only CLEAR structure, lets marginal
+# pops/dips through so the flow-aligned scanner can trade.
+VELEZ_STRUCTURE_TOL = float(os.getenv("VELEZ_STRUCTURE_TOL", "0.0025"))
 VELEZ_CHART_INTERVAL = os.getenv("VELEZ_CHART_INTERVAL", "1m")
 
 # ===== MARKET STUDY / WARM-UP (observe before executing) =====
@@ -89,12 +95,12 @@ SESSION_GATE_ENABLED = os.getenv("SESSION_GATE_ENABLED", "true").lower() == "tru
 # HARD-BLOCKS only on clearly adverse reads (sweep against direction, or
 # order flow strongly opposed) so it sharpens entries instead of killing them.
 INSTITUTIONAL_GATE_ENABLED = os.getenv("INSTITUTIONAL_GATE_ENABLED", "true").lower() == "true"
-INSTITUTIONAL_BLOCK_SWEEP = os.getenv("INSTITUTIONAL_BLOCK_SWEEP", "true").lower() == "true"
+INSTITUTIONAL_BLOCK_SWEEP = os.getenv("INSTITUTIONAL_BLOCK_SWEEP", "false").lower() == "true"
 INSTITUTIONAL_BLOCK_ORDERFLOW = os.getenv("INSTITUTIONAL_BLOCK_ORDERFLOW", "true").lower() == "true"
 # Sharper entries: require order flow to SUPPORT the direction (trade with the
 # flow, not against it). flow_min is the min cumulative-delta% to allow a trade.
 INSTITUTIONAL_REQUIRE_FLOW = os.getenv("INSTITUTIONAL_REQUIRE_FLOW", "true").lower() == "true"
-INSTITUTIONAL_FLOW_MIN = float(os.getenv("INSTITUTIONAL_FLOW_MIN", "0.10"))
+INSTITUTIONAL_FLOW_MIN = float(os.getenv("INSTITUTIONAL_FLOW_MIN", "0.05"))
 # Optional extra filter: only BUY in discount / SELL in premium (value area).
 INSTITUTIONAL_REQUIRE_DISCOUNT = os.getenv("INSTITUTIONAL_REQUIRE_DISCOUNT", "false").lower() == "true"
 
@@ -429,6 +435,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_TIMEOUT = 180
 JSON_OUTPUT = True
+# Set BRAIN_AUDIT_LOG=true in .env to re-enable verbose per-call brain payload dumps.
+BRAIN_AUDIT_LOG = os.getenv("BRAIN_AUDIT_LOG", "false").lower() == "true"
 
 # ===== GEMINI LIVE BRAIN =====
 GEMINI_ENABLED = os.getenv("GEMINI_ENABLED", "True").lower() == "true"
