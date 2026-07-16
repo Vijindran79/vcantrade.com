@@ -656,9 +656,12 @@ class VcaniTradeEngine:
                 brain_used=str(payload.get("brain_used", "LOCAL_BRAIN")),
                 confidence=float(payload.get("confidence", 0.0) or 0.0),
             )
-            if action in {"BUY", "SELL"}:
-                _speak_alert(f"{action} {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
-            elif action == "WAIT" and bool(getattr(config, "ENABLE_WAIT_NARRATION", False)):
+            # === FIX: Do NOT speak here. Narration moved to AFTER the confidence
+            # check passes in process_validated_execution_path(). Speaking here
+            # caused the bot to narrate every signal (non-stop talking) even when
+            # the confidence filter would block the trade from executing.
+            # Only narrate WAIT signals if explicitly enabled.
+            if action == "WAIT" and bool(getattr(config, "ENABLE_WAIT_NARRATION", False)):
                 _speak_alert(f"Wait on {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
             _confidence_val = float(payload.get("confidence", 0.0) or 0.0)
             # === AGREEMENT RULE (Apex safety): brain verdict AND scanner side must agree ===
@@ -991,7 +994,37 @@ class VcaniTradeEngine:
                 take_profit,
             )
 
+        # === HARD TREND-DIRECTION FILTER (prevents buying into a dropping market) ===
+        try:
+            _trend_df = self.scanner._fetch_market_data(ticker)
+            if _trend_df is not None and len(_trend_df) >= 20:
+                _trend_close = _trend_df["Close"]
+                _trend_ema20 = float(_trend_close.ewm(span=20, adjust=False).mean().iloc[-1])
+                _trend_price = float(_trend_close.iloc[-1])
+                if _trend_ema20 > 0 and _trend_price > 0:
+                    if action == "BUY" and _trend_price < _trend_ema20:
+                        logger.warning("[TREND-GATE] BLOCKED BUY %s: price %.2f < EMA20 %.2f - DROPPING", ticker, _trend_price, _trend_ema20)
+                        self._log_dashboard(f"[TREND-GATE] BLOCKED BUY {ticker}: below EMA20 (downtrend)")
+                        return
+                    if action == "SELL" and _trend_price > _trend_ema20:
+                        logger.warning("[TREND-GATE] BLOCKED SELL %s: price %.2f > EMA20 %.2f - RISING", ticker, _trend_price, _trend_ema20)
+                        self._log_dashboard(f"[TREND-GATE] BLOCKED SELL {ticker}: above EMA20 (uptrend)")
+                        return
+        except Exception as _trend_err:
+            logger.debug("[TREND-GATE] eval skipped: %s", _trend_err)
+
         logger.info("[EXEC] Prepared %s %s entry=%.2f sl=%.2f tp=%.2f", action, ticker, entry, stop_loss, take_profit)
+        # === NARRATION (only speak when trade is about to execute) ===
+        try:
+            h1_analysis = payload.get("h1_analysis", {}) if isinstance(payload.get("h1_analysis", {}), dict) else {}
+            h1_bias = str(h1_analysis.get("bias") or "UNKNOWN").upper()
+            h1_adx = h1_analysis.get("adx", 0)
+            h1_ema = str(h1_analysis.get("ema_alignment") or "MIXED")
+            h1_text = f"1H dropdown {h1_bias}, ADX {h1_adx}, {h1_ema}"
+            _speak_alert(f"{action} {ticker}. {h1_text}. {reason}", min_interval_seconds=4.0)
+        except Exception:
+            pass
+
         self._log_dashboard(f"[ROUTE] {self.current_mode}: {action} {ticker} | {reason[:140]}")
 
         try:

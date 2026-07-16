@@ -21,25 +21,8 @@ from core.models import (
 from execution.rpa_executor import RPAExecutor
 from core.profit_lock import ProfitLock, WalkAwayProtocol
 from core.atr_stops import LooseATRStops
-from core.institutional_suite import suite
-from core.pnl_tracker import pnl_tracker, reversal_detector, adaptive_risk
-from core.reversal_engine import reversal_engine
 
 logger = logging.getLogger(__name__)
-
-# Hawk-class ladder scale-out engine
-try:
-    from core.ladder_exit import LadderExitManager
-    _LADDER_AVAILABLE = True
-except ImportError:
-    _LADDER_AVAILABLE = False
-
-# Hawk-class circuit breaker
-try:
-    from core.risk_governor import RiskGovernor
-    _GOVERNOR_AVAILABLE = True
-except ImportError:
-    _GOVERNOR_AVAILABLE = False
 
 
 class TradeEngine:
@@ -50,22 +33,7 @@ class TradeEngine:
         self.open_trades: List[TradeRecord] = []
         self.trade_history: List[TradeRecord] = []
         self.cooldown_until: Optional[datetime] = None
-        
-        # HAWK PROTOCOL: Single-Asset Lock
-        self.target_lock_active = False
-        self.locked_asset = None
-        self.hawk_mode = True  # Enable single-asset focus
-        self.scanner_thread = None  # Will be set by external scanner if exists
-        
-        # Initialize RPA executor with error handling
-        self.rpa_executor = None
-        try:
-            self.rpa_executor = RPAExecutor()
-            logger.info("[RPA] Executor initialized successfully")
-        except Exception as e:
-            logger.warning("[RPA] Executor initialization failed: %s - Running in teacher mode", e)
-            self.rpa_executor = None
-        
+        self.rpa_executor = RPAExecutor()
         self.last_indicators: dict = {}  # Populated by swarm before process_signal
 
         # Active trade management: ProfitLock + ATR stops
@@ -73,23 +41,13 @@ class TradeEngine:
         self.walk_away = WalkAwayProtocol()
         self.atr_stops = LooseATRStops()
 
-        # Hawk-class ladder + governor
-        self.ladder = LadderExitManager() if _LADDER_AVAILABLE else None
-        self.governor = RiskGovernor() if _GOVERNOR_AVAILABLE else None
-
         # Initialize SQLite ledger
         self._init_ledger()
-        # Price cache for HAWK protocol
-        self._last_prices = {}
-        # Bar tracking: set externally by scanner when a new candle closes
-        self._last_was_new_bar = False
 
     def _init_ledger(self):
-        """Initialize SQLite trade ledger with WAL mode for concurrent access."""
+        """Initialize SQLite trade ledger"""
         try:
             self.conn = sqlite3.connect("vcanitrade_ledger.db", check_same_thread=False)
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("PRAGMA busy_timeout=5000")
             cursor = self.conn.cursor()
             cursor.execute(
                 """
@@ -109,12 +67,12 @@ class TradeEngine:
                     status TEXT,
                     closed_at TEXT
                 )
-                """
+            """
             )
             self.conn.commit()
             logger.info("Trade ledger initialized")
         except sqlite3.Error as e:
-            logger.error("Failed to initialize trade ledger: %s", e)
+            logger.error(f"Failed to initialize trade ledger: {e}")
             raise
 
     def process_signal(
@@ -126,28 +84,13 @@ class TradeEngine:
         """
         # Check safety controls
         if not self._check_safety():
-            logger.warning("Trade blocked by safety controls: %s", signal.asset)
+            logger.warning(f"Trade blocked by safety controls: {signal.asset}")
             return None
-
-        # ADAPTIVE RISK: Block or restrict trades after cumulative losses
-        if signal.action in (SignalAction.BUY, SignalAction.SELL):
-            # Extract confidence as numeric
-            _conf_map = {"LOW": 0.25, "MEDIUM": 0.50, "HIGH": 0.75, "VERY_HIGH": 0.90}
-            _conf_raw = getattr(signal.confidence, "value", 0.5)
-            _conf_num = _conf_map.get(str(_conf_raw), 0.5) if isinstance(_conf_raw, str) else float(_conf_raw or 0.5)
-            allowed, adapt_reason = adaptive_risk.should_allow_trade(_conf_num)
-            if not allowed:
-                logger.warning("[ADAPTIVE] %s %s BLOCKED: %s", signal.action.value, signal.asset, adapt_reason)
-                return None
-            # Log adaptive state if not NORMAL
-            if adaptive_risk.state.mode != "NORMAL":
-                logger.info("[ADAPTIVE] %s", adapt_reason)
 
         # Teacher mode: log signal but don't execute
         if mode == "TEACHER" or config.DRY_RUN:
             logger.info(
-                "[TEACHER MODE] Signal: %s %s - %s",
-                signal.action, signal.asset, signal.reason
+                f"[TEACHER MODE] Signal: {signal.action} {signal.asset} - {signal.reason}"
             )
             return self._create_signal_record(signal)
 
@@ -159,39 +102,21 @@ class TradeEngine:
             if signal.action == SignalAction.BUY and trend == "BEARISH":
                 logger.warning(
                     "[TREND FILTER] BLOCKED BUY %s — trend is BEARISH. Signal: %s",
-                    signal.asset, signal.reason
+                    signal.asset, signal.reason,
                 )
                 return None
             if signal.action == SignalAction.SELL and trend == "BULLISH":
                 logger.warning(
                     "[TREND FILTER] BLOCKED SELL %s — trend is BULLISH. Signal: %s",
-                    signal.asset, signal.reason
+                    signal.asset, signal.reason,
                 )
                 return None
             if mtf_alignment == "AGAINST":
                 logger.warning(
                     "[TREND FILTER] BLOCKED %s %s — MTF alignment is AGAINST trend.",
-                    signal.action.value, signal.asset
+                    signal.action.value, signal.asset,
                 )
                 return None
-
-        # INSTITUTIONAL SUITE: Regime filter + drawdown/daily-loss gates
-        prices_for_regime = []
-        if hasattr(self, 'last_indicators') and isinstance(self.last_indicators, dict):
-            cp = self.last_indicators.get("current_price")
-            if cp:
-                prices_for_regime = [cp]
-        _conf_map = {"LOW": 0.25, "MEDIUM": 0.50, "HIGH": 0.75, "VERY_HIGH": 0.90}
-        _conf_val = getattr(signal.confidence, "value", 0.5)
-        _conf_num = _conf_map.get(str(_conf_val), 0.5) if isinstance(_conf_val, str) else float(_conf_val or 0.5)
-        sig_dict = {
-            "action": signal.action.value,
-            "confidence": _conf_num,
-        }
-        inst_check = suite.on_signal(sig_dict, prices_for_regime)
-        if not inst_check.get("allow"):
-            logger.warning("[INST-FILTER] BLOCKED %s — %s", signal.asset, inst_check.get("reason"))
-            return None
 
         # Auto mode: execute trade
         try:
@@ -202,11 +127,11 @@ class TradeEngine:
             elif signal.action == SignalAction.CLOSE:
                 return self._execute_close(signal)
             else:
-                logger.info("HOLD signal for %s", signal.asset)
+                logger.info(f"HOLD signal for {signal.asset}")
                 return None
 
         except Exception as e:
-            logger.error("Trade execution failed: %s", e)
+            logger.error(f"Trade execution failed: {e}")
             return None
 
     def _check_safety(self) -> bool:
@@ -219,22 +144,18 @@ class TradeEngine:
             return False
 
         # Daily loss limit (0 = disabled, e.g. Apex Trader Funding has no daily limit)
-        # A6 FIX: only trigger on NEGATIVE pnl (a profit must not halt trading).
-        if config.MAX_DAILY_LOSS > 0 and self.safety_state.daily_pnl < 0 \
-                and abs(self.safety_state.daily_pnl) >= config.MAX_DAILY_LOSS:
+        if config.MAX_DAILY_LOSS > 0 and abs(self.safety_state.daily_pnl) >= config.MAX_DAILY_LOSS:
             logger.warning(
-                "Daily loss limit reached: $%.2f",
-                self.safety_state.daily_pnl
+                f"Daily loss limit reached: ${self.safety_state.daily_pnl:.2f}"
             )
             self.safety_state.daily_loss_limit_hit = True
             return False
 
         # Cooldown period
         if self.cooldown_until and datetime.utcnow() < self.cooldown_until:
-            # A7 FIX: timedelta subtraction returns timedelta; use .total_seconds().
-            remaining = (self.cooldown_until - datetime.utcnow()).total_seconds()
-            self.safety_state.cooldown_remaining_seconds = int(remaining)
-            logger.warning("Cooldown active: %ds remaining", int(remaining))
+            remaining = (self.cooldown_until - datetime.utcnow()).seconds
+            self.safety_state.cooldown_remaining_seconds = remaining
+            logger.warning(f"Cooldown active: {remaining}s remaining")
             return False
         else:
             self.safety_state.cooldown_remaining_seconds = 0
@@ -243,8 +164,7 @@ class TradeEngine:
         # Max positions
         if len(self.open_trades) >= config.MAX_OPEN_POSITIONS:
             logger.warning(
-                "Max positions reached: %d/%d",
-                len(self.open_trades), config.MAX_OPEN_POSITIONS
+                f"Max positions reached: {len(self.open_trades)}/{config.MAX_OPEN_POSITIONS}"
             )
             return False
 
@@ -272,16 +192,6 @@ class TradeEngine:
 
         Call this on every tick/scan cycle. Returns list of closed trade IDs.
         """
-        # Store current prices for HAWK protocol get_current_price()
-        self._last_prices.update(current_prices)
-
-        # INSTITUTIONAL SUITE: Update equity curve + check drawdown/target alerts
-        try:
-            current_eq = float(config.CURRENT_BALANCE) + float(self.safety_state.daily_pnl)
-            suite.on_tick(current_eq)
-        except Exception as _e:
-            logger.debug("[INST] on_tick skipped: %s", _e)
-
         closed_ids = []
         now = datetime.utcnow()
 
@@ -291,18 +201,12 @@ class TradeEngine:
             if self.walk_away.check_violation(daily_pnl_pct):
                 logger.critical(
                     "[WALK AWAY] Daily loss %.2f%% exceeds threshold. Shutting down for 24h.",
-                    daily_pnl_pct
+                    daily_pnl_pct,
                 )
                 for trade in list(self.open_trades):
                     self._close_trade_at_price(trade, current_prices.get(trade.asset, trade.entry_price), "WALK_AWAY")
                     closed_ids.append(trade.id)
-                # Reset HAWK lock after closing all positions
-                self.resume_scanners()
                 return closed_ids
-
-        # HAWK: Update trailing stops for locked asset
-        if self.target_lock_active and self.locked_asset:
-            self.update_trailing_stops()
 
         # Manage each open trade
         for trade in list(self.open_trades):
@@ -312,118 +216,17 @@ class TradeEngine:
 
             is_long = trade.action == SignalAction.BUY
 
-            # ── HARD PROFIT TARGET (non-negotiable) ───────────────
-            # Close when profit reaches 100 pips. No exceptions.
-            try:
-                _target = float(getattr(config, "HARD_PROFIT_TARGET_PIPS", 100) or 100)
-                if is_long:
-                    _pnl_pips = current_price - trade.entry_price
-                else:
-                    _pnl_pips = trade.entry_price - current_price
-                if _pnl_pips >= _target:
-                    logger.info(
-                        "[PROFIT-TARGET] %s %s: +%.1f pips (target=%.0f) --- CLOSING",
-                        trade.action.value, trade.asset, _pnl_pips, _target,
-                    )
-                    self._close_trade_at_price(trade, current_price, "PROFIT_TARGET")
-                    closed_ids.append(trade.id)
-                    continue
-            except Exception:
-                pass
-
-            # ── POST-ENTRY REVERSAL CHECK ─────────────────────────
-            try:
-                should_exit_rev, rev_reason = reversal_detector.check(trade.asset, current_price)
-                if should_exit_rev:
-                    logger.warning("[REVERSAL] Cutting %s: %s", trade.asset, rev_reason)
-                    self._close_trade_at_price(trade, current_price, "REVERSAL:" + rev_reason[:60])
-                    closed_ids.append(trade.id)
-                    continue
-            except Exception:
-                pass
-
-            # ── INSTITUTIONAL REVERSAL ENGINE ─────────────────────
-            # Multi-signal reversal detection after price surges.
-            try:
-                _df_rev = self._get_price_dataframe(trade.asset)
-                if _df_rev is not None and len(_df_rev) >= 20:
-                    _rsig = reversal_engine.analyze(trade.asset, _df_rev)
-                    if _rsig.is_reversal:
-                        logger.warning("[REVERSAL-ENGINE] %s", _rsig.summary())
-                        self._close_trade_at_price(
-                            trade, current_price,
-                            "REVERSAL_ENGINE:" + _rsig.confidence
-                        )
-                        closed_ids.append(trade.id)
-                        continue
-            except Exception:
-                pass
-
-            # --- HAWK LADDER: staged scale-out ---
-            # IMPORTANT: Do NOT scale out until profit reaches the hard target.
-            # The ladder was closing at +10 pips, preventing the 100-pip target
-            # from ever being hit. Now the ladder only fires AFTER 100 pips.
-            _profit_pips = (current_price - trade.entry_price) if is_long else (trade.entry_price - current_price)
-            _hard_target = float(getattr(config, "HARD_PROFIT_TARGET_PIPS", 100) or 100)
-            if _profit_pips < _hard_target:
-                # Profit hasn't reached target yet — skip ladder, let it run
-                pass
-            elif self.ladder and trade.stop_loss:
-                # A9 FIX: pass a real "new bar closed" flag. Until the swarm wires
-                # this through, we treat every tick as a new bar so the time-stop
-                # / rsi-exit branches in the ladder actually fire.
-                _new_bar = bool(getattr(self, "_last_was_new_bar", True))
-                _lsig = self.ladder.evaluate(trade.asset, current_price, None, _new_bar)
-                if _lsig.action == "CLOSE_FULL":
-                    self._close_trade_at_price(trade, current_price, "LADDER:" + _lsig.reason)
-                    closed_ids.append(trade.id)
-                    continue
-                elif _lsig.action == "CLOSE_PARTIAL":
-                    # A8 FIX: actually send the partial close to the executor instead
-                    # of just bumping an internal counter.
-                    try:
-                        close_pct = float(_lsig.close_pct or 0.0)
-                    except Exception:
-                        close_pct = 0.0
-                    if close_pct > 0.0 and self.rpa_executor and not config.DRY_RUN:
-                        try:
-                            ok = self.rpa_executor.partial_close(
-                                trade.asset, close_pct,
-                                side=("BUY" if is_long else "SELL"),
-                                reason="LADDER:" + str(_lsig.reason),
-                            )
-                            if ok:
-                                logger.info(
-                                    "[LADDER] partial close %s %.0f%% (%s)",
-                                    trade.asset, close_pct * 100.0, _lsig.reason,
-                                )
-                            else:
-                                logger.warning(
-                                    "[LADDER] partial close %s FAILED at executor",
-                                    trade.asset,
-                                )
-                        except AttributeError:
-                            # Older executor without partial_close - fall back to
-                            # recording only, but log loudly.
-                            logger.warning(
-                                "[LADDER] rpa_executor.partial_close() missing - "
-                                "recording only (will not reduce position)"
-                            )
-                        except Exception as _e:
-                            logger.error("[LADDER] partial close error: %s", _e)
-                    # Always keep the ladder's internal book up to date.
-                    self.ladder.record_partial_close(trade.asset, close_pct)
-                    if _lsig.new_stop:
-                        trade.stop_loss = _lsig.new_stop
-
-            # Optional time-based exit
+            # Optional time-based exit. The old hard 30-minute exit was killing
+            # legitimate trends, so we now read MAX_TRADE_HOLD_SECONDS from
+            # config (default 0 = disabled). Set to a non-zero value only if
+            # you genuinely want a wall-clock timeout.
             max_hold = int(getattr(config, "MAX_TRADE_HOLD_SECONDS", 0) or 0)
             if max_hold > 0 and trade.timestamp:
                 hold_seconds = (now - trade.timestamp).total_seconds()
                 if hold_seconds > max_hold:
                     logger.info(
                         "[TIME EXIT] %s held for %.0fs (>%ds). Closing.",
-                        trade.asset, hold_seconds, max_hold
+                        trade.asset, hold_seconds, max_hold,
                     )
                     self._close_trade_at_price(trade, current_price, "TIME_EXIT")
                     closed_ids.append(trade.id)
@@ -447,7 +250,7 @@ class TradeEngine:
                 if new_stop > 0 and new_stop != trade.stop_loss:
                     logger.info(
                         "[BREAK EVEN] %s stop moved to break-even: %.2f -> %.2f",
-                        trade.asset, trade.stop_loss, new_stop
+                        trade.asset, trade.stop_loss, new_stop,
                     )
                     trade.stop_loss = new_stop
                     self.profit_lock.update_position_stop(
@@ -461,12 +264,10 @@ class TradeEngine:
                     logger.info("[STOP HIT] %s price %.2f <= stop %.2f", trade.asset, current_price, trade.stop_loss)
                     self._close_trade_at_price(trade, current_price, "STOP_HIT")
                     closed_ids.append(trade.id)
-                    continue
                 elif not is_long and current_price >= trade.stop_loss:
                     logger.info("[STOP HIT] %s price %.2f >= stop %.2f", trade.asset, current_price, trade.stop_loss)
                     self._close_trade_at_price(trade, current_price, "STOP_HIT")
                     closed_ids.append(trade.id)
-                    continue
 
             # Check if take profit was hit
             if trade.take_profit and trade.take_profit > 0:
@@ -483,13 +284,9 @@ class TradeEngine:
 
     def _close_trade_at_price(self, trade: TradeRecord, price: float, reason: str):
         """Close a trade at a specific price with reason."""
-        # Guard against double-close
-        if trade not in self.open_trades:
-            logger.warning("[CLOSE] Trade %s already closed — skipping duplicate close", trade.id)
-            return
         trade.exit_price = price
         trade.closed_at = datetime.utcnow()
-        trade.status = "CLOSED_" + reason
+        trade.status = f"CLOSED_{reason}"
         trade.pnl = (
             (trade.exit_price - trade.entry_price)
             if trade.action == SignalAction.BUY
@@ -502,80 +299,11 @@ class TradeEngine:
         logger.info(
             "[CLOSE] %s %s @ %.2f -> %.2f | PnL: %.2f | Reason: %s",
             trade.action.value, trade.asset, trade.entry_price,
-            trade.exit_price, trade.pnl or 0, reason
+            trade.exit_price, trade.pnl or 0, reason,
         )
-
-        # ── REALIZED P&L TRACKING (persistent across restarts) ────
-        hold_sec = 0.0
-        if trade.timestamp and trade.closed_at:
-            try:
-                t_open = datetime.fromisoformat(str(trade.timestamp))
-                t_close = datetime.fromisoformat(str(trade.closed_at))
-                hold_sec = (t_close - t_open).total_seconds()
-            except Exception:
-                pass
-        try:
-            pnl_tracker.record_close(
-                trade_id=trade.id,
-                asset=trade.asset,
-                side=trade.action.value,
-                entry_price=float(trade.entry_price or 0),
-                exit_price=float(trade.exit_price or 0),
-                pnl=float(trade.pnl or 0),
-                hold_seconds=hold_sec,
-                reason=reason,
-            )
-        except Exception as _e:
-            logger.debug("[PnL] record_close error: %s", _e)
-
-        # Clear reversal detector for this asset
-        try:
-            reversal_detector.clear(trade.asset)
-            reversal_engine.clear_state(trade.asset)
-        except Exception:
-            pass
-
-        # INSTITUTIONAL SUITE: Record closed trade for Sharpe/Sortino/Drawdown
-        try:
-            hold_sec = 0.0
-            if trade.timestamp and trade.closed_at:
-                try:
-                    t_open = datetime.fromisoformat(str(trade.timestamp))
-                    t_close = datetime.fromisoformat(str(trade.closed_at))
-                    hold_sec = (t_close - t_open).total_seconds()
-                except Exception:
-                    pass
-            size = int(getattr(trade, "quantity", 1) or 1)
-            suite.on_trade_close(
-                symbol=trade.asset, side=trade.action.value,
-                entry=float(trade.entry_price or 0),
-                exit=float(trade.exit_price or 0),
-                size=size, pnl=float(trade.pnl or 0),
-                hold_sec=hold_sec,
-            )
-        except Exception as _e:
-            logger.debug("[INST] on_trade_close skipped: %s", _e)
-        
-        # HAWK: Resume scanners after position close
-        if self.target_lock_active and trade.asset == self.locked_asset:
-            self.resume_scanners()
-
-        # Hawk circuit breaker: record result
-        if self.governor and trade.pnl is not None:
-            _pp = (trade.pnl / trade.entry_price * 100) if trade.entry_price > 0 else 0.0
-            self.governor.record_trade_result(trade.pnl >= 0, _pp)
-
-        # Hawk ladder: clear
-        if self.ladder:
-            self.ladder.clear_trade(trade.asset)
 
     def _execute_buy(self, signal: LLMAnalysisOutput) -> TradeRecord:
         """Execute buy trade with confidence-based position sizing"""
-        # HAWK LOCK ENGAGEMENT
-        if self.target_lock_active:
-            logger.warning("[HAWK] LOCK ACTIVE on %s. Ignoring entry for %s.", self.locked_asset, signal.asset)
-            return None
-        
         risk_pct = self._get_confidence_risk_pct(signal.confidence)
         logger.info("[SIZING] %s confidence -> %.1f%% risk per trade", signal.confidence.value, risk_pct)
         trade = TradeRecord(
@@ -594,76 +322,19 @@ class TradeEngine:
         self._save_trade(trade)
         self.open_trades.append(trade)
 
-        # Hawk ladder: register
-        if self.ladder and trade.stop_loss:
-            self.ladder.register_trade(trade.asset, "BUY", trade.entry_price, trade.stop_loss, 1.0)
-
         # Execute via RPA if not dry run
-        rpa_success = True
         if not config.DRY_RUN:
-            if not self.rpa_executor:
-                logger.error("RPA executor not available for BUY %s — aborting", trade.asset)
-                self.open_trades.remove(trade)
-                return None
-            rpa_success = self.rpa_executor.execute_trade(trade)
-            if not rpa_success:
-                logger.error("RPA execution failed for BUY %s — reverting phantom", trade.asset)
-                try:
-                    self.open_trades.remove(trade)
-                except ValueError:
-                    pass
-                return None
-            # INSTITUTIONAL SUITE: Record execution for TCA
-            try:
-                fill_price = float(signal.entry_price or trade.entry_price or 0)
-                suite.on_execution(
-                    symbol=trade.asset, side="BUY",
-                    intended_price=fill_price, fill_price=fill_price,
-                    intended_size=1, filled_size=1,
-                    latency_ms=0.0,
-                )
-            except Exception as _e:
-                logger.debug("[INST] on_execution skipped: %s", _e)
-
-        # HAWK LOCK ACTIVATION (only if RPA succeeded)
-        self.target_lock_active = True
-        self.locked_asset = signal.asset
-        conf_val = getattr(signal.confidence, "value", signal.confidence)
-        score = 0.0
-        try:
-            score = float(getattr(signal, "confidence_score", 0.0) or 0.0)
-        except Exception:
-            pass
-        logger.info(
-            "[HAWK] QUALIFIED WINNER: %s | side=%s | confidence=%s | score=%.2f — LOCKING",
-            signal.asset, signal.action.value, conf_val, score,
-        )
-        logger.info("[HAWK] TARGET LOCKED: %s. Scanners suspended.", signal.asset)
-        self.suspend_scanners()
-
-        # Register for post-entry reversal detection
-        try:
-            reversal_detector.register_entry(
-                asset=trade.asset, side="BUY",
-                entry_price=trade.entry_price,
-                stop_loss=trade.stop_loss or 0.0,
-            )
-        except Exception:
-            pass
+            success = self.rpa_executor.execute_trade(trade)
+            if not success:
+                logger.error(f"RPA execution failed for BUY {trade.asset}")
 
         logger.info(
-            "EXECUTED BUY: %s @ %.2f | SL: %.2f | TP: %.2f",
-            trade.asset, trade.entry_price, trade.stop_loss, trade.take_profit
+            f"EXECUTED BUY: {trade.asset} @ {trade.entry_price} | SL: {trade.stop_loss} | TP: {trade.take_profit}"
         )
         return trade
 
     def _execute_sell(self, signal: LLMAnalysisOutput) -> TradeRecord:
         """Execute sell trade with confidence-based position sizing"""
-        # HAWK LOCK ENGAGEMENT
-        if self.target_lock_active:
-            logger.warning("[HAWK] LOCK ACTIVE on %s. Ignoring entry for %s.", self.locked_asset, signal.asset)
-            return None
-        
         risk_pct = self._get_confidence_risk_pct(signal.confidence)
         logger.info("[SIZING] %s confidence -> %.1f%% risk per trade", signal.confidence.value, risk_pct)
         trade = TradeRecord(
@@ -681,66 +352,14 @@ class TradeEngine:
         self._save_trade(trade)
         self.open_trades.append(trade)
 
-        # Hawk ladder: register
-        if self.ladder and trade.stop_loss:
-            self.ladder.register_trade(trade.asset, "SELL", trade.entry_price, trade.stop_loss, 1.0)
-
         # Execute via RPA if not dry run
-        rpa_success = True
         if not config.DRY_RUN:
-            if not self.rpa_executor:
-                logger.error("RPA executor not available for SELL %s — aborting", trade.asset)
-                self.open_trades.remove(trade)
-                return None
-            rpa_success = self.rpa_executor.execute_trade(trade)
-            if not rpa_success:
-                logger.error("RPA execution failed for SELL %s — reverting phantom", trade.asset)
-                try:
-                    self.open_trades.remove(trade)
-                except ValueError:
-                    pass
-                return None
-            # INSTITUTIONAL SUITE: Record execution for TCA
-            try:
-                fill_price = float(signal.entry_price or trade.entry_price or 0)
-                suite.on_execution(
-                    symbol=trade.asset, side="SELL",
-                    intended_price=fill_price, fill_price=fill_price,
-                    intended_size=1, filled_size=1,
-                    latency_ms=0.0,
-                )
-            except Exception as _e:
-                logger.debug("[INST] on_execution skipped: %s", _e)
-
-        # HAWK LOCK ACTIVATION (only if RPA succeeded)
-        self.target_lock_active = True
-        self.locked_asset = signal.asset
-        conf_val = getattr(signal.confidence, "value", signal.confidence)
-        score = 0.0
-        try:
-            score = float(getattr(signal, "confidence_score", 0.0) or 0.0)
-        except Exception:
-            pass
-        logger.info(
-            "[HAWK] QUALIFIED WINNER: %s | side=%s | confidence=%s | score=%.2f — LOCKING",
-            signal.asset, signal.action.value, conf_val, score,
-        )
-        logger.info("[HAWK] TARGET LOCKED: %s. Scanners suspended.", signal.asset)
-        self.suspend_scanners()
-
-        # Register for post-entry reversal detection
-        try:
-            reversal_detector.register_entry(
-                asset=trade.asset, side="SELL",
-                entry_price=trade.entry_price,
-                stop_loss=trade.stop_loss or 0.0,
-            )
-        except Exception:
-            pass
+            success = self.rpa_executor.execute_trade(trade)
+            if not success:
+                logger.error(f"RPA execution failed for SELL {trade.asset}")
 
         logger.info(
-            "EXECUTED SELL: %s @ %.2f | SL: %.2f | TP: %.2f",
-            trade.asset, trade.entry_price, trade.stop_loss, trade.take_profit
+            f"EXECUTED SELL: {trade.asset} @ {trade.entry_price} | SL: {trade.stop_loss} | TP: {trade.take_profit}"
         )
         return trade
 
@@ -770,20 +389,7 @@ class TradeEngine:
                 # Update ledger
                 self._update_trade(trade)
 
-                logger.info("CLOSED: %s | PnL: $%.2f", trade.asset, trade.pnl or 0)
-
-                # Hawk circuit breaker: record result
-                if self.governor and trade.pnl is not None:
-                    _pp = (trade.pnl / trade.entry_price * 100) if trade.entry_price > 0 else 0.0
-                    self.governor.record_trade_result(trade.pnl >= 0, _pp)
-
-                # Hawk ladder: clear
-                if self.ladder:
-                    self.ladder.clear_trade(trade.asset)
-
-                # HAWK: Resume scanners after position close via CLOSE signal
-                if self.target_lock_active and trade.asset == self.locked_asset:
-                    self.resume_scanners()
+                logger.info(f"CLOSED: {trade.asset} | PnL: ${trade.pnl:.2f}")
 
                 # Check if hit stop loss - start cooldown
                 if trade.pnl and trade.pnl < 0 and trade.stop_loss:
@@ -791,13 +397,12 @@ class TradeEngine:
                         seconds=config.COOLDOWN_AFTER_STOP
                     )
                     logger.warning(
-                        "Stop loss hit - cooldown for %ds",
-                        config.COOLDOWN_AFTER_STOP
+                        f"Stop loss hit - cooldown for {config.COOLDOWN_AFTER_STOP}s"
                     )
 
                 return trade
 
-        logger.warning("No open position found for %s", signal.asset)
+        logger.warning(f"No open position found for {signal.asset}")
         return None
 
     def _create_signal_record(self, signal: LLMAnalysisOutput) -> TradeRecord:
@@ -822,7 +427,7 @@ class TradeEngine:
             INSERT INTO trades (id, timestamp, asset, action, entry_price, stop_loss, take_profit, 
                                exit_price, pnl, confidence, ai_reason, mode, status, closed_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+        """,
             (
                 trade.id,
                 trade.timestamp.isoformat(),
@@ -848,7 +453,7 @@ class TradeEngine:
         cursor.execute(
             """
             UPDATE trades SET exit_price=?, pnl=?, status=?, closed_at=? WHERE id=?
-            """,
+        """,
             (
                 trade.exit_price,
                 trade.pnl,
@@ -859,251 +464,19 @@ class TradeEngine:
         )
         self.conn.commit()
 
-    # ==================== HAWK PROTOCOL METHODS ====================
-
-    def suspend_scanners(self):
-        """Halts all background scanning threads except for the locked asset."""
-        if hasattr(self, 'scanner_thread') and self.scanner_thread:
-            self.scanner_thread.paused = True
-            logger.info("[SYSTEM] Multi-ticker scanners PAUSED.")
-
-    def resume_scanners(self):
-        """Resumes scanning after position close."""
-        self.target_lock_active = False
-        self.locked_asset = None
-        if hasattr(self, 'scanner_thread') and self.scanner_thread:
-            self.scanner_thread.paused = False
-            logger.info("[SYSTEM] Multi-ticker scanners RESUMED.")
-
-    def update_trailing_stops(self):
-        """U-TURN RADAR & TRAILING STOP for locked asset."""
-        if not self.target_lock_active or not self.locked_asset:
-            return
-
-        # Get current price for locked asset
-        current_price = self.get_current_price(self.locked_asset)
-        if not current_price:
-            return
-
-        # Calculate Dynamic ATR Buffer
-        atr_value = self.calculate_atr(self.locked_asset, period=3)
-        if atr_value is None:
-            return
-        buffer = atr_value * 1.5  # 1:1.5 Risk Symmetry
-
-        position = self.get_open_position(self.locked_asset)
-        if not position:
-            self.resume_scanners()
-            return
-
-        # A10 FIX: trailing_stop is now COMPUTED, RATCHETED, and APPLIED to the
-        # underlying TradeRecord (was previously computed and discarded).
-        trailing_stop: Optional[float] = None
-        if position['type'] == 'BUY':
-            trailing_stop = current_price - buffer
-        elif position['type'] == 'SELL':
-            trailing_stop = current_price + buffer
-
-        if trailing_stop is not None and trailing_stop > 0:
-            try:
-                for trade in self.open_trades:
-                    if trade.asset == self.locked_asset:
-                        old_stop = float(trade.stop_loss or 0.0)
-                        is_long = (trade.action == SignalAction.BUY)
-                        # Ratchet: only move stop in the protective direction.
-                        ratchet_ok = (
-                            (is_long and trailing_stop > old_stop) or
-                            (not is_long and (old_stop == 0.0 or trailing_stop < old_stop))
-                        )
-                        if ratchet_ok and old_stop != trailing_stop:
-                            trade.stop_loss = trailing_stop
-                            logger.info(
-                                "[HAWK TRAIL] %s stop %.2f -> %.2f (buffer %.2f)",
-                                self.locked_asset, old_stop, trailing_stop, buffer,
-                            )
-                            # Push to ledger + ProfitLock
-                            self._update_trade(trade)
-                            try:
-                                self.profit_lock.update_position_stop(
-                                    self.locked_asset, trailing_stop,
-                                    reason="trailing_stop", break_even_locked=False,
-                                )
-                            except Exception:
-                                pass
-                            # Push to executor so the live stop is moved on TV.
-                            try:
-                                if self.rpa_executor and not config.DRY_RUN:
-                                    self.rpa_executor.update_stop(
-                                        self.locked_asset,
-                                        "BUY" if is_long else "SELL",
-                                        trailing_stop,
-                                    )
-                            except AttributeError:
-                                pass
-                            except Exception as _e:
-                                logger.debug("[HAWK TRAIL] executor update skipped: %s", _e)
-            except Exception as _e:
-                logger.error("[HAWK TRAIL] failed: %s", _e)
-
-        # U-TURN LOGIC: full reversal past entry -> bail
-        if position['type'] == 'BUY':
-            if current_price < position['entry_price']:  # Price fell below entry — reversal confirmed
-                logger.info("[HAWK U-TURN] Price reversed below entry on %s (%.2f < %.2f). Exiting.",
-                            self.locked_asset, current_price, position['entry_price'])
-                self.execute_global_profit_harvest(symbol=self.locked_asset)
-        elif position['type'] == 'SELL':
-            if current_price > position['entry_price']:  # Price rose above entry — reversal confirmed
-                logger.info("[HAWK U-TURN] Price reversed above entry on %s (%.2f > %.2f). Exiting.",
-                            self.locked_asset, current_price, position['entry_price'])
-                self.execute_global_profit_harvest(symbol=self.locked_asset)
-
-    def get_current_price(self, symbol: str) -> Optional[float]:
-        """Get current price for symbol from last known prices or market data."""
-        # Prefer per-symbol cache (updated by manage_open_trades on every tick)
-        if hasattr(self, '_last_prices') and symbol in self._last_prices:
-            return self._last_prices[symbol]
-        
-        # Fallback: last_indicators only if it's for the SAME symbol
-        if hasattr(self, 'last_indicators') and isinstance(self.last_indicators, dict):
-            ind_symbol = self.last_indicators.get("symbol", "")
-            if ind_symbol == symbol:
-                price = (self.last_indicators.get("current_price") or 
-                         self.last_indicators.get("close") or 
-                         self.last_indicators.get("last_close"))
-                if price:
-                    return float(price)
-        
-        # Check if we have it in stored prices dict (updated in manage_open_trades)
-        if hasattr(self, '_last_prices') and symbol in self._last_prices:
-            return self._last_prices[symbol]
-        
-        logger.warning("[HAWK] get_current_price not available for %s - no market data feed connected", symbol)
-        return None
-
-    def calculate_atr(self, symbol: str, period: int = 3) -> Optional[float]:
-        """Calculate ATR for symbol using loose ATR stops or simple estimation."""
-        try:
-            # Try to use the imported LooseATRStops class
-            if hasattr(self.atr_stops, 'calculate_atr'):
-                atr_value = self.atr_stops.calculate_atr(symbol, period)
-                if atr_value:
-                    return float(atr_value)
-            
-            # Fallback: Simple ATR calculation if we have price history
-            if hasattr(self, '_last_prices') and symbol in self._last_prices:
-                # Simplified: use 1% of current price as proxy for ATR
-                current_price = self._last_prices[symbol]
-                estimated_atr = current_price * 0.01 * period
-                logger.info("[HAWK] Using estimated ATR for %s: %.2f (based on %.2f price)", symbol, estimated_atr, current_price)
-                return estimated_atr
-            
-            logger.warning("[HAWK] calculate_atr not available for %s - no ATR data source", symbol)
-            return None
-        except Exception as e:
-            logger.error("[HAWK] Error calculating ATR for %s: %s", symbol, e)
-            return None
-
-    def get_open_position(self, symbol: str) -> Optional[dict]:
-        """Get open position for symbol (A11: now includes live pnl + qty)."""
-        for trade in self.open_trades:
-            if trade.asset == symbol:
-                # Live mark-to-market pnl based on the most recent tick.
-                live_price = self._last_prices.get(symbol)
-                pnl = 0.0
-                if live_price is not None and trade.entry_price:
-                    if trade.action == SignalAction.BUY:
-                        pnl = (live_price - trade.entry_price)
-                    else:
-                        pnl = (trade.entry_price - live_price)
-                # If the trade has a stored pnl (partial close), use that as a base.
-                if pnl == 0.0 and getattr(trade, "pnl", None) is not None:
-                    pnl = float(trade.pnl)
-                return {
-                    'type': trade.action.value,
-                    'side': trade.action.value,
-                    'entry_price': trade.entry_price,
-                    'stop_loss': trade.stop_loss,
-                    'take_profit': trade.take_profit,
-                    'quantity': int(getattr(trade, "quantity", 1) or 1),
-                    'pnl': float(pnl),
-                    'id': trade.id,
-                    'timestamp': trade.timestamp.isoformat() if trade.timestamp else None,
-                }
-        return None
-
-    def get_all_open_symbols(self) -> List[str]:
-        """Get all symbols with open positions."""
-        return [trade.asset for trade in self.open_trades]
-
-    def close_position(self, symbol: str) -> bool:
-        """Close position for symbol."""
-        for i, trade in enumerate(self.open_trades):
-            if trade.asset == symbol:
-                current_price = self.get_current_price(symbol) or trade.entry_price
-                self._close_trade_at_price(trade, current_price, "MANUAL_CLOSE")
-                return True
-        return False
-
-    def speak(self, msg: str):
-        """AI Narrator TTS. Override this with actual TTS implementation."""
-        logger.info("[AI NARRATOR] %s", msg)
-
-    def execute_global_profit_harvest(self, symbol=None):
-        """
-        Instantly closes positions. 
-        If symbol is provided, closes only that symbol (U-Turn).
-        If None, closes ALL (Manual Button Press).
-        """
-        symbols_to_close = [symbol] if symbol else self.get_all_open_symbols()
-        
-        total_profit = 0
-        for sym in symbols_to_close:
-            pos = self.get_open_position(sym)
-            if pos:
-                profit = pos.get('pnl', 0)
-                self.close_position(sym)
-                total_profit += profit
-                logger.info("[EXECUTION] Closed %s. Profit: $%.2f", sym, profit)
-        
-        # Reset State
-        self.resume_scanners()
-        
-        # Announce via AI Narrator
-        msg = "Harvest complete. Total profit: $%.2f. Scanners re-engaged." % total_profit
-        self.speak(msg)
-        
-        return total_profit
-
-    # ==================== END HAWK PROTOCOL METHODS ====================
-
-    def _get_price_dataframe(self, symbol: str):
-        """Get OHLCV DataFrame for a symbol from the scanner."""
-        try:
-            import yfinance as yf
-            ticker_map = {
-                "BTC-USD": "BTC-USD", "ETH-USD": "ETH-USD",
-                "NQ": "NQ=F", "ES": "ES=F", "MNQ": "MNQ=F", "MES": "MES=F",
-            }
-            yf_sym = ticker_map.get(symbol, symbol)
-            data = yf.Ticker(yf_sym)
-            df = data.history(period="1d", interval="1m")
-            return df if df is not None and len(df) > 0 else None
-        except Exception:
-            return None
-
     def get_performance_summary(self) -> dict:
         """Get trading performance summary"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM trades WHERE status LIKE 'CLOSED%'")
+        cursor.execute("SELECT COUNT(*) FROM trades WHERE status='CLOSED'")
         closed_count = cursor.fetchone()[0]
 
-        cursor.execute("SELECT SUM(pnl) FROM trades WHERE status LIKE 'CLOSED%'")
+        cursor.execute("SELECT SUM(pnl) FROM trades WHERE status='CLOSED'")
         total_pnl = cursor.fetchone()[0] or 0
 
-        cursor.execute("SELECT AVG(pnl) FROM trades WHERE status LIKE 'CLOSED%' AND pnl > 0")
+        cursor.execute("SELECT AVG(pnl) FROM trades WHERE status='CLOSED' AND pnl > 0")
         avg_win = cursor.fetchone()[0] or 0
 
-        cursor.execute("SELECT AVG(pnl) FROM trades WHERE status LIKE 'CLOSED%' AND pnl < 0")
+        cursor.execute("SELECT AVG(pnl) FROM trades WHERE status='CLOSED' AND pnl < 0")
         avg_loss = cursor.fetchone()[0] or 0
 
         return {
