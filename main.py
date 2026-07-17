@@ -876,6 +876,15 @@ class VcaniTradeEngine:
         _brain_conf = max(0.0, min(_brain_conf, 1.0))
         # Effective confidence: max of combined and brain, biased toward brain when it's strong.
         _effective_conf = max(confidence, _brain_conf) if _brain_conf >= 0.80 else confidence
+        # === FIX: Cap brain override for small models ===
+        # gemma:2b always returns 80% confidence even when wrong.
+        # Do not let the brain override bypass the floor unless the COMBINED confidence is also high.
+        if _brain_conf >= 0.80 and confidence < _conf_floor:
+            logger.info(
+                "[BRAIN-CAP] Brain confidence %.1f%% but combined only %.1f%% - NOT overriding floor",
+                _brain_conf * 100, confidence * 100,
+            )
+            _effective_conf = confidence  # Use combined, not brain
         if _effective_conf < _conf_floor:
             logger.info(
                 "[GUARD] Confidence too low for %s: %.1f%% combined / %.1f%% brain (need %.0f%% HAWK floor) — skipping %s",
