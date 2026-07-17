@@ -1903,7 +1903,7 @@ class VcaniTradeEngine:
                 current_peak = profit
             if current_peak > 0:
                 pullback_pct = (current_peak - profit) / current_peak
-                if pullback_pct > 0.30 and profit > 0:  # Tightened from 0.40 to 0.30
+                if pullback_pct > 0.10 and profit > 0:  # Tightened from 0.40 to 0.30
                     return True, f"U-TURN: Peak {current_peak:.2f}, now {profit:.2f} ({pullback_pct*100:.0f}% pullback)"
                 if profit < 0 and current_peak > 0:
                     return True, f"U-TURN: Was +{current_peak:.2f}, now {profit:.2f} - protect capital"
@@ -2221,7 +2221,7 @@ class VcaniTradeEngine:
                             _exit_reason = ""
                             
                             # Exit on 15% decline after peak (fast U-turn)
-                            if _decline_pct > 0.15:
+                            if _decline_pct > 0.10:
                                 _should_exit = True
                                 _exit_reason = f"PEAK-LOCK: {action} {ticker} peaked +{current_peak:.1f}, declined {_decline_pct*100:.0f}% -> exiting at +{pnl_pips:.1f}"
                             # OR exit after 7 seconds at any profit (time-based lock)
