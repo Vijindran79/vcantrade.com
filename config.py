@@ -75,7 +75,7 @@ VELEZ_REQUIRE_200EMA = os.getenv("VELEZ_REQUIRE_200EMA", "true").lower() == "tru
 # 0.0025 = 0.25% — blocks only CLEAR structure, lets marginal
 # pops/dips through so the flow-aligned scanner can trade.
 VELEZ_STRUCTURE_TOL = float(os.getenv("VELEZ_STRUCTURE_TOL", "0.0025"))
-VELEZ_CHART_INTERVAL = os.getenv("VELEZ_CHART_INTERVAL", "1m")
+VELEZ_CHART_INTERVAL = os.getenv("VELEZ_CHART_INTERVAL", "2m")
 
 # ===== MARKET STUDY / WARM-UP (observe before executing) =====
 # On board start (and when trading mode is activated) the bot studies the

@@ -693,7 +693,13 @@ class VcaniTradeEngine:
                     self._log_dashboard(f"[AGREE-GATE] brain={_brain_side} vs trade={action} (scanner-led, gates decide)")
                 except Exception:
                     pass
-                # Do NOT return — let the momentum/flow/Velez gates make the final call.
+                # logger.warning("[AGREE-GATE] BLOCKED %s %s - brain says %s but scanner says %s", action, ticker, _brain_side, action)
+                try:
+                    self._log_dashboard(f"[AGREE-GATE] BLOCKED {action} {ticker}: brain={_brain_side} vs scanner={action}")
+                except Exception:
+                    pass
+                return
+
             _auto_exec_threshold = float(getattr(config, "HAWK_AUTO_EXEC_CONFIDENCE_THRESHOLD", 0.68) or 0.68)
             if self.current_mode == "AUTONOMOUS" and action in {"BUY", "SELL"}:
                 logger.info("[AUTO] Dispatching autonomous execution for %s %s", action, ticker)
