@@ -693,12 +693,10 @@ class VcaniTradeEngine:
                     self._log_dashboard(f"[AGREE-GATE] brain={_brain_side} vs trade={action} (scanner-led, gates decide)")
                 except Exception:
                     pass
-                # logger.warning("[AGREE-GATE] BLOCKED %s %s - brain says %s but scanner says %s", action, ticker, _brain_side, action)
-                try:
-                    self._log_dashboard(f"[AGREE-GATE] BLOCKED {action} {ticker}: brain={_brain_side} vs scanner={action}")
-                except Exception:
-                    pass
-                return
+                # logger.info("[AGREE-GATE] Brain says %s but scanner says %s - trusting BRAIN (qwen2.5:7b)", _brain_side, action)
+                action = _brain_side
+                payload["action"] = _brain_side
+
 
             _auto_exec_threshold = float(getattr(config, "HAWK_AUTO_EXEC_CONFIDENCE_THRESHOLD", 0.68) or 0.68)
             if self.current_mode == "AUTONOMOUS" and action in {"BUY", "SELL"}:
