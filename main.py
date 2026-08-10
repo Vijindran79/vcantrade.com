@@ -1069,6 +1069,53 @@ class VcaniTradeEngine:
             except Exception:
                 pass
 
+    def suspend_scanners(self, ticker: str = ""):
+        """HAWK PROTOCOL: Suspend scanner loop during high-conviction trade management."""
+        if hasattr(self, "scanner_timer") and self.scanner_timer:
+            self.scanner_timer.stop()
+        logger.info("[HAWK] TARGET LOCKED: %s. Scanners suspended.", ticker or "GLOBAL")
+        self._log_dashboard(f"[HAWK] Scanners suspended for focus lock: {ticker}")
+
+    def resume_scanners(self):
+        """HAWK PROTOCOL: Resume background scanning cycle."""
+        if hasattr(self, "scanner_timer") and self.scanner_timer:
+            interval_ms = int(getattr(self, "_current_scan_interval_seconds", 2.5) * 1000)
+            self.scanner_timer.start(interval_ms)
+        logger.info("[HAWK] Scanners resumed.")
+        self._log_dashboard("[HAWK] Scanners resumed.")
+
+    def update_trailing_stops(self):
+        """HAWK PROTOCOL: Update trailing stops on active positions."""
+        self._run_position_exit_scan()
+
+    def execute_global_profit_harvest(self):
+        """HAWK PROTOCOL: Close all active positions to harvest profits across assets."""
+        logger.info("[HARVEST] Profit harvest executed")
+        self._log_dashboard("[HARVEST] Global profit harvest initiated")
+        for pos in list(self.positions):
+            ticker = pos.get("asset")
+            if ticker:
+                self.close_position(ticker)
+
+    def close_position(self, ticker: str):
+        """HAWK PROTOCOL: Close specific position by ticker."""
+        logger.info("[HAWK] Position closed: %s", ticker)
+        try:
+            if config.get_active_mode() == "TRADINGVIEW":
+                self.rpa_executor.flatten_position(ticker)
+            else:
+                self.trade_executor.close_position(ticker)
+        except Exception as exc:
+            logger.error("[HAWK] Error closing position for %s: %s", ticker, exc)
+        for i, pos in enumerate(list(self.positions)):
+            if pos.get("asset") == ticker:
+                self.positions.pop(i)
+                break
+        try:
+            self.asset_lock.release_ticker(ticker)
+        except Exception:
+            pass
+
     def execute_hardened_panic_reset(self):
         """Emergency containment hook used by AutomatedSignalBridge."""
         self.stop()

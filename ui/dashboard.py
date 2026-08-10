@@ -97,6 +97,13 @@ class CommandCenter(QWidget):
     test_browser_requested = pyqtSignal()
     force_test_trade_requested = pyqtSignal()
     user_command_sent = pyqtSignal(str)  # NEW: Co-Pilot Command Bridge
+    harvest_requested = pyqtSignal()  # HAWK PROTOCOL
+
+    def trigger_harvest(self):
+        """HAWK PROTOCOL: Trigger global profit harvest."""
+        logger.info("[HARVEST] Global harvest triggered from dashboard")
+        self.log("[HARVEST] Profit harvest requested from CommandCenter")
+        self.harvest_requested.emit()
 
     def __init__(self):
         super().__init__()

@@ -434,6 +434,7 @@ MICRO_BRAIN_MODEL = os.getenv("MICRO_BRAIN_MODEL", "qwen2.5:1.5b-instruct-q4_K_M
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_TIMEOUT = 180
+LLM_TIMEOUT = 180
 JSON_OUTPUT = True
 # Set BRAIN_AUDIT_LOG=true in .env to re-enable verbose per-call brain payload dumps.
 BRAIN_AUDIT_LOG = os.getenv("BRAIN_AUDIT_LOG", "false").lower() == "true"

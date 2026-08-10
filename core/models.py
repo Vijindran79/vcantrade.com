@@ -51,7 +51,7 @@ class TradeRecord(BaseModel):
     """Trade ledger record for performance tracking"""
 
     id: str = Field(default_factory=lambda: f"trade_{datetime.now(timezone.utc).timestamp()}")
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     asset: str
     action: SignalAction
     entry_price: float
@@ -116,7 +116,7 @@ class MarketDataPoint(BaseModel):
         super().__init__(**data)
 
     asset: str
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     price: float
     volume: Optional[float] = Field(default=0.0)
     price_change_1h: float = 0.0
@@ -136,7 +136,7 @@ class OverlaySignal(BaseModel):
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     reason: str
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def get_color_code(self) -> str:
         """Get color based on action"""
@@ -194,7 +194,7 @@ class DebateTranscript(BaseModel):
     cfo_full_statement: str = Field(default="", description="Liquidity agent full reasoning")
     vibe_context: Dict = Field(default_factory=dict, description="Structured Vibe state for execution memory")
     skip_reason: str = Field(default="", description="Reason debate agents were skipped")
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class WatchlistAlert(BaseModel):
@@ -211,7 +211,7 @@ class WatchlistAlert(BaseModel):
     )
     price_change_pct: float
     reason: str = Field(..., max_length=200)
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     triggered_swarm: bool = False  # Whether this alert was sent to Swarm for analysis
 
 
@@ -233,4 +233,4 @@ class TradeAutopsy(BaseModel):
         description="Plain English explanation of why trade won/lost",
     )
     lessons: list[str] = Field(default_factory=list, description="Actionable takeaways")
-    timestamp: datetime = Field(default_factory=datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
