@@ -107,17 +107,21 @@ class MT5TargetScanner(TargetScanner):
         self._mt5_initialized = False
 
     def _ensure_mt5(self):
-        if self._mt5_initialized:
-            return True
+        # mt5.initialize() is idempotent and cheap when already connected —
+        # always call it so the scanner self-heals if another component ever
+        # drops the process-wide session (previously we returned early on
+        # _mt5_initialized and silently got None ticks forever after a
+        # foreign mt5.shutdown()).
         try:
             import MetaTrader5 as mt5
             if mt5.initialize():
+                if not self._mt5_initialized:
+                    logger.info("[TARGET-SCAN] MT5 initialized")
                 self._mt5_initialized = True
-                logger.info("[TARGET-SCAN] MT5 initialized")
                 return True
-            else:
-                logger.error("[TARGET-SCAN] MT5 initialize() failed")
-                return False
+            logger.error("[TARGET-SCAN] MT5 initialize() failed")
+            self._mt5_initialized = False
+            return False
         except Exception as e:
             logger.error("[TARGET-SCAN] MT5 import failed: %s", e)
             return False

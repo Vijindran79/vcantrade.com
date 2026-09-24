@@ -14,11 +14,9 @@ Features:
 
 import asyncio
 import logging
-import base64
 import threading
 import time
-from typing import Optional, Dict, Any, Tuple
-from datetime import datetime
+from typing import Optional, Dict, Any
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
 import config
@@ -206,7 +204,7 @@ class BrowserAgent:
         if not price or price <= 0.0:
             try:
                 if self.page:
-                    price_text = await self.page.evaluate("""() => {
+                    price_text = await self.page.evaluate(r"""() => {
                         const nodes = Array.from(document.querySelectorAll('div, span, button, a'));
                         for (const node of nodes) {
                             const text = (node.textContent || '').replace(/,/g, '').trim();
@@ -224,19 +222,31 @@ class BrowserAgent:
 
         # --- stale detection ---
         if price and price > 0:
-            if self._last_price_value and abs(price - self._last_price_value) > 1e-6:
-                # price actually moved -> feed is live
+            if self._last_price_value == 0.0:
+                # First observation: record the baseline price/time so the
+                # freeze clock starts. Previously the baseline was only
+                # written in the "price moved" branch (which itself requires
+                # a non-zero baseline), so _feed_stale could never trigger
+                # and _heal_frozen_tab() never ran.
+                self._last_price_value = price
+                self._last_price_change_time = now
+            elif abs(price - self._last_price_value) > 1e-6:
+                # Price actually moved -> feed is live. Capture how long it
+                # was frozen BEFORE resetting the clock (the old code logged
+                # now - _last_price_change_time after zeroing it, i.e. 0s).
+                frozen_for = now - self._last_price_change_time
                 self._last_price_change_time = now
                 self._last_price_value = price
                 if self._feed_stale:
-                    logger.info("[STALE] Price feed recovered (last change %.1fs ago)", now - self._last_price_change_time)
+                    logger.info("[STALE] Price feed recovered (was frozen for %.1fs)", frozen_for)
                 self._feed_stale = False
             else:
-                # price present but unchanged -> check how long
-                if self._last_price_change_time and (now - self._last_price_change_time) > self._stale_threshold:
+                # Price present but unchanged -> check how long it has been frozen
+                frozen_for = now - self._last_price_change_time
+                if self._last_price_change_time and frozen_for > self._stale_threshold:
                     if not self._feed_stale:
                         logger.warning("[STALE] Price frozen for %.0fs (%.2f) — feed considered stale",
-                                     now - self._last_price_change_time, price)
+                                     frozen_for, price)
                     self._feed_stale = True
                     # auto-heal: reload the chart tab to unfreeze it (respect cooldown)
                     if (now - self._last_heal_time) > self._heal_cooldown:
@@ -319,7 +329,6 @@ class BrowserAgent:
                 return True
 
             except Exception as e:
-                err_text = str(e).lower()
                 # Transient connection errors: retry forever with backoff.
                 logger.warning("[CDP] Connect attempt %d failed: %s — retrying in %ds", attempt, e, delay)
                 # Clean up any half-open handles so the next attempt starts fresh.

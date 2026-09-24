@@ -53,8 +53,11 @@ class MarketDataFeed:
             if not mt5.initialize():
                 self._mt5_available = False
             else:
+                # Intentionally NOT calling mt5.shutdown() here: the MetaTrader5
+                # session is process-wide, and shutting down after this probe
+                # stripped the live connection held by MT5TargetScanner /
+                # MT5Executor (their subsequent calls silently returned None).
                 self._mt5_available = True
-                mt5.shutdown()
         except Exception:
             self._mt5_available = False
         self._last_mt5_check = now
@@ -63,8 +66,8 @@ class MarketDataFeed:
     def is_yfinance_available(self) -> bool:
         """yfinance is always available if installed."""
         try:
-            import yfinance  # noqa
-            return True
+            import yfinance  # noqa: F401
+            return yfinance is not None
         except ImportError:
             return False
 
@@ -114,7 +117,8 @@ class MarketDataFeed:
             symbol = self._to_mt5_symbol(ticker)
             # Try M1 timeframe
             rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, count)
-            mt5.shutdown()
+            # NOTE: no mt5.shutdown() here — the session is process-wide and
+            # MT5TargetScanner / MT5Executor share it (shutdown broke them).
             if rates is None or len(rates) == 0:
                 return None
             bars = []
@@ -144,7 +148,6 @@ class MarketDataFeed:
 
         try:
             import yfinance as yf
-            import pandas as pd
             yf_sym = self._to_yfinance_symbol(ticker)
 
             # Use 5d period at 1m interval for recent intraday data
@@ -305,10 +308,10 @@ class MarketDataFeed:
             }
             tf = tf_map.get(interval)
             if not tf:
-                mt5.shutdown()
                 return None
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
-            mt5.shutdown()
+            # NOTE: no mt5.shutdown() here — process-wide session shared with
+            # MT5TargetScanner / MT5Executor.
             if rates is None or len(rates) == 0:
                 return None
             bars = []
@@ -431,11 +434,17 @@ class MarketDataFeed:
 
     def _save_cache(self):
         try:
-            # Only persist tiny amount to avoid huge file
+            # Enforce the >=200-bar invariant (mirrors get_bars): a truncated
+            # dataset reloaded after a restart corrupts the 200-EMA and kills
+            # all signals, so short/sliced datasets are never persisted.
+            # Entries are capped to the 20 most recent tickers for file size.
             data = {}
             for k, v in list(self._cache.items())[-20:]:
-                data[k] = {"timestamp": v["timestamp"], "source": v["source"],
-                           "bars": v["bars"][-50:]}  # Keep last 50 bars
+                bars = v.get("bars") or []
+                if len(bars) < 200:
+                    continue
+                data[k] = {"timestamp": v["timestamp"], "source": v.get("source", "UNKNOWN"),
+                           "bars": bars}
             DATA_FEED_CACHE.write_text(json.dumps(data, default=str))
         except Exception as e:
             logger.debug("[FEED] Cache save error: %s", e)
@@ -444,8 +453,16 @@ class MarketDataFeed:
         try:
             if DATA_FEED_CACHE.exists():
                 data = json.loads(DATA_FEED_CACHE.read_text())
-                with self._lock:
-                    self._cache = data
+                if isinstance(data, dict):
+                    with self._lock:
+                        # Enforce the >=200-bar invariant on load as well:
+                        # legacy cache files were written with a 50-bar
+                        # truncation that corrupts the 200-EMA when served
+                        # after a restart — drop any short entry.
+                        self._cache = {
+                            k: v for k, v in data.items()
+                            if isinstance(v, dict) and len(v.get("bars") or []) >= 200
+                        }
         except Exception as e:
             logger.debug("[FEED] Cache load error: %s", e)
 

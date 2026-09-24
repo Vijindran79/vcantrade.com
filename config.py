@@ -397,6 +397,18 @@ TRADING_SURFACE = os.getenv("TRADING_SURFACE", "TRADINGVIEW_DESKTOP")
 # "TRADINGVIEW" = Physical mouse clicks on TradingView web/paper interface
 # "MT5" = Native MetaTrader 5 order execution
 ACTIVE_EXECUTION_SURFACE = os.getenv("ACTIVE_EXECUTION_SURFACE", "TRADINGVIEW").upper().strip()
+
+# ===== LEGACY EXECUTION KILL-SWITCH =====
+# The Playwright / GhostExecutor / RPA order path is RETIRED. It clicked the
+# TradingView Desktop UI to place orders, which is too slow and too fragile for
+# Apex's real-time trailing drawdown (see AUDIT.md, findings F1-F2).
+# Order execution now lives in tradovate-middleware/ (TradingView webhook ->
+# Tradovate REST). This flag makes SurfaceRouter.execute() a hard no-op so the
+# legacy PyQt app can still run as a dashboard/research tool but can NEVER
+# place a live order. Default True. Set to False ONLY if you have deliberately
+# re-armed the legacy path and understand the audit findings.
+LEGACY_EXECUTION_DISABLED = os.getenv("LEGACY_EXECUTION_DISABLED", "True").lower() == "true"
+
 DATA_SOURCE = os.getenv("DATA_SOURCE", "TRADINGVIEW").upper().strip()  # Live TV prices via CDP
 CHART_PATTERN_AGENT_ENABLED = os.getenv("CHART_PATTERN_AGENT_ENABLED", "True").lower() == "true"
 ALLOW_RPA_FALLBACK_COORDS = os.getenv("ALLOW_RPA_FALLBACK_COORDS", "True").lower() == "true"

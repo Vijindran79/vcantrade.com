@@ -2,13 +2,11 @@ import time
 import random
 import re
 import inspect
-import threading
 import asyncio
 import pyautogui
 import pygetwindow as gw
 import numpy as np
 import logging
-import pyperclip
 import config
 from core.human_behavior import human
 
@@ -111,8 +109,8 @@ class RPAExecutor:
     def _check_playwright(self):
         """Check if Playwright sync API is available."""
         try:
-            from playwright.sync_api import sync_playwright
-            return True
+            from playwright.sync_api import sync_playwright as _sync_playwright
+            return _sync_playwright is not None
         except Exception:
             logger.warning("[PLAYWRIGHT] Sync API not available - HTML injection disabled")
             return False
@@ -218,7 +216,7 @@ class RPAExecutor:
                     await asyncio.sleep(0.4)
                     await page.keyboard.press("Control+a")
                     await asyncio.sleep(0.1)
-                    await page.keyboard.type(sym, delay=30)
+                    await page.keyboard.type(tv_symbol, delay=30)
                     await asyncio.sleep(0.4)
                     await page.keyboard.press("Enter")
                 await asyncio.sleep(2.5)
@@ -547,7 +545,6 @@ class RPAExecutor:
                 return False
 
             # If page is sync Playwright, wrap it for async operations
-            is_async = asyncio.iscoroutinefunction(getattr(page, 'mouse', None).move) if hasattr(page, 'mouse') else False
 
             async def _human_sequence():
                 # 1. Glance at chart (scroll a bit)
@@ -637,17 +634,17 @@ class RPAExecutor:
                         current_url = loop.run_until_complete(page.evaluate("() => window.location.href"))
                         if "tradingview.com/chart" in str(current_url):
                             # Use TradingView's symbol search via JavaScript
-                            loop.run_until_complete(page.evaluate(f"""() => {{
+                            loop.run_until_complete(page.evaluate("""() => {
                                 // Find the symbol search input
                                 const searchInput = document.querySelector('input[data-name="symbol-search-input"]') 
                                     || document.querySelector('.input-3lfOzrSj')
                                     || document.querySelector('#header-toolbar-symbol-search input');
-                                if (searchInput) {{
+                                if (searchInput) {
                                     searchInput.focus();
                                     searchInput.value = '';
-                                    searchInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                }}
-                            }}"""))
+                                    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                }
+                            }"""))
                             time.sleep(0.2)
                             
                             # Type the symbol
@@ -701,8 +698,24 @@ class RPAExecutor:
         Uses JavaScript injection for maximum reliability.
 
         UPDATED: Now uses simple_cdp_browser (WebSocket CDP) to bypass Playwright timeout.
-        Falls back to pyautogui coordinate clicking if simple CDP fails.
+        Falls back to pyautogui coordinate clicking if simple CDP fails, then to
+        the full Playwright DOM flow (tab verification, watchlist validation,
+        screenshots, order-quantity setting, JS order-panel discovery) as last
+        resort.
         """
+        # Resolve the active TradingView page up-front: the DOM flow below
+        # needs it (it previously sat unreachable after a `return False` inside
+        # the except handler and referenced an undefined `page`).
+        page = getattr(browser_agent, 'page', None)
+        if page is not None:
+            try:
+                if page.is_closed():
+                    page = None
+            except Exception:
+                page = None
+        if page is None:
+            page = self._get_active_tradingview_page(browser_agent)
+
         try:
             logger.info(f"[SIMPLE-CLICK] {action} {ticker} on current chart (no navigation)")
 
@@ -731,14 +744,20 @@ class RPAExecutor:
                 else:
                     logger.warning(f"[SIMPLE-CLICK] Simple CDP click failed for {action}, trying pyautogui fallback")
 
-# FALLBACK: Use pyautogui to click at TradingView button coordinates
+            # FALLBACK: Use pyautogui to click at TradingView button coordinates
             logger.info(f"[SIMPLE-CLICK] Using pyautogui fallback for {action}")
-            return self._click_via_controlled_page(f"{action.lower()}_button", "simple-click-fallback")
+            if self._click_via_controlled_page(f"{action.lower()}_button", "simple-click-fallback"):
+                return True
 
-        except Exception as e:
-            logger.error(f"[SIMPLE-CLICK] Exception: {str(e)[:200]}")
-            self.last_failure_reason = f"simple_click exception: {str(e)[:100]}"
-            return False
+            # LAST RESORT: full Playwright DOM flow — tab verification,
+            # watchlist validation, pre/post screenshots, order-quantity
+            # setting, JS order-panel discovery and click verification.
+            # This block previously followed a `return False` inside the
+            # except handler and could never execute.
+            if page is None:
+                logger.error("[SIMPLE-CLICK] No TradingView page available for DOM click flow")
+                self.last_failure_reason = "no TradingView page available"
+                return False
 
             # Log the EXACT tab the bot is interacting with
             try:
@@ -1084,7 +1103,7 @@ class RPAExecutor:
                     logger.error(f"[SIMPLE-CLICK] All Playwright click strategies failed: {click_err}")
 
                 if not clicked:
-                    logger.error(f"[SIMPLE-CLICK] CRITICAL: Found button but could not click it via Playwright")
+                    logger.error("[SIMPLE-CLICK] CRITICAL: Found button but could not click it via Playwright")
                     self.last_failure_reason = "found button but Playwright click failed"
                     return False
 
@@ -1158,7 +1177,7 @@ class RPAExecutor:
                         logger.info(f"[SIMPLE-CLICK-VERIFY] Order CONFIRMED: {verify_reason}")
                     else:
                         verify_reason = "no order confirmation signal in DOM"
-                        logger.warning(f"[SIMPLE-CLICK-VERIFY] NO order confirmation. Click may not have worked.")
+                        logger.warning("[SIMPLE-CLICK-VERIFY] NO order confirmation. Click may not have worked.")
                         logger.warning(f"[SIMPLE-CLICK-VERIFY] Check BEFORE_CLICK_{action}_{ticker}.png and AFTER_{action}_{ticker}.png in logs/screenshots/")
                 except Exception as v_err:
                     logger.debug(f"[SIMPLE-CLICK-VERIFY] Exception: {v_err}")
@@ -1166,7 +1185,7 @@ class RPAExecutor:
 
                 if not verified:
                     logger.warning(f"[SIMPLE-CLICK] VERIFICATION FAILED: {verify_reason}")
-                    logger.warning(f"[SIMPLE-CLICK] Not tracking position — order likely NOT placed at broker.")
+                    logger.warning("[SIMPLE-CLICK] Not tracking position — order likely NOT placed at broker.")
                     self.last_failure_reason = f"click at ({result['x']:.0f},{result['y']:.0f}) on '{result['text']}' but no order confirmed: {verify_reason[:80]}"
                     return False
 
@@ -1373,24 +1392,9 @@ class RPAExecutor:
     # execute_hardened_tv_bracket_order is an alias for execute_protected_tradingview_bracket
     execute_hardened_tv_bracket_order = execute_protected_tradingview_bracket
 
-    def execute_emergency_panic_flatten(self, browser_agent) -> bool:
-        """Forcefully suspends active listeners and issues absolute macro hotkeys to flatten open account risk."""
-        try:
-            logger.critical("[PANIC] Transmitting physical master account liquidation key mapping sequence to screen space.")
-            with browser_agent.lock:
-                browser_agent.pause_cdp_listener = True
-                pyautogui.press('escape')
-                time.sleep(0.05)
-                pyautogui.hotkey('alt', 'space')
-                time.sleep(0.2)
-                pyautogui.press('enter')
-                browser_agent.pause_cdp_listener = False
-            return True
-        except Exception as e:
-            logger.error(f"[PANIC-FAIL] Macro transmission failure: {str(e)}")
-            if 'browser_agent' in locals():
-                browser_agent.pause_cdp_listener = False
-            return False
+    # NOTE: execute_emergency_panic_flatten() is defined once near the end of
+    # this class — the canonical version (staged keystrokes, paced timing and
+    # guaranteed CDP-listener reset) was previously shadowed by a duplicate here.
 
     @staticmethod
     def _is_missing_dialog_error(exc):
@@ -1638,7 +1642,6 @@ class RPAExecutor:
 
         try:
             # STRATEGY 1: Playwright locator with physical mouse click
-            import re
             pattern = re.compile(action_lower, re.IGNORECASE)
             locator_strategies = [
                 page.get_by_role("button", name=pattern),
@@ -1809,7 +1812,6 @@ class RPAExecutor:
                 """Pull the first valid dollar amount from text, return float or None."""
                 if not text:
                     return None
-                import re
                 # Match $xx,xxx.xx or xx,xxx.xx or $xxxx.xx
                 matches = re.findall(r"[\$\s]*([\d,]+\.?\d*)", text)
                 for raw in matches:
@@ -2852,7 +2854,6 @@ class RPAExecutor:
         Handles TradingView format: 'MNQ1! CME_MINI TradingView'"""
         if not ticker:
             return []
-        import re
         raw = str(ticker).strip().upper()
         # Strip exchange prefix: CME_MINI:MNQ1! -> MNQ1!
         after_colon = raw.split(":", 1)[-1] if ":" in raw else raw
@@ -2927,7 +2928,6 @@ class RPAExecutor:
         """Reject order confirmations that mention a different contract family."""
         if not ticker_hint:
             return False
-        import re
         text_up = str(text or "").upper()
         expected = self._ticker_contract_family(ticker_hint)
         known_roots = {
@@ -3192,15 +3192,14 @@ class RPAExecutor:
                 time.sleep(_weighted_hesitation(0.3, 1.2))  # Human reaction delay
 
             # 1. Attempt Visual Pixel Search (The 'Eyes')
-            screenshot = pyautogui.screenshot(
+            # Capture the window region for pixel matching; the match logic
+            # is a placeholder and falls back to configured coordinates.
+            pyautogui.screenshot(
                 region=(window.left, window.top, window.width, window.height)
             )
-            found_coords = None
-
             # Simplified scan logic (looking for the button's unique color)
-            # This replaces the old fixed X/Y offsets
-            img_data = np.array(screenshot)
-            # [Logic to find color center omitted for brevity, using fallback if not found]
+            # This replaces the old fixed X/Y offsets. Pixel-match logic is a
+            # placeholder; screenshot retained for future visual matching.
 
             # 2. Execution Move (Bezier Curve)
             target_x, target_y = config.FALLBACK_COORDS.get(target_key, (960, 540))

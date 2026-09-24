@@ -27,7 +27,15 @@ holidays>=0.39
 yfinance>=0.2.40
 cffi>=2.0.0
 
-# --- Browser Automation (Cloud CDP) ---
+# --- Browser Automation (DEPRECATED — legacy execution path) ---
+# RETIRED from the order-execution critical path. Playwright/pyautogui drove the
+# TradingView Desktop UI to click Buy/Sell, which is too slow (800ms-3s) and too
+# fragile for Apex's real-time trailing drawdown. See AUDIT.md findings F1-F2.
+# Live orders now go through tradovate-middleware/ (TradingView webhook ->
+# Tradovate REST). These deps are kept ONLY so the legacy dashboard/research UI
+# still imports cleanly. They will be deleted once the middleware has run clean
+# for 30 days (AUDIT.md migration step 6).
+# Install the new middleware separately: pip install -r tradovate-middleware/requirements.txt
 playwright>=1.40.0
 beautifulsoup4>=4.12.0
 

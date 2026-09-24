@@ -105,6 +105,22 @@ class SurfaceRouter:
         if action_up not in {"BUY", "SELL", "CLOSE", "FLATTEN"}:
             return RouteResult(False, "router", 0.0, f"Unsupported action: {action_up}")
 
+        if getattr(config, "LEGACY_EXECUTION_DISABLED", True):
+            logger.error(
+                "[ROUTER] BLOCKED %s %s — legacy browser/RPA execution is disabled. "
+                "Orders must flow through tradovate-middleware/ (TradingView webhook -> "
+                "Tradovate REST). See AUDIT.md findings F1-F2. To re-arm the legacy path, "
+                "set LEGACY_EXECUTION_DISABLED=False (NOT RECOMMENDED for live Apex accounts).",
+                action_up, symbol,
+            )
+            return RouteResult(
+                False,
+                "router",
+                0.0,
+                "Legacy execution disabled (LEGACY_EXECUTION_DISABLED=True). "
+                "Use tradovate-middleware for order execution.",
+            )
+
         surface = get_active_surface()
         started = time.perf_counter()
 

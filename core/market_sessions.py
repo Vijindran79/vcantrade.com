@@ -11,7 +11,7 @@ This transforms the bot from a "blind scanner" to a "context-aware predator."
 """
 
 import logging
-from datetime import datetime, timezone, time
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from enum import Enum
 from dataclasses import dataclass
@@ -61,13 +61,10 @@ MARKET_SCHEDULES = {
     "Crypto": MarketHours("Crypto", 0, 23, 0, 23, True),  # 24/7
 }
 
-# Early close definitions (UTC hour when market closes)
-EARLY_CLOSE_SCHEDULE = {
-    # US Early Closes
-    "Black Friday": (11, 4, "Friday after Thanksgiving"),  # Closes 1 PM EST = 18 UTC
-    "Christmas Eve": (12, 24, "Christmas Eve"),  # Closes 1 PM EST = 18 UTC
-    "July 3rd (if weekday)": (7, 3, "Independence Day Eve"),  # Closes 1 PM EST
-}
+# Early-close detection lives in MarketSessionDetector._check_early_close()
+# (Black Friday is computed from Thanksgiving; Christmas Eve and July 3 are
+# fixed dates). The former EARLY_CLOSE_SCHEDULE dict was never referenced
+# anywhere and encoded an incorrect Black Friday date, so it was removed.
 
 # Initialize holiday calendars
 US_HOLIDAYS = holidays.US(years=datetime.now(timezone.utc).year)
@@ -233,7 +230,9 @@ class MarketSessionDetector:
         # Check Black Friday (day after Thanksgiving)
         thanksgiving = self._get_thanksgiving(now.year)
         black_friday = thanksgiving.replace(day=thanksgiving.day + 1)
-        if now.date() == black_friday:
+        # now.date() is a `date` but black_friday is a `datetime` — comparing
+        # date == datetime is always False, so this never matched before.
+        if now.date() == black_friday.date():
             return True, "Black Friday (Early Close 1 PM EST)", 18  # 18 UTC = 1 PM EST
         
         # Check Christmas Eve
@@ -533,7 +532,6 @@ class MarketSessionDetector:
         
         # Log session info
         session_name = primary_session.value
-        market_count = len(active_markets)
         
         logger.info(
             f"[CLOCK] SESSION DETECTED: {session_name} Session | "
@@ -650,7 +648,6 @@ class MarketSessionDetector:
 
     def get_session_status_log(self) -> str:
         """Get formatted status string for heartbeat logging."""
-        now = self.get_current_datetime()
         active_markets, primary_session = self.detect_active_sessions()
         is_peak = self.is_peak_volatility()
         

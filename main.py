@@ -1097,25 +1097,6 @@ class VcaniTradeEngine:
             if ticker:
                 self.close_position(ticker)
 
-    def close_position(self, ticker: str):
-        """HAWK PROTOCOL: Close specific position by ticker."""
-        logger.info("[HAWK] Position closed: %s", ticker)
-        try:
-            if config.get_active_mode() == "TRADINGVIEW":
-                self.rpa_executor.flatten_position(ticker)
-            else:
-                self.trade_executor.close_position(ticker)
-        except Exception as exc:
-            logger.error("[HAWK] Error closing position for %s: %s", ticker, exc)
-        for i, pos in enumerate(list(self.positions)):
-            if pos.get("asset") == ticker:
-                self.positions.pop(i)
-                break
-        try:
-            self.asset_lock.release_ticker(ticker)
-        except Exception:
-            pass
-
     def execute_hardened_panic_reset(self):
         """Emergency containment hook used by AutomatedSignalBridge."""
         self.stop()

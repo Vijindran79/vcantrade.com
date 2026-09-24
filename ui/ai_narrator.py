@@ -19,12 +19,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QSlider, QComboBox, QApplication
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, pyqtSignal, QPropertyAnimation, 
-    QEasingCurve, QVariantAnimation, QEventLoop, QSize
+    Qt, QTimer, pyqtSignal, QEventLoop, QSize
 )
 from PyQt6.QtGui import (
-    QFont, QColor, QPainter, QBrush, QPen,
-    QLinearGradient, QFontMetrics, QIcon
+    QColor, QPainter, QBrush, QPen,
+    QLinearGradient
 )
 from datetime import datetime
 import logging
@@ -1254,19 +1253,6 @@ class AINarratorOverlayClassWindow(GlassmorphicPanel):
         if now - last >= throttle:
             self._last_scan_activity[ticker_label] = now
             self.add_activity("[SCAN]", f"Scanning {ticker_label} live", datetime.now().strftime("%H:%M:%S"))
-
-    def set_watchlist(self, tickers: list[str]):
-        """Replace live watchlist badge rows in the mirror."""
-        for label in self.ticker_status_labels.values():
-            self.watchlist_status_layout.removeWidget(label)
-            label.deleteLater()
-        self.ticker_status_labels = {}
-
-        for ticker in tickers:
-            label = QLabel(f"[WHITE] {ticker}")
-            label.setStyleSheet("color: #E6EDF3; font-size: 11px; background: transparent;")
-            self.watchlist_status_layout.addWidget(label)
-            self.ticker_status_labels[ticker] = label
 
     def update_ticker_status(self, ticker: str, status: str):
         """Update a per-ticker badge in the mirror."""
