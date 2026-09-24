@@ -1,0 +1,14 @@
+# Runtime state: Apex risk counters, kill switch, simulated orders.
+# Never commit — a stale risk_state.json would silently cap the next session.
+state/
+
+# Local secrets (also covered by the repo-root .gitignore)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/

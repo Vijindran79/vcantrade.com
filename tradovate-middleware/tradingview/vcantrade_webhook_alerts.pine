@@ -1,0 +1,103 @@
+//@version=5
+// ===========================================================================
+// vcantrade -> Tradovate webhook alerts
+// ---------------------------------------------------------------------------
+// Emits the exact JSON that the middleware validates (app/models.py,
+// TradingViewSignal). One alert message = one signal.
+//
+// TradingView alert dialog settings:
+//   Condition   : this indicator -> "Any alert() function call"
+//   Webhook URL : https://<host>/webhook/tradingview/<WEBHOOK_API_KEY>
+//   Message     : leave the dialog text as-is; alert() supplies the body
+//
+// The key and the contract mapping (MNQ1! -> MNQM6 ...) live server-side in
+// app/config.py and app/symbols.py, so this script never needs editing when
+// the front month rolls.
+//
+// The signal logic below (EMA cross + ATR bracket) is a placeholder: replace
+// the "signal" block with your own. The only thing the middleware cares about
+// is the alert() payload contract, which is fixed:
+//
+//   signal_id, action(BUY|SELL|FLATTEN), symbol, quantity,
+//   entry_price, stop_loss, take_profit, timestamp_ms
+//
+// Every entry MUST carry stop_loss: the middleware rejects a bracketed order
+// without one (REQUIRE_EXPLICIT_STOP), because Apex fails an account that ever
+// holds a naked position.
+// ===========================================================================
+indicator("vcantrade -> Tradovate webhook", overlay = true, max_labels_count = 500)
+
+// ---------------------------------------------------------------- inputs
+grpSig = "Signal"
+lenFast = input.int(9, "Fast EMA", minval = 1, group = grpSig)
+lenSlow = input.int(21, "Slow EMA", minval = 2, group = grpSig)
+useTrendFilter = input.bool(true, "Trade only with the trend", group = grpSig)
+lenTrend = input.int(200, "Trend EMA", minval = 2, group = grpSig)
+allowLong = input.bool(true, "Take longs", group = grpSig)
+allowShort = input.bool(true, "Take shorts", group = grpSig)
+flattenOnFlip = input.bool(true, "Send FLATTEN when the signal flips", group = grpSig, tooltip = "The broker already holds the protective stop and limit, so a FLATTEN is only needed if you want the middleware to exit a still-open position when the signal reverses.")
+
+grpOrder = "Order"
+contracts = input.int(1, "Contracts per alert", minval = 1, group = grpOrder, tooltip = "Must be <= MAX_CONTRACTS_PER_ORDER, otherwise the middleware rejects the alert with MAX_CONTRACTS.")
+atrLen = input.int(14, "ATR length", minval = 1, group = grpOrder)
+stopMult = input.float(1.5, "Stop = ATR x", minval = 0.1, step = 0.1, group = grpOrder)
+tpMult = input.float(3.0, "Target = ATR x", minval = 0.1, step = 0.1, group = grpOrder)
+
+// ---------------------------------------------------------------- signal
+fast = ta.ema(close, lenFast)
+slow = ta.ema(close, lenSlow)
+trend = ta.ema(close, lenTrend)
+atr = ta.atr(atrLen)
+
+// Warm-up guard: a zero ATR would produce a stop equal to the entry price,
+// which the middleware correctly rejects as a nonsensical bracket.
+ready = not na(fast) and not na(slow) and not na(trend) and atr > 0
+
+longSignal = ready and ta.crossover(fast, slow) and (not useTrendFilter or close > trend)
+shortSignal = ready and ta.crossunder(fast, slow) and (not useTrendFilter or close < trend)
+
+// ---------------------------------------------------------------- payloads
+// TradingView posts whatever string alert() was given, so the payload is built
+// here as a single-line JSON object. #.00 keeps the price format to two
+// decimals (NQ/MNQ tick 0.25), which the middleware re-rounds to the tick.
+jsonEntry(string action, float entryPx, float stopPx, float targetPx) =>
+    '{"signal_id":"' + syminfo.ticker + "-" + action + "-" + str.tostring(bar_index) + "-" + str.tostring(time) +
+     '","action":"' + action +
+     '","symbol":"' + syminfo.ticker +
+     '","quantity":' + str.tostring(contracts) +
+     ',"entry_price":' + str.tostring(entryPx, "#.00") +
+     ',"stop_loss":' + str.tostring(stopPx, "#.00") +
+     ',"take_profit":' + str.tostring(targetPx, "#.00") +
+     ',"timestamp_ms":' + str.tostring(time) + '}'
+
+// A FLATTEN has no bracket, so the price fields are omitted entirely - the
+// schema declares them gt=0 and zero would be a validation error.
+jsonFlatten() =>
+    '{"signal_id":"' + syminfo.ticker + "-FLATTEN-" + str.tostring(bar_index) + "-" + str.tostring(time) +
+     '","action":"FLATTEN"' +
+     ',"symbol":"' + syminfo.ticker +
+     '","quantity":' + str.tostring(contracts) + '}'
+
+// ---------------------------------------------------------------- alerts
+// freq_once_per_bar_close: the alert fires on a confirmed bar, never intrabar,
+// so a repainting signal cannot send two contradictory alerts.
+var int posState = 0 // 0 flat, 1 long, -1 short; mirrors what we told the broker
+
+if longSignal and allowLong
+    if posState == -1 and flattenOnFlip
+        alert(jsonFlatten(), alert.freq_once_per_bar_close)
+    alert(jsonEntry("BUY", close, close - atr * stopMult, close + atr * tpMult), alert.freq_once_per_bar_close)
+    posState := 1
+
+if shortSignal and allowShort
+    if posState == 1 and flattenOnFlip
+        alert(jsonFlatten(), alert.freq_once_per_bar_close)
+    alert(jsonEntry("SELL", close, close + atr * stopMult, close - atr * tpMult), alert.freq_once_per_bar_close)
+    posState := -1
+
+// ---------------------------------------------------------------- visuals
+plot(fast, "Fast EMA", color.new(color.aqua, 0))
+plot(slow, "Slow EMA", color.new(color.fuchsia, 0))
+plot(useTrendFilter ? trend : na, "Trend EMA", color.new(color.gray, 0))
+plotshape(longSignal and allowLong, "BUY alert", shape.triangleup, location.belowbar, color.new(color.teal, 0), size = size.tiny)
+plotshape(shortSignal and allowShort, "SELL alert", shape.triangledown, location.abovebar, color.new(color.orange, 0), size = size.tiny)
